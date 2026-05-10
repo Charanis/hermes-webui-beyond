@@ -3598,6 +3598,10 @@ def handle_get(handler, parsed) -> bool:
             {"name": get_active_profile_name(), "path": str(get_active_hermes_home())},
         )
 
+    # ── Profile Files API (GET) ──
+    if parsed.path == "/api/profile/files":
+        return _handle_profile_file_read(handler, parsed)
+
     # ── Gateway Status (GET) ──
     if parsed.path == "/api/gateway/status":
         import datetime
@@ -4514,6 +4518,10 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, _sanitize_error(e))
         except RuntimeError as e:
             return bad(handler, str(e), 409)
+
+    # ── Profile Files API (POST) ──
+    if parsed.path == "/api/profile/files":
+        return _handle_profile_file_write(handler, body)
 
     # ── Settings (POST) ──
     if parsed.path == "/api/settings":
@@ -6257,6 +6265,67 @@ def _handle_memory_read(handler):
             "user_mtime": user_file.stat().st_mtime if user_file.exists() else None,
         },
     )
+
+
+# ── Profile file read/write ──────────────────────────────────────────────────
+
+_PROFILE_FILE_WHITELIST = {"SOUL.md", "config.yaml", ".env", "memories/MEMORY.md", "memories/USER.md"}
+
+
+def _handle_profile_file_read(handler, parsed):
+    """Read a whitelisted file from a named profile directory."""
+    from api.profiles import _resolve_profile_home_for_name
+    from urllib.parse import parse_qs
+    qs = parse_qs(parsed.query)
+    name = qs.get("name", [""])[0].strip()
+    filename = qs.get("file", [""])[0].strip()
+    if not filename:
+        return bad(handler, "file is required")
+    if filename not in _PROFILE_FILE_WHITELIST:
+        return bad(handler, f"File not editable: {filename}", 403)
+    try:
+        profile_home = _resolve_profile_home_for_name(name or "default")
+    except Exception as e:
+        return bad(handler, str(e), 404)
+    target = (profile_home / filename).resolve()
+    try:
+        target.relative_to(profile_home.resolve())
+    except ValueError:
+        return bad(handler, "Invalid file path", 403)
+    if not target.exists():
+        return j(handler, {"content": "", "file": filename, "profile": name or "default", "exists": False})
+    try:
+        content = target.read_text(encoding="utf-8", errors="replace")
+        return j(handler, {"content": content, "file": filename, "profile": name or "default", "exists": True})
+    except (PermissionError, OSError) as e:
+        return bad(handler, str(e))
+
+
+def _handle_profile_file_write(handler, body):
+    """Write content to a whitelisted file in a named profile directory."""
+    from api.profiles import _resolve_profile_home_for_name
+    name = body.get("name", "").strip()
+    filename = body.get("file", "").strip()
+    content = body.get("content", "")
+    if not filename:
+        return bad(handler, "file is required")
+    if filename not in _PROFILE_FILE_WHITELIST:
+        return bad(handler, f"File not editable: {filename}", 403)
+    try:
+        profile_home = _resolve_profile_home_for_name(name or "default")
+    except Exception as e:
+        return bad(handler, str(e), 404)
+    target = (profile_home / filename).resolve()
+    try:
+        target.relative_to(profile_home.resolve())
+    except ValueError:
+        return bad(handler, "Invalid file path", 403)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        target.write_text(content, encoding="utf-8")
+        return j(handler, {"ok": True, "file": filename, "profile": name or "default"})
+    except (PermissionError, OSError) as e:
+        return bad(handler, str(e))
 
 
 # ── POST route helpers ────────────────────────────────────────────────────────

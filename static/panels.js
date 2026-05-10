@@ -4116,17 +4116,96 @@ function _renderProfileDetail(p, activeName){
   rows.push(`<div class="detail-row"><div class="detail-row-label">API key</div><div class="detail-row-value">${p.has_env ? esc(t('profile_api_keys_configured')) : '<span style="color:var(--muted)">Not configured</span>'}</div></div>`);
   if (typeof p.skill_count === 'number') rows.push(`<div class="detail-row"><div class="detail-row-label">Skills</div><div class="detail-row-value">${esc(t('profile_skill_count', p.skill_count))}</div></div>`);
   if (p.default_workspace) rows.push(`<div class="detail-row"><div class="detail-row-label">Default space</div><div class="detail-row-value"><code>${esc(p.default_workspace)}</code></div></div>`);
+    const _fileIcons = {'SOUL.md': '✨', 'config.yaml': '⚙️', '.env': '🔑', 'memories/MEMORY.md': '🧠', 'memories/USER.md': '👤'};
+  const _fileLabels = {'SOUL.md': 'SOUL.md', 'config.yaml': 'config.yaml', '.env': '.env', 'memories/MEMORY.md': 'Agent Memory', 'memories/USER.md': 'User Profile'};
+    const _profileFiles = ['SOUL.md', 'config.yaml', '.env', 'memories/MEMORY.md', 'memories/USER.md'];
+  const fileRows = _profileFiles.map(f => {
+    const label = _fileLabels[f] || f;
+    return `<div class="detail-row" style="cursor:pointer" onclick="_openProfileFileEditor('${esc(p.name)}','${f}')">
+      <div class="detail-row-label">${_fileIcons[f] || '📄'} ${esc(label)}</div>
+      <div class="detail-row-value" style="justify-content:flex-end">
+        <span style="color:var(--link);font-size:11px">Edit →</span>
+      </div>
+    </div>`;
+  }).join('');
   body.innerHTML = `
     <div class="main-view-content">
       <div class="detail-card">
         <div class="detail-card-title">Profile</div>
         ${rows.join('')}
       </div>
+      <div class="detail-card" style="margin-top:12px">
+        <div class="detail-card-title">Profile Files</div>
+        ${fileRows}
+      </div>
     </div>`;
   body.style.display = '';
   if (empty) empty.style.display = 'none';
   _profileMode = 'read';
   _setProfileHeaderButtons('read', p, activeName);
+}
+
+
+async function _openProfileFileEditor(profileName, filename) {
+  const body = $('profileDetailBody');
+  const title = $('profileDetailTitle');
+  if (!body || !title) return;
+  const _editorLabels = {'SOUL.md': 'SOUL.md', 'config.yaml': 'config.yaml', '.env': '.env', 'memories/MEMORY.md': 'Agent Memory', 'memories/USER.md': 'User Profile'};
+  const friendlyName = _editorLabels[filename] || filename;
+  title.innerHTML = `<span style="cursor:pointer;color:var(--link)" onclick="openProfileDetail('${esc(profileName)}')">${esc(profileName)}</span> / ${esc(friendlyName)}`;
+  body.innerHTML = '<div style="padding:16px;color:var(--muted);font-size:12px">Loading...</div>';
+  body.style.display = '';
+  try {
+    const qs = new URLSearchParams({name: profileName, file: filename});
+    const data = await api('/api/profile/files?' + qs);
+    const fileContent = (data && data.content != null) ? data.content : '';
+    const placeholder = filename === 'SOUL.md'
+      ? 'Define the agent personality, mission, and behavioral rules...'
+      : filename === 'config.yaml'
+      ? 'YAML configuration for model, provider, agent settings...'
+      : filename === 'memories/MEMORY.md'
+      ? 'Agent persistent memory - facts, patterns, and learned context...'
+      : filename === 'memories/USER.md'
+      ? 'User profile - preferences, communication style, personal context...'
+      : 'Environment variables (KEY=value per line)...';
+    body.innerHTML = `
+      <div class="main-view-content">
+        <div class="detail-card">
+          <div style="display:flex;justify-content:flex-end;gap:8px;margin-bottom:8px">
+            <button class="panel-head-btn has-tooltip has-tooltip--bottom" data-tooltip="Back" onclick="openProfileDetail('${esc(profileName)}')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg></button>
+            <button id="btnSaveProfileFile" class="panel-head-btn primary has-tooltip has-tooltip--bottom" data-tooltip="Save" onclick="_saveProfileFile('${esc(profileName)}','${esc(filename)}')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg></button>
+          </div>
+          <textarea id="profileFileEditor" rows="24" spellcheck="false"
+            style="width:100%;resize:vertical;font-family:var(--font-mono,monospace);font-size:13px;line-height:1.5;padding:10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg)"
+            placeholder="${esc(placeholder)}">${esc(fileContent)}</textarea>
+        </div>
+      </div>`;
+  } catch (e) {
+    body.innerHTML = `<div style="padding:16px;color:var(--accent);font-size:12px">Error loading file: ${esc(e.message)}</div>`;
+  }
+}
+
+async function _saveProfileFile(profileName, filename) {
+  const editor = $('profileFileEditor');
+  const btn = $('btnSaveProfileFile');
+  if (!editor) return;
+  const content = editor.value;
+  if (btn) { btn.disabled = true; btn.style.opacity = '0.5'; }
+  try {
+    const result = await api('/api/profile/files', {
+      method: 'POST',
+      body: JSON.stringify({name: profileName, file: filename, content: content})
+    });
+    if (result && result.ok) {
+      showToast(filename + ' saved');
+    } else {
+      showToast('Save failed: ' + (result.error || 'unknown error'));
+    }
+  } catch (e) {
+    showToast('Save failed: ' + e.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.style.opacity = ''; }
+  }
 }
 
 function _setProfileHeaderButtons(mode, p, activeName){

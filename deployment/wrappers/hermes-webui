@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Hermes WebUI wrapper for https://github.com/nesquena/hermes-webui
+# Usage:
+#   hermes-webui start|stop|restart|status|logs [args]
+# Examples:
+#   hermes-webui start
+#   hermes-webui status
+#   HERMES_WEBUI_PORT=8788 hermes-webui restart
+
+export HERMES_HOME="${HERMES_HOME:-/opt/data}"
+export HERMES_CONFIG_PATH="${HERMES_CONFIG_PATH:-/opt/data/config.yaml}"
+export HERMES_WEBUI_AGENT_DIR="${HERMES_WEBUI_AGENT_DIR:-/opt/hermes}"
+export HERMES_WEBUI_PYTHON="${HERMES_WEBUI_PYTHON:-/opt/hermes/.venv/bin/python3}"
+export HERMES_WEBUI_HOST="${HERMES_WEBUI_HOST:-0.0.0.0}"
+export HERMES_WEBUI_PORT="${HERMES_WEBUI_PORT:-8787}"
+export HERMES_WEBUI_STATE_DIR="${HERMES_WEBUI_STATE_DIR:-/opt/data/webui}"
+export HERMES_WEBUI_DEFAULT_WORKSPACE="${HERMES_WEBUI_DEFAULT_WORKSPACE:-/opt/data}"
+export PATH="/opt/hermes/.venv/bin:${PATH}"
+
+cd /opt/data/hermes-webui
+exec ./ctl.sh "${@:-status}"
