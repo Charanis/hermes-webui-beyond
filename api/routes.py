@@ -4924,6 +4924,64 @@ def handle_post(handler, parsed) -> bool:
         except RuntimeError as e:
             return bad(handler, str(e), 409)
 
+    if parsed.path == "/api/profile/rename":
+        name = body.get("name", "").strip() if isinstance(body.get("name"), str) else ""
+        new_name = body.get("new_name", "").strip() if isinstance(body.get("new_name"), str) else ""
+        if not name:
+            return bad(handler, "name is required")
+        if not new_name:
+            return bad(handler, "new_name is required")
+        try:
+            from api.profiles import rename_profile_api
+            from api.helpers import build_profile_cookie
+
+            result = rename_profile_api(name, new_name)
+            extra = None
+            if result.get('was_active'):
+                extra = {'Set-Cookie': build_profile_cookie(result['new_name'])}
+            return j(handler, result, extra_headers=extra)
+        except (ValueError, FileNotFoundError) as e:
+            return bad(handler, _sanitize_error(e), 404 if isinstance(e, FileNotFoundError) else 400)
+        except FileExistsError as e:
+            return bad(handler, str(e), 409)
+        except RuntimeError as e:
+            return bad(handler, str(e), 409)
+
+    if parsed.path == "/api/profile/duplicate":
+        name = body.get("name", "").strip() if isinstance(body.get("name"), str) else ""
+        new_name = body.get("new_name", "").strip() if isinstance(body.get("new_name"), str) else ""
+        if not name:
+            return bad(handler, "name is required")
+        if not new_name:
+            return bad(handler, "new_name is required")
+        clone_all = bool(body.get("clone_all", False))
+        try:
+            from api.profiles import duplicate_profile_api
+
+            result = duplicate_profile_api(name, new_name, clone_all=clone_all)
+            return j(handler, {"ok": True, "profile": result})
+        except (ValueError, FileNotFoundError) as e:
+            return bad(handler, _sanitize_error(e), 404 if isinstance(e, FileNotFoundError) else 400)
+        except FileExistsError as e:
+            return bad(handler, str(e), 409)
+        except RuntimeError as e:
+            return bad(handler, str(e), 409)
+
+    if parsed.path == "/api/profile/gateway":
+        name = body.get("name", "").strip() if isinstance(body.get("name"), str) else ""
+        action = body.get("action", "").strip().lower() if isinstance(body.get("action"), str) else ""
+        if not name:
+            return bad(handler, "name is required")
+        if action not in ("start", "stop", "restart"):
+            return bad(handler, "action must be one of: start, restart, stop")
+        try:
+            from api.profiles import profile_gateway_control_api
+
+            result = profile_gateway_control_api(name, action)
+            return j(handler, result)
+        except (ValueError, FileNotFoundError) as e:
+            return bad(handler, _sanitize_error(e), 404 if isinstance(e, FileNotFoundError) else 400)
+
     if parsed.path == "/api/profile/settings":
         from api.profiles import update_profile_settings_api
 
@@ -4931,7 +4989,7 @@ def handle_post(handler, parsed) -> bool:
         if not name:
             return bad(handler, "name is required")
         updates = {}
-        for key in ("provider", "model", "avatar"):
+        for key in ("provider", "model", "avatar", "reasoning_effort"):
             if key in body:
                 updates[key] = body.get(key)
         try:

@@ -4382,9 +4382,26 @@ function _profileProviderForModel(modelValue, groups){
 
 function _profileSetInlineStatus(message, tone){
   const node=$('profileInlineStatus');
-  if(!node) return;
-  node.textContent=message||'';
-  node.dataset.tone=tone||'muted';
+  if(node){
+    node.textContent=message||'';
+    node.dataset.tone=tone||'muted';
+  }
+  // Reflect into the Ops Console runtime tile status pill so the visible
+  // status badge tracks save/load state without duplicating wiring.
+  const dot=$('opsRuntimeDot');
+  const state=$('opsRuntimeState');
+  if(dot){
+    dot.classList.remove('ok','warn','off');
+    if(tone==='error') dot.classList.add('warn');
+    else if(tone==='saving'||tone==='warning') dot.classList.add('warn');
+    else dot.classList.add('ok');
+  }
+  if(state){
+    if(tone==='saving') state.textContent='Saving…';
+    else if(tone==='warning') state.textContent='Unsaved';
+    else if(tone==='error') state.textContent='Save failed';
+    else state.textContent='Saved';
+  }
 }
 
 function _profileMarkModelDirty(){
@@ -4396,9 +4413,24 @@ function _profileMarkModelDirty(){
 async function _hydrateProfileIdentityControls(profile){
   const providerSel=$('profileInlineProvider');
   const modelSel=$('profileInlineModel');
+  const reasoningSel=$('profileInlineReasoning');
   const saveBtn=$('profileModelSave');
-  const avatarEdit=$('profileAvatarEdit');
   if(!providerSel||!modelSel) return;
+  // Reasoning value is profile-scoped. Fetch named-profile settings and apply.
+  if(reasoningSel){
+    try{
+      const qs=new URLSearchParams({name:profile.name});
+      const settings=await api('/api/profile/settings?'+qs.toString());
+      const current=(settings&&typeof settings.reasoning_effort==='string')?settings.reasoning_effort:'';
+      const allowed=Array.from(reasoningSel.options).map(o=>o.value);
+      reasoningSel.value=allowed.includes(current)?current:'';
+      reasoningSel.dataset.savedValue=reasoningSel.value;
+      reasoningSel.onchange=_profileMarkModelDirty;
+    }catch(_){
+      reasoningSel.value='';
+      reasoningSel.dataset.savedValue='';
+    }
+  }
   const ready=window._modelDropdownReady;
   if(ready&&typeof ready.then==='function'){
     try{await ready;}catch(_){}
@@ -4460,21 +4492,15 @@ async function _hydrateProfileIdentityControls(profile){
     saveBtn.disabled=true;
     saveBtn.onclick=()=>_saveProfileModelSettings(profile.name);
   }
-  const avatarPreview=$('profileAvatarPreview');
-  const openAvatar=()=>_openProfileAvatarDialog(profile.name);
-  if(avatarEdit) avatarEdit.onclick=openAvatar;
-  if(avatarPreview){
-    avatarPreview.onclick=openAvatar;
-    avatarPreview.onkeydown=(ev)=>{
-      if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();openAvatar();}
-    };
-  }
+  // Avatar bindings are owned by _bindProfileOpsConsole — keep this hydrator
+  // focused on the inline runtime controls.
   _profileSetInlineStatus('Saved','ok');
 }
 
 async function _saveProfileModelSettings(profileName){
   const providerSel=$('profileInlineProvider');
   const modelSel=$('profileInlineModel');
+  const reasoningSel=$('profileInlineReasoning');
   const btn=$('profileModelSave');
   if(!providerSel||!modelSel) return;
   const modelState=(typeof _modelStateForSelect==='function')?_modelStateForSelect(modelSel,modelSel.value):{model:modelSel.value,model_provider:null};
@@ -4483,6 +4509,9 @@ async function _saveProfileModelSettings(profileName){
     provider:providerSel.value||null,
     model:modelState.model||modelSel.value,
   };
+  if(reasoningSel){
+    payload.reasoning_effort=reasoningSel.value||'';
+  }
   if(btn){btn.disabled=true;btn.style.opacity='0.55';}
   _profileSetInlineStatus('Saving…','saving');
   try{
@@ -4684,19 +4713,27 @@ async function loadProfilesPanel() {
       : (data.active || 'default');
     _syncProfileAvatarState(data);
     for (const p of data.profiles) {
-      const card = document.createElement('div');
+      const card = document.createElement('button');
+      card.type = 'button';
       card.className = 'profile-card';
       card.dataset.name = p.name;
       const meta = [];
       if (p.model) meta.push(p.model.split('/').pop());
       if (p.provider) meta.push(p.provider);
       if (p.skill_count) meta.push(t('profile_skill_count', p.skill_count));
+      const gatewayLabel = p.gateway_running ? t('profile_gateway_running') : t('profile_gateway_stopped');
       const gwDot = p.gateway_running
-        ? `<span class="profile-opt-badge running" title="${esc(t('profile_gateway_running'))}"></span>`
-        : `<span class="profile-opt-badge stopped" title="${esc(t('profile_gateway_stopped'))}"></span>`;
+        ? `<span class="profile-opt-badge running" aria-hidden="true"></span><span class="sr-only">${esc(gatewayLabel)}</span>`
+        : `<span class="profile-opt-badge stopped" aria-hidden="true"></span><span class="sr-only">${esc(gatewayLabel)}</span>`;
       const isActive = p.name === activeName;
-      const activeBadge = isActive ? `<span style="color:var(--link);font-size:10px;font-weight:600;margin-left:6px">${esc(t('profile_active'))}</span>` : '';
+      const activeBadge = isActive ? `<span class="profile-card-active-pill">${esc(t('profile_active'))}</span>` : '';
       const defaultBadge = p.is_default ? ` <span style="opacity:.5">${esc(t('profile_default_label'))}</span>` : '';
+      const ariaLabelParts = [p.name];
+      if (isActive) ariaLabelParts.push('(active)');
+      if (p.is_default) ariaLabelParts.push('(default)');
+      ariaLabelParts.push(gatewayLabel);
+      card.setAttribute('aria-label', ariaLabelParts.join(' '));
+      if (isActive) card.setAttribute('aria-current', 'true');
       card.innerHTML = `
         <div class="profile-card-header">
           ${_profileAvatarForUi(p,'profile-avatar--card')}
@@ -4709,11 +4746,20 @@ async function loadProfilesPanel() {
       if (_currentProfileDetail && _currentProfileDetail.name === p.name) card.classList.add('active');
       panel.appendChild(card);
     }
-    // Re-render detail with fresh data if we have one and we're not in a form
+    // Re-render detail with fresh data if we have one and we're not in a form.
+    // If no detail is selected, auto-select the active/default so the detail
+    // pane is never blank when profiles exist.
     if (_currentProfileDetail && _profileMode !== 'create') {
       const refreshed = data.profiles.find(p => p.name === _currentProfileDetail.name);
       if (refreshed) _renderProfileDetail(refreshed, data.active);
       else _clearProfileDetail();
+    } else if (!_currentProfileDetail && _profileMode !== 'create') {
+      const auto = data.profiles.find(p => p.name === activeName) || data.profiles[0];
+      if (auto) {
+        const targetCard = panel.querySelector(`.profile-card[data-name="${CSS.escape(auto.name)}"]`);
+        if (targetCard) targetCard.classList.add('active');
+        _renderProfileDetail(auto, data.active);
+      }
     }
   } catch (e) {
     panel.innerHTML = `<div style="color:var(--accent);font-size:12px;padding:12px">${esc(t('error_prefix'))}${esc(e.message)}</div>`;
@@ -4729,26 +4775,245 @@ function _renderProfileDetail(p, activeName){
   title.textContent = p.name;
   const isActive = p.name === activeName;
   const isDefault = !!p.is_default;
-  const statusBadge = isActive
-    ? `<span class="detail-badge active">${esc(t('profile_active'))}</span>`
-    : `<span class="detail-badge">Inactive</span>`;
-  const defaultBadge = isDefault ? ` <span class="detail-badge">${esc(t('profile_default_label'))}</span>` : '';
-  const gwBadge = p.gateway_running
-    ? `<span class="detail-badge ok">${esc(t('profile_gateway_running'))}</span>`
-    : `<span class="detail-badge">${esc(t('profile_gateway_stopped'))}</span>`;
   const profileName = esc(p.name);
-  const identityHeader = `
-    <div class="profile-identity-header">
-      <div class="profile-identity-avatar-wrap">
-        <div id="profileAvatarPreview" class="profile-identity-avatar-preview" role="button" tabindex="0" aria-label="Change avatar">${_profileAvatarForUi(p,'profile-avatar--detail')}</div>
-        <button id="profileAvatarEdit" type="button" class="profile-avatar-edit" aria-label="Change avatar">Change avatar</button>
+
+  body.innerHTML = `
+    <div class="main-view-content profile-ops-console">
+      ${_profileOpsAvatarDialog(p)}
+      <div class="profile-ops-card">
+        <div class="profile-ops-top">
+          ${_profileIdentityPlane(p, isActive, isDefault)}
+          ${_profileOpsTiles(p, isActive)}
+        </div>
       </div>
-      <div class="profile-identity-copy">
-        <div class="profile-identity-name">${profileName}</div>
-        <div class="profile-identity-status">${statusBadge}${defaultBadge}${gwBadge}</div>
-        <div class="profile-identity-help">Profile-local model and identity settings. File-level configuration remains below.</div>
+      ${_profileFilesSection(p)}
+    </div>`;
+  body.style.display = '';
+  if (empty) empty.style.display = 'none';
+  _profileMode = 'read';
+  _setProfileHeaderButtons('read', p, activeName);
+  _hydrateProfileIdentityControls(p).catch(e=>console.warn('profile identity controls failed',e));
+  _bindProfileOpsConsole(p, isActive, isDefault);
+}
+
+function _profileIdentityPlane(p, isActive, isDefault){
+  const profileName = esc(p.name);
+  const activeDot = isActive ? 'ok' : 'off';
+  const defaultSuffix = isDefault ? ` · ${esc(t('profile_default_label'))}` : '';
+  // Remove menu disabled state for default profile (plan section 3C)
+  const removeAttrs = isDefault
+    ? 'role="menuitem" aria-disabled="true" disabled title="The default profile cannot be removed."'
+    : 'role="menuitem"';
+  return `
+    <aside class="profile-id-card" aria-labelledby="profileIdName">
+      <div class="profile-id-card-header">
+        <div>
+          <div class="profile-section-label">Digital agent ID</div>
+          <div class="profile-id-name" id="profileIdName"><span class="profile-status-dot ${activeDot}" id="profileIdActiveDot" aria-hidden="true"></span>${profileName}</div>
+          <div class="profile-id-meta">Profile ID: ${profileName} · local profile${defaultSuffix}</div>
+        </div>
       </div>
-    </div>
+      <div class="profile-avatar-block">
+        <div class="profile-avatar-frame">
+          <div id="profileAvatarPreview" class="profile-avatar-preview" role="img" tabindex="0" aria-label="Profile avatar for ${profileName}. Activate to edit.">${_profileAvatarForUi(p,'profile-avatar--detail')}</div>
+          <button id="profileAvatarEdit" type="button" class="profile-avatar-corner-action" aria-label="Edit avatar and shape" title="Edit avatar and shape">✎</button>
+        </div>
+        <div>
+          <span class="profile-avatar-caption">Profile avatar</span>
+          <span class="profile-avatar-shape-note">Square default · circle optional while editing.</span>
+        </div>
+      </div>
+      <div class="profile-id-actions" aria-label="Primary actions for ${profileName}">
+        <button id="opsStartChat" class="profile-ops-button primary profile-start-chat" type="button">Start chat with ${profileName}</button>
+        <div class="profile-overflow-wrap">
+          <button id="opsMoreActions" class="profile-ops-button" type="button" aria-label="More profile actions" aria-haspopup="menu" aria-expanded="false" aria-controls="opsProfileMenu">•••</button>
+          <div id="opsProfileMenu" class="profile-overflow-menu" role="menu" hidden>
+            <button class="profile-menu-item" type="button" role="menuitem" data-ops-action="rename">Rename</button>
+            <button class="profile-menu-item" type="button" role="menuitem" data-ops-action="duplicate">Duplicate</button>
+            <button class="profile-menu-item danger" type="button" data-ops-action="remove" ${removeAttrs}>Remove</button>
+          </div>
+        </div>
+      </div>
+    </aside>`;
+}
+
+function _profileOpsTiles(p, isActive){
+  const profileName = esc(p.name);
+  const activeStateText = isActive ? 'Active' : 'Inactive';
+  const activeDot = isActive ? 'ok' : 'off';
+  const activeValue = isActive
+    ? `${profileName} is active in this browser`
+    : `${profileName} is selected, not active`;
+  const activeNote = isActive
+    ? 'Switching profiles changes model, workspace, and identity context.'
+    : 'Activate to make this profile drive new chats from this browser.';
+  const makeActiveAttrs = isActive ? 'disabled aria-disabled="true"' : '';
+  const makeActiveLabel = isActive ? 'Active now' : 'Make active';
+  const makeActiveClass = isActive ? 'profile-ops-button' : 'profile-ops-button primary';
+
+  const gatewayRunning = !!p.gateway_running;
+  const gatewayDot = gatewayRunning ? 'ok' : 'off';
+  const gatewayStateText = gatewayRunning ? 'Running' : 'Stopped';
+  const gatewayNote = gatewayRunning
+    ? `Activity: gateway is listening for ${profileName}. Restart and Stop are available.`
+    : `Activity: stopped. Starting here activates the gateway for ${profileName}, not globally.`;
+  const startAttrs = gatewayRunning ? 'disabled aria-disabled="true"' : '';
+  const restartAttrs = gatewayRunning ? '' : 'disabled aria-disabled="true" title="Start gateway first"';
+  const stopAttrs = gatewayRunning ? '' : 'disabled aria-disabled="true" title="Start gateway first"';
+  const startLabel = gatewayRunning ? 'Gateway running' : 'Start gateway';
+  const startClass = gatewayRunning ? 'profile-ops-button' : 'profile-ops-button primary';
+
+  const credentialsReady = !!p.has_env;
+  const readyDot = credentialsReady ? 'ok' : 'warn';
+  const readyState = credentialsReady ? 'Ready' : 'Warning';
+  const readyValue = credentialsReady
+    ? (gatewayRunning ? 'Chat ready, gateway online' : 'Chat ready, gateway offline')
+    : 'ENV not configured';
+  const readyNote = credentialsReady
+    ? 'ENV readiness folded into Profile Files; secrets remain hidden.'
+    : 'Configure provider credentials via the .env profile file below.';
+
+  const skillCount = typeof p.skill_count === 'number' ? p.skill_count : 0;
+  const skillsValue = `${skillCount} profile skill${skillCount === 1 ? '' : 's'}`;
+
+  // Reasoning options match VALID_REASONING_EFFORTS (plus 'none' explicit + default unset).
+  const reasoningOptions = ['', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh'];
+  const reasoningLabels = {
+    '': 'Default',
+    'none': 'None (disabled)',
+    'minimal': 'Minimal',
+    'low': 'Low',
+    'medium': 'Medium',
+    'high': 'High',
+    'xhigh': 'Extra high',
+  };
+  const reasoningOpts = reasoningOptions.map(v =>
+    `<option value="${esc(v)}">${esc(reasoningLabels[v])}</option>`
+  ).join('');
+
+  return `
+    <div class="profile-ops-grid" aria-label="${profileName} operations controls">
+      <article class="profile-ops-tile" aria-labelledby="opsActiveTitle">
+        <div class="profile-ops-tile-head">
+          <span class="profile-ops-tile-label" id="opsActiveTitle">Active profile</span>
+          <span class="profile-ops-status-pill"><span id="opsActiveDot" class="profile-status-dot ${activeDot}" aria-hidden="true"></span><span id="opsActiveState">${esc(activeStateText)}</span></span>
+        </div>
+        <div>
+          <span class="profile-ops-tile-value" id="opsActiveValue">${esc(activeValue)}</span>
+          <span class="profile-ops-tile-note" id="opsActiveNote">${esc(activeNote)}</span>
+        </div>
+        <div class="profile-ops-control-row">
+          <button id="opsMakeActive" class="${makeActiveClass}" type="button" ${makeActiveAttrs}>${esc(makeActiveLabel)}</button>
+        </div>
+      </article>
+
+      <article class="profile-ops-tile" aria-labelledby="opsGatewayTitle">
+        <div class="profile-ops-tile-head">
+          <span class="profile-ops-tile-label" id="opsGatewayTitle">Gateway for ${profileName}</span>
+          <span class="profile-ops-status-pill"><span id="opsGatewayDot" class="profile-status-dot ${gatewayDot}" aria-hidden="true"></span><span id="opsGatewayState">${esc(gatewayStateText)}</span></span>
+        </div>
+        <div>
+          <span class="profile-ops-tile-value">Profile-specific gateway</span>
+          <span class="profile-ops-tile-note" id="opsGatewayNote">${esc(gatewayNote)}</span>
+        </div>
+        <div class="profile-ops-control-row" aria-label="Gateway controls for ${profileName}">
+          <button id="opsGatewayStart" class="${startClass}" type="button" data-gateway-action="start" ${startAttrs}>${esc(startLabel)}</button>
+          <button id="opsGatewayRestart" class="profile-ops-button" type="button" data-gateway-action="restart" ${restartAttrs}>Restart</button>
+          <button id="opsGatewayStop" class="profile-ops-button" type="button" data-gateway-action="stop" ${stopAttrs}>Stop</button>
+        </div>
+      </article>
+
+      <article class="profile-ops-tile profile-ops-tile--wide" aria-labelledby="opsRuntimeTitle">
+        <div class="profile-ops-tile-head">
+          <span class="profile-ops-tile-label" id="opsRuntimeTitle">Runtime / models</span>
+          <span class="profile-ops-status-pill"><span id="opsRuntimeDot" class="profile-status-dot ok" aria-hidden="true"></span><span id="opsRuntimeState">Saved</span></span>
+        </div>
+        <div>
+          <div class="profile-runtime-controls">
+            <label class="profile-runtime-field">
+              <span>Provider</span>
+              <select id="profileInlineProvider" class="profile-ops-select" aria-label="Provider for ${profileName}"></select>
+            </label>
+            <label class="profile-runtime-field">
+              <span>Model</span>
+              <select id="profileInlineModel" class="profile-ops-select" aria-label="Model for ${profileName}"></select>
+            </label>
+            <label class="profile-runtime-field">
+              <span>Reasoning</span>
+              <select id="profileInlineReasoning" class="profile-ops-select" aria-label="Reasoning effort for ${profileName}">${reasoningOpts}</select>
+            </label>
+          </div>
+          <div class="profile-runtime-save-row">
+            <span class="profile-ops-tile-note" id="profileInlineStatus" data-tone="muted">Saved runtime for ${profileName}.</span>
+            <button id="profileModelSave" type="button" class="profile-ops-button primary">Apply runtime</button>
+          </div>
+        </div>
+      </article>
+
+      <article class="profile-ops-tile" aria-labelledby="opsReadyTitle">
+        <div class="profile-ops-tile-head">
+          <span class="profile-ops-tile-label" id="opsReadyTitle">Ready / diagnostics</span>
+          <span class="profile-ops-status-pill"><span class="profile-status-dot ${readyDot}" aria-hidden="true"></span><span>${esc(readyState)}</span></span>
+        </div>
+        <div>
+          <span class="profile-ops-tile-value">${esc(readyValue)}</span>
+          <span class="profile-ops-tile-note">${esc(readyNote)}</span>
+        </div>
+        <div class="profile-ops-control-row">
+          <button class="profile-ops-button" type="button" data-ops-action="diagnostics">View diagnostics</button>
+        </div>
+      </article>
+
+      <article class="profile-ops-tile" aria-labelledby="opsSkillsTitle">
+        <div class="profile-ops-tile-head">
+          <span class="profile-ops-tile-label" id="opsSkillsTitle">Skills</span>
+          <span class="profile-ops-status-pill"><span class="profile-status-dot ${skillCount > 0 ? 'ok' : 'off'}" aria-hidden="true"></span><span>${skillCount} enabled</span></span>
+        </div>
+        <div>
+          <span class="profile-ops-tile-value">${esc(skillsValue)}</span>
+          <span class="profile-ops-tile-note">Capability management stays profile-scoped and separate from model controls.</span>
+        </div>
+        <div class="profile-ops-control-row">
+          <button class="profile-ops-button" type="button" data-ops-action="skills">Manage skills</button>
+        </div>
+      </article>
+    </div>`;
+}
+
+function _profileFilesSection(p){
+  const profileName = esc(p.name);
+  const files = [
+    { name: 'SOUL.md', icon: 'S', label: 'SOUL.md', desc: 'Persona, operating principles, and profile voice.', status: 'Markdown editor' },
+    { name: 'memories/MEMORY.md', icon: 'M', label: 'Memory', desc: 'Long-lived notes and retrieved context for this profile.', status: 'Profile-scoped' },
+    { name: 'memories/USER.md', icon: 'U', label: 'User preferences', desc: 'Taste, workflow defaults, and interaction preferences.', status: 'Structured editor' },
+    { name: '.env', icon: 'E', label: 'ENV file', desc: 'Secrets hidden; use the safe editor for key passing.', status: p.has_env ? 'Configured · hidden values' : 'Not configured · hidden values' },
+    { name: 'config.yaml', icon: 'Y', label: 'config.yaml', desc: 'Runtime defaults, tools, and profile configuration.', status: 'Validated YAML' },
+  ];
+  const widgets = files.map(f => `
+    <button class="profile-file-widget" type="button" data-profile-file="${esc(f.name)}">
+      <span class="profile-file-icon">${esc(f.icon)}</span>
+      <span>
+        <span class="profile-file-name">${esc(f.label)}</span>
+        <span class="profile-file-desc">${esc(f.desc)}</span>
+      </span>
+      <span class="profile-file-status">${esc(f.status)}</span>
+    </button>`).join('');
+  return `
+    <section class="profile-ops-files-section" aria-labelledby="opsFilesTitle">
+      <div class="profile-ops-files-head">
+        <div>
+          <div class="profile-section-label">Profile files</div>
+          <h3 class="profile-ops-files-title" id="opsFilesTitle">Editable source files for ${profileName}</h3>
+          <div class="profile-ops-files-note">Prominent, symmetric widgets open focused editors; no raw config dump in the main card.</div>
+        </div>
+      </div>
+      <div class="profile-ops-files-grid">${widgets}</div>
+    </section>`;
+}
+
+function _profileOpsAvatarDialog(p){
+  const profileName = esc(p.name);
+  return `
     <div id="profileAvatarDialog" class="profile-avatar-dialog" hidden>
       <div class="profile-avatar-dialog-card" role="dialog" aria-label="Change profile avatar">
         <div class="profile-avatar-dialog-head">
@@ -4802,45 +5067,187 @@ function _renderProfileDetail(p, activeName){
         </div>
       </div>
     </div>`;
-  const rows = [];
-  rows.push(`<div class="detail-row profile-inline-control-row"><div class="detail-row-label">Provider</div><div class="detail-row-value"><select id="profileInlineProvider" class="profile-inline-select" aria-label="Provider"></select></div></div>`);
-  rows.push(`<div class="detail-row profile-inline-control-row"><div class="detail-row-label">Model</div><div class="detail-row-value"><select id="profileInlineModel" class="profile-inline-select" aria-label="Model"></select></div></div>`);
-  rows.push(`<div class="profile-inline-actions"><span id="profileInlineStatus" class="profile-inline-status" data-tone="muted"></span><button id="profileModelSave" type="button" class="ws-action-btn">Save model</button></div>`);
-  if (p.base_url) rows.push(`<div class="detail-row"><div class="detail-row-label">Base URL</div><div class="detail-row-value"><code>${esc(p.base_url)}</code></div></div>`);
-  rows.push(`<div class="detail-row"><div class="detail-row-label">API key</div><div class="detail-row-value">${p.has_env ? esc(t('profile_api_keys_configured')) : '<span style="color:var(--muted)">Not configured</span>'}</div></div>`);
-  if (typeof p.skill_count === 'number') rows.push(`<div class="detail-row"><div class="detail-row-label">Skills</div><div class="detail-row-value">${esc(t('profile_skill_count', p.skill_count))}</div></div>`);
-  if (p.default_workspace) rows.push(`<div class="detail-row"><div class="detail-row-label">Default space</div><div class="detail-row-value"><code>${esc(p.default_workspace)}</code></div></div>`);
-  const _fileIcons = {'SOUL.md': '✨', 'config.yaml': '⚙️', '.env': '🔑', 'memories/MEMORY.md': '🧠', 'memories/USER.md': '👤'};
-  const _fileLabels = {'SOUL.md': 'SOUL.md', 'config.yaml': 'config.yaml', '.env': '.env', 'memories/MEMORY.md': 'Agent Memory', 'memories/USER.md': 'User Profile'};
-  const _profileFiles = ['SOUL.md', 'config.yaml', '.env', 'memories/MEMORY.md', 'memories/USER.md'];
-  const fileRows = _profileFiles.map(f => {
-    const label = _fileLabels[f] || f;
-    return `<div class="detail-row" style="cursor:pointer" onclick="_openProfileFileEditor('${profileName}','${f}')">
-      <div class="detail-row-label">${_fileIcons[f] || '📄'} ${esc(label)}</div>
-      <div class="detail-row-value" style="justify-content:flex-end">
-        <span style="color:var(--link);font-size:11px">Edit →</span>
-      </div>
-    </div>`;
-  }).join('');
-  body.innerHTML = `
-    <div class="main-view-content">
-      <div class="detail-card profile-identity-card">
-        <div class="detail-card-title">Profile</div>
-        ${identityHeader}
-        <div class="profile-identity-grid">${rows.join('')}</div>
-      </div>
-      <div class="detail-card" style="margin-top:12px">
-        <div class="detail-card-title">Profile Files</div>
-        ${fileRows}
-      </div>
-    </div>`;
-  body.style.display = '';
-  if (empty) empty.style.display = 'none';
-  _profileMode = 'read';
-  _setProfileHeaderButtons('read', p, activeName);
-  _hydrateProfileIdentityControls(p).catch(e=>console.warn('profile identity controls failed',e));
 }
 
+
+function _bindProfileOpsConsole(p, isActive, isDefault){
+  const profileName = p.name;
+  // Avatar edit (corner icon + preview itself)
+  const avatarEdit = $('profileAvatarEdit');
+  const avatarPreview = $('profileAvatarPreview');
+  const openAvatar = () => _openProfileAvatarDialog(profileName);
+  if (avatarEdit) avatarEdit.onclick = openAvatar;
+  if (avatarPreview) {
+    avatarPreview.onclick = openAvatar;
+    avatarPreview.onkeydown = (ev) => {
+      if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); openAvatar(); }
+    };
+  }
+  // Start Chat
+  const startChat = $('opsStartChat');
+  if (startChat) startChat.onclick = () => startChatWithProfile(profileName);
+  // Make active
+  const makeActive = $('opsMakeActive');
+  if (makeActive && !isActive) {
+    makeActive.onclick = async () => {
+      makeActive.disabled = true;
+      makeActive.setAttribute('aria-disabled', 'true');
+      try {
+        await switchToProfile(profileName);
+        await loadProfilesPanel();
+      } catch (e) {
+        makeActive.disabled = false;
+        makeActive.removeAttribute('aria-disabled');
+        showToast('Failed to activate: ' + (e.message || e));
+      }
+    };
+  }
+  // Overflow menu
+  const moreBtn = $('opsMoreActions');
+  const menu = $('opsProfileMenu');
+  if (moreBtn && menu) {
+    const setMenu = (open) => {
+      menu.hidden = !open;
+      moreBtn.setAttribute('aria-expanded', String(open));
+    };
+    moreBtn.onclick = (ev) => {
+      ev.stopPropagation();
+      setMenu(menu.hidden);
+    };
+    menu.onclick = (ev) => {
+      const item = ev.target.closest('[data-ops-action]');
+      if (!item || item.disabled) return;
+      setMenu(false);
+      const action = item.dataset.opsAction;
+      if (action === 'rename') _opsRenameProfile(profileName);
+      else if (action === 'duplicate') _opsDuplicateProfile(profileName);
+      else if (action === 'remove' && !isDefault) deleteCurrentProfile();
+    };
+    document.addEventListener('click', _opsOverflowOutsideClick, { capture: true });
+    document.addEventListener('keydown', _opsOverflowEscape);
+  }
+  // Gateway controls
+  document.querySelectorAll('[data-gateway-action]').forEach(btn => {
+    btn.onclick = () => _opsGatewayControl(profileName, btn.dataset.gatewayAction);
+  });
+  // Profile file widgets
+  document.querySelectorAll('[data-profile-file]').forEach(btn => {
+    btn.onclick = () => _openProfileFileEditor(profileName, btn.dataset.profileFile);
+  });
+  // Diagnostics / skills stubs
+  document.querySelectorAll('[data-ops-action="diagnostics"]').forEach(btn => {
+    btn.onclick = () => showToast('Diagnostics drawer not yet wired up.');
+  });
+  document.querySelectorAll('[data-ops-action="skills"]').forEach(btn => {
+    btn.onclick = () => {
+      if (typeof switchPanel === 'function') switchPanel('skills');
+    };
+  });
+}
+
+function _opsOverflowOutsideClick(ev){
+  const menu = $('opsProfileMenu');
+  const wrap = ev.target && ev.target.closest && ev.target.closest('.profile-overflow-wrap');
+  if (menu && !wrap) {
+    menu.hidden = true;
+    const btn = $('opsMoreActions');
+    if (btn) btn.setAttribute('aria-expanded', 'false');
+  }
+}
+
+function _opsOverflowEscape(ev){
+  if (ev.key !== 'Escape') return;
+  const menu = $('opsProfileMenu');
+  if (menu && !menu.hidden) {
+    menu.hidden = true;
+    const btn = $('opsMoreActions');
+    if (btn) btn.setAttribute('aria-expanded', 'false');
+  }
+}
+
+async function startChatWithProfile(profileName){
+  if (!profileName) return;
+  try {
+    const currentActive = (S.activeProfile) || (_profilesCache && _profilesCache.active) || 'default';
+    if (profileName !== currentActive) {
+      await switchToProfile(profileName);
+    }
+    await newSession(true);
+    if (typeof switchPanel === 'function') switchPanel('chat');
+  } catch (e) {
+    showToast('Start chat failed: ' + (e.message || e));
+  }
+}
+
+async function _opsRenameProfile(profileName){
+  if (!profileName) return;
+  const newName = (typeof showInputDialog === 'function')
+    ? await showInputDialog({ title: 'Rename profile', message: `Choose a new name for "${profileName}".`, defaultValue: profileName, confirmLabel: 'Rename' })
+    : window.prompt(`Rename profile "${profileName}" to:`, profileName);
+  if (!newName || newName === profileName) return;
+  try {
+    const result = await api('/api/profile/rename', { method: 'POST', body: JSON.stringify({ name: profileName, new_name: newName }) });
+    if (result && result.was_active) {
+      S.activeProfile = result.new_name;
+    }
+    if (_currentProfileDetail && _currentProfileDetail.name === profileName) {
+      _currentProfileDetail = { ..._currentProfileDetail, name: result.new_name };
+    }
+    showToast(`Renamed to "${result.new_name || newName}"`);
+    await loadProfilesPanel();
+    if (result && result.new_name) openProfileDetail(result.new_name);
+  } catch (e) {
+    showToast('Rename failed: ' + (e.message || e));
+  }
+}
+
+async function _opsDuplicateProfile(profileName){
+  if (!profileName) return;
+  const suggested = `${profileName}-copy`;
+  const newName = (typeof showInputDialog === 'function')
+    ? await showInputDialog({ title: 'Duplicate profile', message: `Create a copy of "${profileName}".`, defaultValue: suggested, confirmLabel: 'Duplicate' })
+    : window.prompt(`Duplicate "${profileName}" as:`, suggested);
+  if (!newName) return;
+  try {
+    const result = await api('/api/profile/duplicate', { method: 'POST', body: JSON.stringify({ name: profileName, new_name: newName }) });
+    showToast(`Duplicated to "${newName}"`);
+    await loadProfilesPanel();
+    const target = result && result.profile && result.profile.name ? result.profile.name : newName;
+    openProfileDetail(target);
+  } catch (e) {
+    showToast('Duplicate failed: ' + (e.message || e));
+  }
+}
+
+async function _opsGatewayControl(profileName, action){
+  if (!profileName || !action) return;
+  const states = {
+    start: { state: 'Starting', note: 'Activity: starting gateway…' },
+    restart: { state: 'Restarting', note: 'Activity: restarting gateway…' },
+    stop: { state: 'Stopping', note: 'Activity: stopping gateway…' },
+  };
+  const stateEl = $('opsGatewayState');
+  const noteEl = $('opsGatewayNote');
+  const dotEl = $('opsGatewayDot');
+  if (stateEl && states[action]) stateEl.textContent = states[action].state;
+  if (noteEl && states[action]) noteEl.textContent = states[action].note;
+  if (dotEl) { dotEl.classList.remove('ok','off'); dotEl.classList.add('warn'); }
+  try {
+    const result = await api('/api/profile/gateway', { method: 'POST', body: JSON.stringify({ name: profileName, action }) });
+    if (result && result.unavailable) {
+      showToast(result.message || 'Profile-scoped gateway control is not available here.');
+    } else if (result && result.ok === false) {
+      showToast(result.message || 'Gateway action failed.');
+    } else {
+      showToast(`Gateway ${action} succeeded for ${profileName}.`);
+    }
+    // Refresh profile list so the gateway running flag is updated.
+    await loadProfilesPanel();
+  } catch (e) {
+    showToast('Gateway action failed: ' + (e.message || e));
+    await loadProfilesPanel();
+  }
+}
 
 async function _openProfileFileEditor(profileName, filename) {
   const body = $('profileDetailBody');

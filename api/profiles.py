@@ -897,6 +897,64 @@ def _save_profile_config_for_settings(profile_home: Path, config_data: dict) -> 
     )
 
 
+# Mirrors api.config.VALID_REASONING_EFFORTS without importing — keeps profile
+# settings independent of the active-profile reasoning helpers in api.config.
+_VALID_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
+
+
+def _extract_profile_reasoning_effort(config_data: dict) -> str:
+    agent_cfg = config_data.get('agent') if isinstance(config_data, dict) else None
+    if not isinstance(agent_cfg, dict):
+        return ''
+    raw = agent_cfg.get('reasoning_effort')
+    if raw is None:
+        return ''
+    return str(raw).strip().lower()
+
+
+def _merge_profile_reasoning_effort(config_data: dict, effort) -> bool:
+    """Apply *effort* into ``agent.reasoning_effort`` on *config_data*.
+
+    Returns True when the config changed. Accepts ``''`` (unset),
+    ``'none'`` (explicitly disabled), or any value in
+    ``_VALID_REASONING_EFFORTS``. Raises ValueError on unknown values.
+    """
+    if not isinstance(effort, str):
+        raise ValueError('reasoning_effort must be a string')
+    raw = effort.strip().lower()
+    if raw and raw != 'none' and raw not in _VALID_REASONING_EFFORTS:
+        raise ValueError(
+            f"Unknown reasoning effort '{effort}'. "
+            f"Valid: none, {', '.join(_VALID_REASONING_EFFORTS)}."
+        )
+    agent_cfg = config_data.get('agent')
+    if not isinstance(agent_cfg, dict):
+        agent_cfg = {}
+        had_agent = False
+    else:
+        agent_cfg = dict(agent_cfg)
+        had_agent = True
+    before_effort = agent_cfg.get('reasoning_effort')
+    if not raw:
+        # Empty string means "remove the override" — use profile default.
+        if 'reasoning_effort' in agent_cfg:
+            agent_cfg.pop('reasoning_effort', None)
+            changed = True
+        else:
+            changed = False
+    else:
+        agent_cfg['reasoning_effort'] = raw
+        changed = before_effort != raw
+    if not changed and had_agent:
+        return False
+    if agent_cfg:
+        config_data['agent'] = agent_cfg
+    elif had_agent:
+        # Removed the last key from agent; collapse the empty section.
+        config_data.pop('agent', None)
+    return changed
+
+
 def _extract_profile_model_settings(config_data: dict) -> tuple[str | None, str | None]:
     model_cfg = config_data.get('model') if isinstance(config_data, dict) else None
     if isinstance(model_cfg, dict):
@@ -1043,20 +1101,33 @@ def get_profile_settings_api(name: str) -> dict:
         'provider': provider,
         'model': model,
         'avatar': _read_profile_avatar_for_home(profile_home),
+        'reasoning_effort': _extract_profile_reasoning_effort(config_data),
     }
 
 
-def update_profile_settings_api(name: str, *, provider=_MISSING, model=_MISSING, avatar=_MISSING) -> dict:
-    """Update model/provider and/or WebUI avatar metadata for a profile."""
-    if provider is _MISSING and model is _MISSING and avatar is _MISSING:
-        raise ValueError('At least one of provider, model, or avatar is required')
+def update_profile_settings_api(name: str, *, provider=_MISSING, model=_MISSING,
+                                avatar=_MISSING, reasoning_effort=_MISSING) -> dict:
+    """Update model/provider, reasoning effort and/or WebUI avatar metadata."""
+    if (provider is _MISSING and model is _MISSING
+            and avatar is _MISSING and reasoning_effort is _MISSING):
+        raise ValueError('At least one of provider, model, avatar, or reasoning_effort is required')
     name, profile_home = _require_profile_home_for_settings(name)
 
-    if provider is not _MISSING or model is not _MISSING:
+    needs_yaml_write = provider is not _MISSING or model is not _MISSING or reasoning_effort is not _MISSING
+    invalidate_models = False
+    if needs_yaml_write:
         config_data = _load_profile_config_for_settings(profile_home)
-        model_changed = _merge_profile_model_settings(config_data, provider, model)
-        if model_changed:
+        config_changed = False
+        if provider is not _MISSING or model is not _MISSING:
+            if _merge_profile_model_settings(config_data, provider, model):
+                config_changed = True
+                invalidate_models = True
+        if reasoning_effort is not _MISSING:
+            if _merge_profile_reasoning_effort(config_data, reasoning_effort):
+                config_changed = True
+        if config_changed:
             _save_profile_config_for_settings(profile_home, config_data)
+        if invalidate_models:
             from api.config import invalidate_models_cache
             invalidate_models_cache()
 
@@ -1261,6 +1332,251 @@ def create_profile_api(name: str, clone_from: str = None,
         'has_env': (profile_path / '.env').exists(),
         'skill_count': 0,
     }
+
+
+def rename_profile_api(name: str, new_name: str) -> dict:
+    """Rename a profile. Refuses the default profile.
+
+    Falls back to a filesystem rename when ``hermes_cli.profiles.rename_profile``
+    is not importable. Returns ``{'ok': True, 'old_name', 'new_name',
+    'was_active'}`` so callers can refresh the active-profile cookie.
+    """
+    if _is_root_profile(name):
+        raise ValueError("Cannot rename the default profile.")
+    _validate_profile_name(name)
+    if not isinstance(new_name, str):
+        raise ValueError("new_name is required")
+    new_name = new_name.strip()
+    if not new_name:
+        raise ValueError("new_name is required")
+    if new_name == name:
+        raise ValueError("new_name must differ from current name.")
+    _validate_profile_name(new_name)
+
+    profiles_root = _profiles_root()
+    src_dir = _resolve_named_profile_home(name)
+    if not src_dir.is_dir():
+        raise FileNotFoundError(f"Profile '{name}' does not exist.")
+    dst_dir = (profiles_root / new_name).resolve()
+    dst_dir.relative_to(profiles_root)
+    if dst_dir.exists():
+        raise FileExistsError(f"Profile '{new_name}' already exists.")
+
+    global _active_profile
+    was_active = _active_profile == name
+
+    try:
+        from hermes_cli.profiles import rename_profile as _cli_rename
+    except ImportError:
+        _cli_rename = None
+
+    if _cli_rename is not None:
+        try:
+            _cli_rename(name, new_name)
+        except TypeError:
+            # Older signature variants might require keyword arguments.
+            _cli_rename(old_name=name, new_name=new_name)
+    else:
+        # Filesystem fallback: rename the directory in place.
+        src_dir.rename(dst_dir)
+
+    if was_active:
+        # Update the process-global active profile so subsequent requests
+        # without a cookie still resolve to the renamed directory.
+        with _profile_lock:
+            _active_profile = new_name
+
+    _invalidate_root_profile_cache()
+    return {'ok': True, 'old_name': name, 'new_name': new_name, 'was_active': was_active}
+
+
+def duplicate_profile_api(name: str, new_name: str, *, clone_all: bool = False) -> dict:
+    """Duplicate a profile. Copies config and (when supported) WebUI state.
+
+    By default ``clone_all=False`` clones only config files. Pass
+    ``clone_all=True`` to mirror everything supported by the CLI duplicate
+    semantics.
+    """
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("name is required")
+    if not isinstance(new_name, str) or not new_name.strip():
+        raise ValueError("new_name is required")
+    name = name.strip()
+    new_name = new_name.strip()
+    if name == new_name:
+        raise ValueError("new_name must differ from source name.")
+    _validate_profile_name(new_name)
+
+    profiles_root = _profiles_root()
+    dst_dir = (profiles_root / new_name).resolve()
+    dst_dir.relative_to(profiles_root)
+    if dst_dir.exists():
+        raise FileExistsError(f"Profile '{new_name}' already exists.")
+
+    # Resolve source directory: root profile maps to ~/.hermes
+    if _is_root_profile(name):
+        src_dir = _DEFAULT_HERMES_HOME
+    else:
+        _validate_profile_name(name)
+        src_dir = _resolve_named_profile_home(name)
+    if not src_dir.is_dir():
+        raise FileNotFoundError(f"Profile '{name}' does not exist.")
+
+    try:
+        from hermes_cli.profiles import create_profile as _cli_create_profile
+    except ImportError:
+        _cli_create_profile = None
+
+    if _cli_create_profile is not None:
+        try:
+            _cli_create_profile(
+                new_name,
+                clone_from=name,
+                clone_config=True,
+                clone_all=bool(clone_all),
+                no_alias=True,
+            )
+        except TypeError:
+            _cli_create_profile(new_name, clone_from=name, clone_config=True)
+    else:
+        # Filesystem fallback: copy config files (and optionally additional dirs).
+        _create_profile_fallback(new_name, clone_from=name, clone_config=True)
+        if clone_all:
+            for sub in ('memories', 'skills'):
+                src_sub = src_dir / sub
+                dst_sub = dst_dir / sub
+                if src_sub.is_dir():
+                    shutil.copytree(src_sub, dst_sub, dirs_exist_ok=True)
+
+    # Copy WebUI state (avatar etc.) when present — not handled by hermes_cli.
+    try:
+        src_state = _profile_settings_state_path(src_dir)
+        if src_state.exists():
+            dst_state = _profile_settings_state_path(dst_dir)
+            dst_state.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src_state, dst_state)
+    except OSError:
+        logger.debug("Failed to copy WebUI state during duplicate", exc_info=True)
+
+    _invalidate_root_profile_cache()
+    # Return the freshly-listed profile metadata for the duplicate.
+    for p in list_profiles_api():
+        if p['name'] == new_name:
+            return p
+    return {
+        'name': new_name,
+        'path': str(dst_dir),
+        'is_default': False,
+        'is_active': False,
+        'gateway_running': False,
+        'model': None,
+        'provider': None,
+        'avatar': _read_profile_avatar_for_home(dst_dir),
+        'has_env': (dst_dir / '.env').exists(),
+        'skill_count': 0,
+    }
+
+
+# Gateway control helper override hook — tests monkeypatch this with a fake
+# runner. When set, ``profile_gateway_control_api`` calls it instead of
+# importing ``hermes_cli.gateway``. The hook must return a dict shaped like the
+# API response (``ok``, ``running`` etc.) or raise to signal failure.
+_gateway_control_hook = None
+
+
+def _set_gateway_control_hook(fn) -> None:
+    """Install a test-only gateway control override."""
+    global _gateway_control_hook
+    _gateway_control_hook = fn
+
+
+def profile_gateway_control_api(name: str, action: str) -> dict:
+    """Start, restart, or stop the gateway for a named profile.
+
+    Degrades honestly: returns ``{ok: False, unavailable: True, ...}`` when no
+    safe backend wrapper is available, instead of pretending success.
+    """
+    _validate_profile_settings_name(name)
+    action = (action or '').strip().lower()
+    if action not in ('start', 'restart', 'stop'):
+        raise ValueError("action must be one of: start, restart, stop")
+
+    # Confirm the profile actually exists (FileNotFoundError -> 404 from caller).
+    if _is_root_profile(name):
+        profile_home = _DEFAULT_HERMES_HOME
+    else:
+        profile_home = _resolve_named_profile_home(name)
+    if not profile_home.is_dir():
+        raise FileNotFoundError(f"Profile '{name}' not found.")
+
+    if _gateway_control_hook is not None:
+        try:
+            hook_result = _gateway_control_hook(name, action)
+        except Exception as exc:  # noqa: BLE001 — surface any test-injected failure
+            return {
+                'ok': False,
+                'profile': name,
+                'action': action,
+                'running': False,
+                'configured': False,
+                'message': _sanitize_gateway_message(str(exc)),
+            }
+        if not isinstance(hook_result, dict):
+            hook_result = {'ok': True, 'running': action != 'stop'}
+        hook_result.setdefault('ok', True)
+        hook_result.setdefault('profile', name)
+        hook_result.setdefault('action', action)
+        hook_result.setdefault('configured', True)
+        return hook_result
+
+    try:
+        from hermes_cli.gateway import control_gateway as _cli_control_gateway  # type: ignore
+    except ImportError:
+        return {
+            'ok': False,
+            'profile': name,
+            'action': action,
+            'running': False,
+            'configured': False,
+            'unavailable': True,
+            'message': (
+                "Profile-scoped gateway control is not available in this "
+                "environment. Use the Hermes CLI directly."
+            ),
+        }
+
+    try:
+        result = _cli_control_gateway(name, action)
+    except Exception as exc:  # noqa: BLE001 — keep error surface narrow + safe
+        return {
+            'ok': False,
+            'profile': name,
+            'action': action,
+            'running': False,
+            'configured': False,
+            'message': _sanitize_gateway_message(str(exc)),
+        }
+    if not isinstance(result, dict):
+        result = {'ok': True, 'running': action != 'stop'}
+    result.setdefault('ok', True)
+    result.setdefault('profile', name)
+    result.setdefault('action', action)
+    result.setdefault('configured', True)
+    return result
+
+
+_SECRET_PATTERN = re.compile(
+    r'(?i)(api[_-]?key|token|secret|password)\s*[:=]\s*\S+'
+)
+
+
+def _sanitize_gateway_message(message: str) -> str:
+    """Strip obviously secret-looking substrings from gateway runner output."""
+    if not message:
+        return ''
+    text = _SECRET_PATTERN.sub(r'\1=[redacted]', message)
+    # Truncate to avoid dumping arbitrary subprocess output into UI toasts.
+    return text[:280]
 
 
 def delete_profile_api(name: str) -> dict:
