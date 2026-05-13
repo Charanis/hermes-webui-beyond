@@ -4340,6 +4340,333 @@ async function switchToWorkspace(path,name){
 // ── Profile panel + dropdown ──
 let _profilesCache = null;
 
+function _syncProfileAvatarState(data){
+  if(!data||!Array.isArray(data.profiles)||typeof setProfileAvatarMap!=='function') return;
+  const active=(S.activeProfile&&data.profiles.some(p=>p.name===S.activeProfile))?S.activeProfile:(data.active||'default');
+  setProfileAvatarMap(data.profiles, active);
+}
+
+function _profileAvatarForUi(profile, classes){
+  const name=(profile&&profile.name)||'H';
+  const fallback=name.charAt(0).toUpperCase()||'H';
+  if(typeof _profileAvatarMarkup==='function') return _profileAvatarMarkup(profile&&profile.avatar,{fallback,classes,title:name});
+  return `<div class="${esc(classes||'profile-avatar')}">${esc(fallback)}</div>`;
+}
+
+function _profileModelGroupsFromComposer(){
+  const sel=$('modelSelect');
+  const groups=[];
+  if(!sel) return groups;
+  const pushGroup=(provider,label,options)=>{
+    const models=options.map(opt=>({value:opt.value,label:opt.textContent||getModelLabel(opt.value),provider})).filter(m=>m.value);
+    if(models.length) groups.push({provider:provider||'',label:label||provider||'Models',models});
+  };
+  for(const child of Array.from(sel.children)){
+    if(child.tagName==='OPTGROUP'){
+      pushGroup((child.dataset&&child.dataset.provider)||'', child.label||'', Array.from(child.children));
+    }else if(child.tagName==='OPTION'){
+      pushGroup('', 'Models', [child]);
+    }
+  }
+  return groups;
+}
+
+function _profileProviderForModel(modelValue, groups){
+  const explicit=(typeof _providerFromModelValue==='function')?_providerFromModelValue(modelValue):'';
+  if(explicit) return explicit;
+  for(const g of groups||[]){
+    if((g.models||[]).some(m=>m.value===modelValue)) return g.provider||'';
+  }
+  return '';
+}
+
+function _profileSetInlineStatus(message, tone){
+  const node=$('profileInlineStatus');
+  if(!node) return;
+  node.textContent=message||'';
+  node.dataset.tone=tone||'muted';
+}
+
+function _profileMarkModelDirty(){
+  const btn=$('profileModelSave');
+  if(btn) btn.disabled=false;
+  _profileSetInlineStatus('Unsaved changes','warning');
+}
+
+async function _hydrateProfileIdentityControls(profile){
+  const providerSel=$('profileInlineProvider');
+  const modelSel=$('profileInlineModel');
+  const saveBtn=$('profileModelSave');
+  const avatarEdit=$('profileAvatarEdit');
+  if(!providerSel||!modelSel) return;
+  const ready=window._modelDropdownReady;
+  if(ready&&typeof ready.then==='function'){
+    try{await ready;}catch(_){}
+  }
+  if(!_profileModelGroupsFromComposer().length&&typeof populateModelDropdown==='function'){
+    try{await populateModelDropdown();}catch(_){}
+  }
+  const groups=_profileModelGroupsFromComposer();
+  const providerEntries=[];
+  const seenProviders=new Set();
+  for(const g of groups){
+    const provider=g.provider||'';
+    if(!provider||seenProviders.has(provider)) continue;
+    seenProviders.add(provider);
+    providerEntries.push({provider,label:g.label||provider});
+  }
+  const currentProvider=profile.provider||_profileProviderForModel(profile.model,groups)||'';
+  providerSel.innerHTML=`<option value="">${esc('Auto / default provider')}</option>`+providerEntries.map(g=>`<option value="${esc(g.provider)}">${esc(g.label)}</option>`).join('');
+  if(currentProvider&&!seenProviders.has(currentProvider)) providerSel.insertAdjacentHTML('beforeend',`<option value="${esc(currentProvider)}">${esc(currentProvider)}</option>`);
+  providerSel.value=currentProvider||'';
+
+  const renderModels=(preferredModel)=>{
+    const selectedProvider=providerSel.value||'';
+    const visibleGroups=selectedProvider?groups.filter(g=>g.provider===selectedProvider):groups;
+    modelSel.innerHTML='';
+    for(const g of (visibleGroups.length?visibleGroups:groups)){
+      const og=document.createElement('optgroup');
+      og.label=g.label||g.provider||'Models';
+      if(g.provider) og.dataset.provider=g.provider;
+      for(const m of g.models||[]){
+        const opt=document.createElement('option');
+        opt.value=m.value;
+        opt.textContent=m.label||getModelLabel(m.value);
+        og.appendChild(opt);
+      }
+      modelSel.appendChild(og);
+    }
+    const target=preferredModel||profile.model||'';
+    const resolved=(typeof _applyModelToDropdown==='function')?_applyModelToDropdown(target,modelSel,selectedProvider||profile.provider||null):null;
+    if(target&&!resolved){
+      const opt=document.createElement('option');
+      opt.value=target;
+      opt.textContent=getModelLabel(target);
+      opt.dataset.custom='1';
+      modelSel.appendChild(opt);
+      modelSel.value=target;
+    }else if(!modelSel.value&&modelSel.options.length){
+      modelSel.value=modelSel.options[0].value;
+    }
+  };
+  renderModels(profile.model||'');
+  providerSel.onchange=()=>{renderModels(modelSel.value||profile.model||'');_profileMarkModelDirty();};
+  modelSel.onchange=()=>{
+    const state=(typeof _modelStateForSelect==='function')?_modelStateForSelect(modelSel,modelSel.value):{model_provider:null};
+    if(state.model_provider&&Array.from(providerSel.options).some(o=>o.value===state.model_provider)) providerSel.value=state.model_provider;
+    _profileMarkModelDirty();
+  };
+  if(saveBtn){
+    saveBtn.disabled=true;
+    saveBtn.onclick=()=>_saveProfileModelSettings(profile.name);
+  }
+  const avatarPreview=$('profileAvatarPreview');
+  const openAvatar=()=>_openProfileAvatarDialog(profile.name);
+  if(avatarEdit) avatarEdit.onclick=openAvatar;
+  if(avatarPreview){
+    avatarPreview.onclick=openAvatar;
+    avatarPreview.onkeydown=(ev)=>{
+      if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();openAvatar();}
+    };
+  }
+  _profileSetInlineStatus('Saved','ok');
+}
+
+async function _saveProfileModelSettings(profileName){
+  const providerSel=$('profileInlineProvider');
+  const modelSel=$('profileInlineModel');
+  const btn=$('profileModelSave');
+  if(!providerSel||!modelSel) return;
+  const modelState=(typeof _modelStateForSelect==='function')?_modelStateForSelect(modelSel,modelSel.value):{model:modelSel.value,model_provider:null};
+  const payload={
+    name:profileName,
+    provider:providerSel.value||null,
+    model:modelState.model||modelSel.value,
+  };
+  if(btn){btn.disabled=true;btn.style.opacity='0.55';}
+  _profileSetInlineStatus('Saving…','saving');
+  try{
+    const updated=await api('/api/profile/settings',{method:'POST',body:JSON.stringify(payload)});
+    const p=_profilesCache&&Array.isArray(_profilesCache.profiles)?_profilesCache.profiles.find(x=>x.name===profileName):null;
+    if(p) Object.assign(p, updated);
+    const isActive=(S.activeProfile||(_profilesCache&&_profilesCache.active)||'default')===profileName;
+    if(isActive){
+      const sel=$('modelSelect');
+      if(sel&&updated.model&&typeof _applyModelToDropdown==='function'){
+        const resolved=_applyModelToDropdown(updated.model,sel,updated.provider||null)||updated.model;
+        if(S.session&&!(S.messages&&S.messages.length)){
+          S.session.model=resolved;
+          S.session.model_provider=updated.provider||modelState.model_provider||null;
+        }
+        if(typeof syncModelChip==='function') syncModelChip();
+        if(typeof syncTopbar==='function') syncTopbar();
+      }
+    }
+    await loadProfilesPanel();
+    showToast('Profile model saved');
+  }catch(e){
+    if(btn) btn.disabled=false;
+    _profileSetInlineStatus('Save failed','error');
+    showToast('Profile model save failed: '+e.message);
+  }finally{
+    if(btn) btn.style.opacity='';
+  }
+}
+
+let _profileAvatarUploadDataUrl='';
+const PROFILE_AVATAR_UPLOAD_MAX_BYTES=3*1024*1024;
+
+function _setProfileAvatarDialogMessage(message,tone){
+  const el=$('profileAvatarDialogMessage');
+  if(!el) return;
+  const text=String(message||'').trim();
+  el.textContent=text;
+  el.hidden=!text;
+  el.dataset.tone=tone||'';
+}
+
+function _chooseProfileAvatarEmoji(value){
+  const input=$('profileAvatarEmoji');
+  if(input){
+    input.value=value;
+    _setProfileAvatarDialogMode('emoji');
+    _setProfileAvatarDialogMessage('', '');
+    _refreshProfileAvatarDialogPreview();
+    input.focus();
+  }
+}
+
+function _profileAvatarDialogModeFromAvatar(avatar){
+  const normalized=(typeof _normalizeProfileAvatar==='function')?_normalizeProfileAvatar(avatar):null;
+  if(!normalized) return 'emoji';
+  if(normalized.type==='image') return 'upload';
+  return normalized.type||'emoji';
+}
+
+function _setProfileAvatarDialogMode(mode){
+  mode=['emoji','url','upload','asset'].includes(mode)?mode:'emoji';
+  document.querySelectorAll('[data-avatar-mode]').forEach(btn=>{
+    const active=btn.dataset.avatarMode===mode;
+    btn.classList.toggle('active',active);
+    btn.setAttribute('aria-pressed',active?'true':'false');
+  });
+  document.querySelectorAll('[data-profile-avatar-pane]').forEach(pane=>{
+    pane.hidden=pane.dataset.profileAvatarPane!==mode;
+  });
+  _refreshProfileAvatarDialogPreview();
+}
+
+function _profileAvatarPayloadFromDialog(){
+  const active=document.querySelector('[data-avatar-mode].active');
+  const mode=(active&&active.dataset.avatarMode)||'emoji';
+  if(mode==='emoji'){
+    const value=($('profileAvatarEmoji')&&$('profileAvatarEmoji').value.trim())||'';
+    if(!value) throw new Error('Choose an emoji avatar or clear the avatar.');
+    return {type:'emoji',value};
+  }
+  if(mode==='url'){
+    const value=($('profileAvatarUrl')&&$('profileAvatarUrl').value.trim())||'';
+    if(!value) throw new Error('Enter an image or GIF URL.');
+    return {type:'url',value};
+  }
+  if(mode==='upload'){
+    if(!_profileAvatarUploadDataUrl) throw new Error('Choose an image, GIF, or WebP file.');
+    return {type:'image',value:_profileAvatarUploadDataUrl};
+  }
+  const value=($('profileAvatarAsset')&&$('profileAvatarAsset').value.trim())||'';
+  if(!value) throw new Error('Enter a safe asset reference.');
+  return {type:'asset',value};
+}
+
+function _refreshProfileAvatarDialogPreview(){
+  const node=$('profileAvatarDialogPreview');
+  if(!node) return;
+  const profileName=node.dataset.profileName||(_currentProfileDetail&&_currentProfileDetail.name)||'H';
+  try{
+    const avatar=_profileAvatarPayloadFromDialog();
+    node.innerHTML=_profileAvatarForUi({name:profileName,avatar},'profile-avatar--dialog');
+  }catch(_){
+    const current=_currentProfileDetail&&_currentProfileDetail.name===profileName?_currentProfileDetail:null;
+    node.innerHTML=_profileAvatarForUi(current||{name:profileName},'profile-avatar--dialog');
+  }
+}
+
+function _openProfileAvatarDialog(profileName){
+  const dialog=$('profileAvatarDialog');
+  if(!dialog) return;
+  const profile=_profilesCache&&Array.isArray(_profilesCache.profiles)?_profilesCache.profiles.find(p=>p.name===profileName):_currentProfileDetail;
+  const avatar=(profile&&profile.avatar)||null;
+  const normalized=(typeof _normalizeProfileAvatar==='function')?_normalizeProfileAvatar(avatar):null;
+  _profileAvatarUploadDataUrl=normalized&&normalized.type==='image'?normalized.value:'';
+  if($('profileAvatarEmoji')) $('profileAvatarEmoji').value=normalized&&normalized.type==='emoji'?normalized.value:'🤖';
+  if($('profileAvatarUrl')) $('profileAvatarUrl').value=normalized&&normalized.type==='url'?normalized.value:'';
+  if($('profileAvatarAsset')) $('profileAvatarAsset').value=normalized&&normalized.type==='asset'?normalized.value:'';
+  _setProfileAvatarDialogMessage('', '');
+  const preview=$('profileAvatarDialogPreview');
+  if(preview) preview.dataset.profileName=profileName;
+  dialog.hidden=false;
+  _setProfileAvatarDialogMode(_profileAvatarDialogModeFromAvatar(avatar));
+  const file=$('profileAvatarUpload');
+  if(file) file.value='';
+}
+
+function _closeProfileAvatarDialog(){
+  const dialog=$('profileAvatarDialog');
+  if(dialog) dialog.hidden=true;
+  _profileAvatarUploadDataUrl='';
+}
+
+function _readProfileAvatarFile(file){
+  return new Promise((resolve,reject)=>{
+    if(!file) return reject(new Error('Choose an image, GIF, or WebP file.'));
+    if(!/^image\/(png|jpe?g|gif|webp)$/i.test(file.type||'')) return reject(new Error('Avatar upload must be PNG, JPEG, GIF, or WebP.'));
+    if(file.size>PROFILE_AVATAR_UPLOAD_MAX_BYTES) return reject(new Error('Avatar upload must be 3 MB or smaller.'));
+    const reader=new FileReader();
+    reader.onload=()=>resolve(String(reader.result||''));
+    reader.onerror=()=>reject(new Error('Could not read avatar file.'));
+    reader.readAsDataURL(file);
+  });
+}
+
+function _handleProfileAvatarUpload(file){
+  _setProfileAvatarDialogMessage('Reading image…','info');
+  return _readProfileAvatarFile(file).then(v=>{
+    _profileAvatarUploadDataUrl=v;
+    _refreshProfileAvatarDialogPreview();
+    _setProfileAvatarDialogMessage('Image ready. Save avatar to apply it.','success');
+  }).catch(e=>{
+    _profileAvatarUploadDataUrl='';
+    _refreshProfileAvatarDialogPreview();
+    _setProfileAvatarDialogMessage(e.message||String(e),'error');
+    if(typeof showToast==='function') showToast(e.message||String(e),4000,'error');
+  });
+}
+
+async function _saveProfileAvatar(profileName, clear){
+  const btn=$('profileAvatarSave');
+  if(btn){btn.disabled=true;btn.style.opacity='0.55';}
+  try{
+    const avatar=clear?null:_profileAvatarPayloadFromDialog();
+    _setProfileAvatarDialogMessage(clear?'Clearing avatar…':'Saving avatar…','info');
+    const updated=await api('/api/profile/settings',{method:'POST',body:JSON.stringify({name:profileName,avatar})});
+    const p=_profilesCache&&Array.isArray(_profilesCache.profiles)?_profilesCache.profiles.find(x=>x.name===profileName):null;
+    if(p) Object.assign(p, updated);
+    if(_currentProfileDetail&&_currentProfileDetail.name===profileName) Object.assign(_currentProfileDetail, updated);
+    if(_profilesCache) _syncProfileAvatarState(_profilesCache);
+    const isActive=(S.activeProfile||(_profilesCache&&_profilesCache.active)||'default')===profileName;
+    if(isActive&&typeof setActiveProfileAvatar==='function') setActiveProfileAvatar(updated.avatar||null);
+    _closeProfileAvatarDialog();
+    await loadProfilesPanel();
+    showToast(clear?'Profile avatar cleared':'Profile avatar saved');
+  }catch(e){
+    const message='Profile avatar save failed: '+(e.message||String(e));
+    _setProfileAvatarDialogMessage(message,'error');
+    showToast(message,4000,'error');
+  }finally{
+    if(btn){btn.disabled=false;btn.style.opacity='';}
+  }
+}
+
 async function loadProfilesPanel() {
   const panel = $('profilesPanel');
   if (!panel) return;
@@ -4355,6 +4682,7 @@ async function loadProfilesPanel() {
     const activeName = (S.activeProfile && data.profiles.some(p => p.name === S.activeProfile))
       ? S.activeProfile
       : (data.active || 'default');
+    _syncProfileAvatarState(data);
     for (const p of data.profiles) {
       const card = document.createElement('div');
       card.className = 'profile-card';
@@ -4371,6 +4699,7 @@ async function loadProfilesPanel() {
       const defaultBadge = p.is_default ? ` <span style="opacity:.5">${esc(t('profile_default_label'))}</span>` : '';
       card.innerHTML = `
         <div class="profile-card-header">
+          ${_profileAvatarForUi(p,'profile-avatar--card')}
           <div style="min-width:0;flex:1">
             <div class="profile-card-name${isActive ? ' is-active' : ''}">${gwDot}${esc(p.name)}${defaultBadge}${activeBadge}</div>
             ${meta.length ? `<div class="profile-card-meta">${esc(meta.join(' \u00b7 '))}</div>` : `<div class="profile-card-meta">${esc(t('profile_no_configuration'))}</div>`}
@@ -4407,21 +4736,86 @@ function _renderProfileDetail(p, activeName){
   const gwBadge = p.gateway_running
     ? `<span class="detail-badge ok">${esc(t('profile_gateway_running'))}</span>`
     : `<span class="detail-badge">${esc(t('profile_gateway_stopped'))}</span>`;
+  const profileName = esc(p.name);
+  const identityHeader = `
+    <div class="profile-identity-header">
+      <div class="profile-identity-avatar-wrap">
+        <div id="profileAvatarPreview" class="profile-identity-avatar-preview" role="button" tabindex="0" aria-label="Change avatar">${_profileAvatarForUi(p,'profile-avatar--detail')}</div>
+        <button id="profileAvatarEdit" type="button" class="profile-avatar-edit" aria-label="Change avatar">Change avatar</button>
+      </div>
+      <div class="profile-identity-copy">
+        <div class="profile-identity-name">${profileName}</div>
+        <div class="profile-identity-status">${statusBadge}${defaultBadge}${gwBadge}</div>
+        <div class="profile-identity-help">Profile-local model and identity settings. File-level configuration remains below.</div>
+      </div>
+    </div>
+    <div id="profileAvatarDialog" class="profile-avatar-dialog" hidden>
+      <div class="profile-avatar-dialog-card" role="dialog" aria-label="Change profile avatar">
+        <div class="profile-avatar-dialog-head">
+          <div>
+            <div class="profile-avatar-dialog-title">Change avatar</div>
+            <div class="profile-avatar-dialog-subtitle">Pick an emoji, upload an image/GIF/WebP up to 3 MB, or use an image URL.</div>
+          </div>
+          <button type="button" class="profile-avatar-dialog-close" onclick="_closeProfileAvatarDialog()" aria-label="Close">×</button>
+        </div>
+        <div class="profile-avatar-dialog-tabs" role="group" aria-label="Avatar source">
+          <button type="button" data-avatar-mode="emoji" onclick="_setProfileAvatarDialogMode('emoji')">Emoji</button>
+          <button type="button" data-avatar-mode="upload" onclick="_setProfileAvatarDialogMode('upload')">Upload</button>
+          <button type="button" data-avatar-mode="url" onclick="_setProfileAvatarDialogMode('url')">Image URL</button>
+          <button type="button" data-avatar-mode="asset" onclick="_setProfileAvatarDialogMode('asset')">Asset</button>
+        </div>
+        <div class="profile-avatar-dialog-body">
+          <div id="profileAvatarDialogPreview" class="profile-avatar-dialog-preview" data-profile-name="${profileName}">${_profileAvatarForUi(p,'profile-avatar--dialog')}</div>
+          <div class="profile-avatar-dialog-fields">
+            <label data-profile-avatar-pane="emoji" class="profile-avatar-choice">
+              <span>Emoji</span>
+              <input id="profileAvatarEmoji" type="text" maxlength="64" placeholder="🤖" oninput="_refreshProfileAvatarDialogPreview()">
+              <div class="profile-avatar-emoji-grid" aria-label="Quick emoji avatars">
+                <button type="button" onclick="_chooseProfileAvatarEmoji('🤖')">🤖</button>
+                <button type="button" onclick="_chooseProfileAvatarEmoji('🧠')">🧠</button>
+                <button type="button" onclick="_chooseProfileAvatarEmoji('🧙‍♂️')">🧙‍♂️</button>
+                <button type="button" onclick="_chooseProfileAvatarEmoji('🛡️')">🛡️</button>
+                <button type="button" onclick="_chooseProfileAvatarEmoji('🔬')">🔬</button>
+                <button type="button" onclick="_chooseProfileAvatarEmoji('✍️')">✍️</button>
+              </div>
+            </label>
+            <label data-profile-avatar-pane="upload" class="profile-avatar-choice" hidden>
+              <span>Upload image, GIF, or WebP</span>
+              <input id="profileAvatarUpload" type="file" accept="image/png,image/jpeg,image/gif,image/webp" onchange="_handleProfileAvatarUpload(this.files&&this.files[0])">
+            </label>
+            <label data-profile-avatar-pane="url" class="profile-avatar-choice" hidden>
+              <span>Image or GIF URL</span>
+              <input id="profileAvatarUrl" type="url" placeholder="https://example.com/avatar.gif" oninput="_refreshProfileAvatarDialogPreview()">
+            </label>
+            <label data-profile-avatar-pane="asset" class="profile-avatar-choice" hidden>
+              <span>Safe asset reference</span>
+              <input id="profileAvatarAsset" type="text" spellcheck="false" placeholder="avatars/researcher.webp" oninput="_refreshProfileAvatarDialogPreview()">
+            </label>
+          </div>
+        </div>
+        <div id="profileAvatarDialogMessage" class="profile-avatar-dialog-message" hidden></div>
+        <div class="profile-avatar-dialog-actions">
+          <button type="button" class="ws-action-btn ghost" onclick="_saveProfileAvatar('${profileName}',true)">Clear avatar</button>
+          <div style="flex:1"></div>
+          <button type="button" class="ws-action-btn ghost" onclick="_closeProfileAvatarDialog()">Cancel</button>
+          <button id="profileAvatarSave" type="button" class="ws-action-btn" onclick="_saveProfileAvatar('${profileName}')">Save avatar</button>
+        </div>
+      </div>
+    </div>`;
   const rows = [];
-  rows.push(`<div class="detail-row"><div class="detail-row-label">Status</div><div class="detail-row-value">${statusBadge}${defaultBadge}</div></div>`);
-  rows.push(`<div class="detail-row"><div class="detail-row-label">Gateway</div><div class="detail-row-value">${gwBadge}</div></div>`);
-  if (p.model) rows.push(`<div class="detail-row"><div class="detail-row-label">Model</div><div class="detail-row-value"><code>${esc(p.model)}</code></div></div>`);
-  if (p.provider) rows.push(`<div class="detail-row"><div class="detail-row-label">Provider</div><div class="detail-row-value">${esc(p.provider)}</div></div>`);
+  rows.push(`<div class="detail-row profile-inline-control-row"><div class="detail-row-label">Provider</div><div class="detail-row-value"><select id="profileInlineProvider" class="profile-inline-select" aria-label="Provider"></select></div></div>`);
+  rows.push(`<div class="detail-row profile-inline-control-row"><div class="detail-row-label">Model</div><div class="detail-row-value"><select id="profileInlineModel" class="profile-inline-select" aria-label="Model"></select></div></div>`);
+  rows.push(`<div class="profile-inline-actions"><span id="profileInlineStatus" class="profile-inline-status" data-tone="muted"></span><button id="profileModelSave" type="button" class="ws-action-btn">Save model</button></div>`);
   if (p.base_url) rows.push(`<div class="detail-row"><div class="detail-row-label">Base URL</div><div class="detail-row-value"><code>${esc(p.base_url)}</code></div></div>`);
   rows.push(`<div class="detail-row"><div class="detail-row-label">API key</div><div class="detail-row-value">${p.has_env ? esc(t('profile_api_keys_configured')) : '<span style="color:var(--muted)">Not configured</span>'}</div></div>`);
   if (typeof p.skill_count === 'number') rows.push(`<div class="detail-row"><div class="detail-row-label">Skills</div><div class="detail-row-value">${esc(t('profile_skill_count', p.skill_count))}</div></div>`);
   if (p.default_workspace) rows.push(`<div class="detail-row"><div class="detail-row-label">Default space</div><div class="detail-row-value"><code>${esc(p.default_workspace)}</code></div></div>`);
-    const _fileIcons = {'SOUL.md': '✨', 'config.yaml': '⚙️', '.env': '🔑', 'memories/MEMORY.md': '🧠', 'memories/USER.md': '👤'};
+  const _fileIcons = {'SOUL.md': '✨', 'config.yaml': '⚙️', '.env': '🔑', 'memories/MEMORY.md': '🧠', 'memories/USER.md': '👤'};
   const _fileLabels = {'SOUL.md': 'SOUL.md', 'config.yaml': 'config.yaml', '.env': '.env', 'memories/MEMORY.md': 'Agent Memory', 'memories/USER.md': 'User Profile'};
-    const _profileFiles = ['SOUL.md', 'config.yaml', '.env', 'memories/MEMORY.md', 'memories/USER.md'];
+  const _profileFiles = ['SOUL.md', 'config.yaml', '.env', 'memories/MEMORY.md', 'memories/USER.md'];
   const fileRows = _profileFiles.map(f => {
     const label = _fileLabels[f] || f;
-    return `<div class="detail-row" style="cursor:pointer" onclick="_openProfileFileEditor('${esc(p.name)}','${f}')">
+    return `<div class="detail-row" style="cursor:pointer" onclick="_openProfileFileEditor('${profileName}','${f}')">
       <div class="detail-row-label">${_fileIcons[f] || '📄'} ${esc(label)}</div>
       <div class="detail-row-value" style="justify-content:flex-end">
         <span style="color:var(--link);font-size:11px">Edit →</span>
@@ -4430,9 +4824,10 @@ function _renderProfileDetail(p, activeName){
   }).join('');
   body.innerHTML = `
     <div class="main-view-content">
-      <div class="detail-card">
+      <div class="detail-card profile-identity-card">
         <div class="detail-card-title">Profile</div>
-        ${rows.join('')}
+        ${identityHeader}
+        <div class="profile-identity-grid">${rows.join('')}</div>
       </div>
       <div class="detail-card" style="margin-top:12px">
         <div class="detail-card-title">Profile Files</div>
@@ -4443,6 +4838,7 @@ function _renderProfileDetail(p, activeName){
   if (empty) empty.style.display = 'none';
   _profileMode = 'read';
   _setProfileHeaderButtons('read', p, activeName);
+  _hydrateProfileIdentityControls(p).catch(e=>console.warn('profile identity controls failed',e));
 }
 
 
@@ -4578,6 +4974,7 @@ function renderProfileDropdown(data) {
   const active = (S.activeProfile && profiles.some(p => p.name === S.activeProfile))
     ? S.activeProfile
     : (data.active || 'default');
+  _syncProfileAvatarState(data);
   for (const p of profiles) {
     const opt = document.createElement('div');
     opt.className = 'profile-opt' + (p.name === active ? ' active' : '');
@@ -4587,8 +4984,8 @@ function renderProfileDropdown(data) {
     const gwDot = `<span class="profile-opt-badge ${p.gateway_running ? 'running' : 'stopped'}"></span>`;
     const checkmark = p.name === active ? ' <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--link)" stroke-width="3" style="vertical-align:-1px"><polyline points="20 6 9 17 4 12"/></svg>' : '';
     const defaultBadge = p.is_default ? ` <span style="opacity:.5;font-weight:400">${esc(t('profile_default_label'))}</span>` : '';
-    opt.innerHTML = `<div class="profile-opt-name">${gwDot}${esc(p.name)}${defaultBadge}${checkmark}</div>` +
-      (meta.length ? `<div class="profile-opt-meta">${esc(meta.join(' \u00b7 '))}</div>` : '');
+    opt.innerHTML = `<div class="profile-opt-main">${_profileAvatarForUi(p,'profile-avatar--dropdown')}<div style="min-width:0;flex:1"><div class="profile-opt-name">${gwDot}${esc(p.name)}${defaultBadge}${checkmark}</div>` +
+      (meta.length ? `<div class="profile-opt-meta">${esc(meta.join(' \u00b7 '))}</div>` : '') + `</div></div>`;
     opt.onclick = async () => {
       closeProfileDropdown();
       if (p.name === active) return;
@@ -4660,6 +5057,7 @@ async function switchToProfile(name) {
   try {
     const data = await api('/api/profile/switch', { method: 'POST', body: JSON.stringify({ name }) });
     S.activeProfile = data.active || name;
+    _syncProfileAvatarState(data);
 
     // Update composer placeholder and title bar while the core profile-switch
     // state is still close to the profile API response.

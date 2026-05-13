@@ -17,6 +17,7 @@ archive/
 .env.*
 !.env.example
 !.env.docker.example
+.hermes/
 .claude/
 CLAUDE.md
 AGENTS.md
@@ -25,9 +26,14 @@ AGENTS.md
 .aider*
 copilot-instructions.md
 
-# Generated screenshots and transient artifacts
+# Generated screenshots, media, and transient artifacts
 screenshot-*.png
 full-UI.png
+/*.png
+/*.jpg
+/*.jpeg
+/*.gif
+/*.webp
 
 # Version file written by Docker/CI build — generated, never committed
 api/_version.py
@@ -50,6 +56,20 @@ docs/AGENTS.md
 docs/CLAUDE.md
 docs/.cursorrules
 docs/.windsurfrules
+
+# Local Hermes/agentic workflow artifacts — not WebUI source.
+docs/agentic-worker-packet-template.md
+docs/browser-smoke-gate.md
+docs/ui-ux/visible-ui-change-gate.md
+docs/ui-ux/profile-card-redesign-sketches/
+evals/agentic/
+scripts/agentic_setup_doctor.py
+scripts/verify.sh
+scripts/verify_docs.py
+static/design-drafts/
+tests/test_agentic_*.py
+tests/test_verify_scripts.py
+tests/test_ctl_active_stream_guard.py
 
 # Local-only PR review harness: rendering drivers, sample bank, fixtures.
 # Used by Claude during deep reviews; never shared in the repo.

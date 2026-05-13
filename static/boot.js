@@ -1441,7 +1441,14 @@ function applyBotName(){
     api(_checkUrl).then(d=>{if(!_testUpdates)sessionStorage.setItem('hermes-update-checked','1');if((d.webui&&d.webui.behind>0)||(d.agent&&d.agent.behind>0))_showUpdateBanner(d);}).catch(()=>{});
   }
   // Fetch active profile
-  try{const p=await api('/api/profile/active');S.activeProfile=p.name||'default';}catch(e){S.activeProfile='default';}
+  try{
+    const p=await api('/api/profile/active');
+    S.activeProfile=p.name||'default';
+    if(typeof setActiveProfileAvatar==='function') setActiveProfileAvatar(p.avatar||null);
+  }catch(e){
+    S.activeProfile='default';
+    if(typeof setActiveProfileAvatar==='function') setActiveProfileAvatar(null);
+  }
   // Update profile chip label immediately
   const profileLabel=$('profileChipLabel');
   if(profileLabel) profileLabel.textContent=S.activeProfile||'default';

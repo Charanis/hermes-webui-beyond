@@ -14,11 +14,14 @@ Usage: ./ctl.sh <command> [args]
 
 Commands:
   start [bootstrap args...]   Start Hermes WebUI as a background daemon
-  stop                        Stop the daemon started by ctl.sh
-  restart [bootstrap args...] Stop, then start again
+  stop [--force]              Stop the daemon started by ctl.sh
+  restart [--force] [args...] Stop, then start again
   status                      Show daemon, host/port, log, and health status
   logs [--lines N] [--follow|--no-follow]
                               Show the daemon log (defaults to tail -n 100 -f)
+
+Safety:
+  stop/restart refuse to interrupt active streams unless --force is supplied.
 EOF
 }
 
@@ -236,7 +239,66 @@ start_cmd() {
   echo "[ctl] Log: ${LOG_FILE}"
 }
 
+_lifecycle_health_payload() {
+  local host="${HOST:-${HERMES_WEBUI_HOST:-127.0.0.1}}"
+  local port="${PORT:-${HERMES_WEBUI_PORT:-8787}}"
+  local url="http://${host}:${port}/health"
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "curl not found for ${url}"
+    return 1
+  fi
+  curl -fsS --max-time 2 "${url}"
+}
+
+_active_stream_guard() {
+  local action="$1" payload parsed status streams runs
+  if (( FORCE_LIFECYCLE )); then
+    echo "[ctl] --force supplied; skipping active stream guard for ${action}"
+    return 0
+  fi
+
+  _load_state_if_present
+  if ! payload="$(_lifecycle_health_payload 2>/dev/null)"; then
+    echo "[ctl] Active stream guard: /health unavailable; continuing ${action}" >&2
+    return 0
+  fi
+
+  if ! parsed="$(printf '%s' "${payload}" | python3 -c 'import json,sys
+try:
+    data=json.load(sys.stdin)
+    streams=int(data.get("active_streams", -1))
+    runs=data.get("active_runs", "?")
+    if streams < 0:
+        print("unknown:?" + ":" + str(runs))
+    elif streams > 0:
+        print("busy:" + str(streams) + ":" + str(runs))
+    else:
+        print("safe:0:" + str(runs))
+except Exception:
+    print("unknown:?:?")')"; then
+    echo "[ctl] Refusing to ${action}: unable to parse active streams. Use --force to override." >&2
+    return 1
+  fi
+
+  IFS=':' read -r status streams runs <<< "${parsed}"
+  case "${status}" in
+    safe)
+      echo "[ctl] Active stream guard: 0 active streams; continuing ${action}"
+      return 0
+      ;;
+    busy)
+      echo "[ctl] Refusing to ${action}: ${streams} active streams are running (${runs} active runs). Use --force to override." >&2
+      return 1
+      ;;
+    *)
+      echo "[ctl] Refusing to ${action}: active stream state is unknown. Use --force to override." >&2
+      return 1
+      ;;
+  esac
+}
+
 stop_cmd() {
+  local lifecycle_action="${1:-stop}"
   ensure_home
   local pid
   if ! pid="$(_pid_from_file 2>/dev/null)"; then
@@ -249,6 +311,8 @@ stop_cmd() {
     _clear_stale_pid
     return 0
   fi
+
+  _active_stream_guard "${lifecycle_action}"
 
   echo "[ctl] Stopping Hermes WebUI (PID ${pid})"
   kill "${pid}" >/dev/null 2>&1 || true
@@ -355,15 +419,37 @@ logs_cmd() {
   fi
 }
 
+FORCE_LIFECYCLE=0
 cmd="${1:-}"
 if [[ $# -gt 0 ]]; then
   shift
 fi
 
+if [[ "${cmd}" == "stop" || "${cmd}" == "restart" ]]; then
+  remaining_args=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --force)
+        FORCE_LIFECYCLE=1
+        ;;
+      *)
+        if [[ "${cmd}" == "stop" ]]; then
+          echo "[ctl] Unknown stop option: $1" >&2
+          usage >&2
+          exit 2
+        fi
+        remaining_args+=("$1")
+        ;;
+    esac
+    shift
+  done
+  set -- "${remaining_args[@]+"${remaining_args[@]}"}"
+fi
+
 case "${cmd}" in
   start) start_cmd "$@" ;;
-  stop) stop_cmd ;;
-  restart) stop_cmd; start_cmd "$@" ;;
+  stop) stop_cmd stop ;;
+  restart) stop_cmd restart; start_cmd "$@" ;;
   status) status_cmd ;;
   logs) logs_cmd "$@" ;;
   -h|--help|help|"") usage ;;

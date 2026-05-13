@@ -273,7 +273,7 @@ function _currentMessageRenderWindowSize(){
 function _messageRenderableMessageCount(){
   let count=0;
   for(const m of (S.messages||[])){
-    if(!m||!m.role||m.role==='tool') continue;
+    if(!m||!m.role||(m.role==='tool'&&!_clarifySelectionFromToolMessage(m))) continue;
     if(_isContextCompactionMessage(m)||_isPreservedCompressionTaskListMessage(m)) continue;
     const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
     const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
@@ -596,6 +596,55 @@ function _initMediaPlaybackObserver(){
 if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',_initMediaPlaybackObserver);
 else _initMediaPlaybackObserver();
 setTimeout(_initMediaPlaybackObserver,0);
+
+// Profile avatars are lightweight WebUI-only metadata loaded from /api/profiles.
+window._profileAvatarMap=window._profileAvatarMap||{};
+window._activeProfileAvatar=window._activeProfileAvatar||null;
+function _normalizeProfileAvatar(avatar){
+  if(!avatar||typeof avatar!=='object') return null;
+  const type=String(avatar.type||'').trim().toLowerCase();
+  const value=String(avatar.value||'').trim();
+  if(!value||!['emoji','url','asset','image'].includes(type)) return null;
+  if(type==='url'&&!/^https?:\/\//i.test(value)) return null;
+  if(type==='asset'&&(value.startsWith('/')||value.includes('..')||value.includes('\\')||value.includes(':'))) return null;
+  return {type,value};
+}
+function _profileAvatarMarkup(avatar, opts={}){
+  const normalized=_normalizeProfileAvatar(avatar);
+  const fallback=String(opts.fallback||'H').trim().slice(0,2).toUpperCase()||'H';
+  const classes=String(opts.classes||'').trim();
+  const title=opts.title?` title="${esc(opts.title)}"`:'';
+  const cls=`profile-avatar ${classes}`.trim();
+  if(normalized&&normalized.type==='emoji') return `<div class="${esc(cls)} profile-avatar--emoji"${title}>${esc(normalized.value)}</div>`;
+  if(normalized&&(normalized.type==='url'||normalized.type==='asset'||normalized.type==='image')) return `<div class="${esc(cls)} profile-avatar--image"${title}><img src="${esc(normalized.value)}" alt="" loading="lazy" decoding="async"></div>`;
+  return `<div class="${esc(cls)} profile-avatar--fallback"${title}>${esc(fallback)}</div>`;
+}
+function setActiveProfileAvatar(avatar){
+  const normalized=_normalizeProfileAvatar(avatar);
+  const before=JSON.stringify(window._activeProfileAvatar||null);
+  const after=JSON.stringify(normalized||null);
+  window._activeProfileAvatar=normalized;
+  if(before===after) return;
+  if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
+  if(typeof refreshAssistantProfileAvatars==='function') refreshAssistantProfileAvatars();
+}
+function setProfileAvatarMap(profiles, activeName){
+  const map={};
+  for(const p of profiles||[]) map[p.name]=_normalizeProfileAvatar(p.avatar);
+  window._profileAvatarMap=map;
+  const active=activeName||S.activeProfile||'default';
+  setActiveProfileAvatar(map[active]||null);
+}
+function refreshAssistantProfileAvatars(){
+  const label=window._botName||'Hermes';
+  const fallback=label.charAt(0).toUpperCase()||'H';
+  document.querySelectorAll('.msg-role.assistant .role-icon.assistant').forEach(node=>{
+    const wrap=document.createElement('div');
+    wrap.innerHTML=_profileAvatarMarkup(window._activeProfileAvatar,{fallback,classes:'role-icon assistant profile-avatar--message',title:label});
+    const next=wrap.firstElementChild;
+    if(next) node.replaceWith(next);
+  });
+}
 
 // Dynamic model labels -- populated by populateModelDropdown(), fallback to static map
 let _dynamicModelLabels={};
@@ -4151,7 +4200,10 @@ function isTpsDisplayEnabled(){
 function _assistantRoleHtml(tsTitle='', tpsText=''){
   const _bn=window._botName||'Hermes';
   const tps=(isTpsDisplayEnabled()&&tpsText)?`<span class="msg-tps-inline" title="Tokens per second">${esc(tpsText)}</span>`:'';
-  return `<div class="msg-role assistant" ${tsTitle?`title="${esc(tsTitle)}"`:''}><div class="role-icon assistant">${esc(_bn.charAt(0).toUpperCase())}</div><span style="font-size:12px">${esc(_bn)}</span>${tps}</div>`;
+  const avatarHtml=(typeof _profileAvatarMarkup==='function')
+    ? _profileAvatarMarkup(window._activeProfileAvatar,{fallback:_bn.charAt(0).toUpperCase()||'H',classes:'role-icon assistant profile-avatar--message',title:_bn})
+    : `<div class="role-icon assistant">${esc(_bn.charAt(0).toUpperCase())}</div>`;
+  return `<div class="msg-role assistant" ${tsTitle?`title="${esc(tsTitle)}"`:''}>${avatarHtml}<span style="font-size:12px">${esc(_bn)}</span>${tps}</div>`;
 }
 function _setAssistantTurnTps(turn, tpsText=''){
   if(!turn) return;
@@ -4436,6 +4488,19 @@ function _collectHandoffSummaryStates(messages){
     if(state) states.push({state, rawIdx:i});
   }
   return states;
+}
+const _CLARIFY_TIMEOUT_RESPONSE_RE=/^The user did not provide a response within the time limit\./i;
+function _clarifySelectionFromToolMessage(m){
+  if(!m||m.role!=='tool'||m.name!=='clarify') return '';
+  let payload=null;
+  if(m.content&&typeof m.content==='object'&&!Array.isArray(m.content)) payload=m.content;
+  else if(typeof m.content==='string'){
+    try{payload=JSON.parse(m.content);}catch(_){return '';}
+  }
+  if(!payload||typeof payload!=='object') return '';
+  const response=String(payload.user_response||payload.response||'').trim();
+  if(!response||_CLARIFY_TIMEOUT_RESPONSE_RE.test(response)) return '';
+  return response;
 }
 function _isContextCompactionMessage(m){
   if(!m||!m.role||m.role==='tool') return false;
@@ -4873,7 +4938,7 @@ function renderMessages(options){
   ) ? S.session.compression_anchor_summary.trim() : '';
   const preservedCompressionTaskMessages=_latestPreservedCompressionTaskListMessages(S.messages);
   const vis=S.messages.filter(m=>{
-    if(!m||!m.role||m.role==='tool')return false;
+    if(!m||!m.role||(m.role==='tool'&&!_clarifySelectionFromToolMessage(m)))return false;
     if(_isContextCompactionMessage(m)) return false;
     if(_isPreservedCompressionTaskListMessage(m)) return false;
     if(m.role==='assistant'){
@@ -4898,7 +4963,7 @@ function renderMessages(options){
   const preservedCompressionRawIdxs=[];
   let rawIdx=0;
   for(const m of S.messages){
-    if(!m||!m.role||m.role==='tool'){rawIdx++;continue;}
+    if(!m||!m.role||(m.role==='tool'&&!_clarifySelectionFromToolMessage(m))){rawIdx++;continue;}
     if(_isPreservedCompressionTaskListMessage(m)){preservedCompressionRawIdxs.push(rawIdx);rawIdx++;continue;}
     const hasTc=Array.isArray(m.tool_calls)&&m.tool_calls.length>0;
     const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
@@ -4995,8 +5060,10 @@ function renderMessages(options){
         }
       }
     }
-    const isUser=m.role==='user';
-    const displayContent=isUser?_stripWorkspaceDisplayPrefix(content):content;
+    const clarifySelectionText=_clarifySelectionFromToolMessage(m);
+    const isUser=m.role==='user'||!!clarifySelectionText;
+    const contentForDisplay=clarifySelectionText||content;
+    const displayContent=isUser?_stripWorkspaceDisplayPrefix(contentForDisplay):contentForDisplay;
     const isLastAssistant=!isUser&&vi===renderVisWithIdx.length-1;
     let filesHtml='';
     if(m.attachments&&m.attachments.length){
@@ -5015,7 +5082,7 @@ function renderMessages(options){
       bodyHtml += `<details class="provider-error-details"><summary>Provider details</summary><pre><code>${esc(String(m.provider_details))}</code></pre></details>`;
     }
     const statusHtml = (!isUser&&m._statusCard) ? _statusCardHtml(m._statusCard) : '';
-    const isEditableUser=isUser&&rawIdx===lastUserRawIdx;
+    const isEditableUser=m.role==='user'&&rawIdx===lastUserRawIdx;
     const editBtn  = isEditableUser ? `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>` : '';
     const undoBtn  = isLastAssistant ? `<button class="msg-action-btn" title="${t('undo_exchange')}" onclick="undoLastExchange()">${li('undo',13)}</button>` : '';
     const retryBtn = isLastAssistant ? `<button class="msg-action-btn" title="${t('regenerate')}" onclick="regenerateResponse(this)">${li('rotate-ccw',13)}</button>` : '';

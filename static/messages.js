@@ -1791,7 +1791,7 @@ function _ensureClarifyCardDom() {
         <span id="clarifyHeading" data-i18n="clarify_heading">Clarification needed</span>
         <span class="clarify-countdown" id="clarifyCountdown"></span>
       </div>
-      <div class="clarify-question" id="clarifyQuestion"></div>
+      <div class="clarify-question clarify-md" id="clarifyQuestion"></div>
       <div class="clarify-choices" id="clarifyChoices"></div>
       <div class="clarify-response">
         <input class="clarify-input" id="clarifyInput" type="text" data-i18n-placeholder="clarify_input_placeholder" placeholder="Type your response…">
@@ -1805,6 +1805,62 @@ function _ensureClarifyCardDom() {
   if (submit) submit.onclick = () => respondClarify();
   if (typeof applyLocaleToDOM === "function") applyLocaleToDOM();
   return card;
+}
+
+function _clarifyRenderedText(el, fallback='') {
+  if (!el) return String(fallback || '').trim();
+  const source = typeof el.cloneNode === 'function' ? el.cloneNode(true) : el;
+  if (source && typeof source.querySelectorAll === 'function') {
+    source.querySelectorAll('br,h1,h2,h3,h4,h5,h6,p,li,tr,td,th').forEach(node => {
+      node.insertAdjacentText('afterend', ' ');
+    });
+  }
+  return String((source && source.textContent) || fallback || '').replace(/\s+/g, ' ').trim();
+}
+
+function _renderClarifyMarkdown(el, raw) {
+  const value = String(raw ?? '');
+  if (!el) return value;
+  if (typeof renderMd === 'function') {
+    el.innerHTML = renderMd(value);
+  } else {
+    el.textContent = value;
+  }
+  return _clarifyRenderedText(el, value);
+}
+
+function _clarifyReadableFallback(node, fallback='') {
+  if (!node) return fallback;
+  return String(
+    node.textContent ||
+    (typeof node.getAttribute === 'function' && (node.getAttribute('alt') || node.getAttribute('title') || node.getAttribute('aria-label'))) ||
+    fallback ||
+    ''
+  ).trim();
+}
+
+function _replaceClarifyNodeWithText(node, fallback='') {
+  if (!node || !node.parentNode) return;
+  const span = document.createElement('span');
+  span.className = 'clarify-choice-fallback';
+  span.textContent = _clarifyReadableFallback(node, fallback);
+  node.replaceWith(span);
+}
+
+function _neutralizeClarifyChoiceInteractivity(root) {
+  if (!root || typeof root.querySelectorAll !== 'function') return;
+  root.querySelectorAll('a').forEach(anchor => {
+    const span = document.createElement('span');
+    span.className = 'clarify-choice-link';
+    span.textContent = _clarifyReadableFallback(anchor, anchor.getAttribute('href') || 'link');
+    anchor.replaceWith(span);
+  });
+  root.querySelectorAll('img, audio, video, canvas, iframe, object, embed').forEach(node => {
+    _replaceClarifyNodeWithText(node, node.tagName ? `[${node.tagName.toLowerCase()}]` : '[media]');
+  });
+  root.querySelectorAll('button, input, select, textarea, form').forEach(node => {
+    _replaceClarifyNodeWithText(node, node.tagName ? `[${node.tagName.toLowerCase()}]` : '[control]');
+  });
 }
 
 function _clearClarifyHideTimer() {
@@ -1972,23 +2028,26 @@ function showClarifyCard(pending) {
     _clarifyVisibleSince = Date.now();
     _clearClarifyHideTimer();
   }
-  if (questionEl) questionEl.textContent = question;
+  if (questionEl) _renderClarifyMarkdown(questionEl, question);
   if (choicesEl) {
     choicesEl.innerHTML = '';
     choicesEl.style.display = choices.length ? '' : 'none';
     if (choices.length) {
       choices.forEach((choice, idx) => {
+        const rawChoice = String(choice ?? '');
         const btn = document.createElement('button');
         btn.type = 'button';
         btn.className = 'clarify-choice';
-        btn.dataset.choice = choice;
-        btn.onclick = () => respondClarify(choice);
+        btn.dataset.choice = rawChoice;
+        btn.onclick = () => respondClarify(rawChoice);
         const badge = document.createElement('span');
         badge.className = 'clarify-choice-badge';
         badge.textContent = String(idx + 1);
         const text = document.createElement('span');
-        text.className = 'clarify-choice-text';
-        text.textContent = choice;
+        text.className = 'clarify-choice-text clarify-md';
+        const label = _renderClarifyMarkdown(text, rawChoice);
+        _neutralizeClarifyChoiceInteractivity(text);
+        btn.setAttribute('aria-label', label || rawChoice || `Choice ${idx + 1}`);
         btn.appendChild(badge);
         btn.appendChild(text);
         choicesEl.appendChild(btn);

@@ -834,6 +834,244 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
     }
 
 
+_MISSING = object()
+_PROFILE_SETTINGS_FILE = 'profile_settings.json'
+_AVATAR_TYPES = {'emoji', 'url', 'asset', 'image'}
+_MAX_AVATAR_VALUE_LEN = 4 * 1024 * 1024
+_MAX_EMOJI_AVATAR_LEN = 64
+_IMAGE_AVATAR_RE = re.compile(r'^data:image/(png|jpeg|jpg|gif|webp);base64,[A-Za-z0-9+/=\s]+$')
+
+
+def _validate_profile_settings_name(name: str) -> str:
+    """Validate a profile name for settings reads/writes."""
+    if not isinstance(name, str):
+        name = str(name or '')
+    name = name.strip()
+    if not name:
+        raise ValueError('name is required')
+    if name == 'default':
+        return name
+    if not _PROFILE_ID_RE.fullmatch(name):
+        raise ValueError(
+            f"Invalid profile name {name!r}. "
+            "Must match [a-z0-9][a-z0-9_-]{0,63}"
+        )
+    return name
+
+
+def _require_profile_home_for_settings(name: str) -> tuple[str, Path]:
+    """Return a validated profile name and existing profile home path."""
+    name = _validate_profile_settings_name(name)
+    if _is_root_profile(name):
+        home = _DEFAULT_HERMES_HOME
+    else:
+        home = _resolve_named_profile_home(name)
+    if not home.is_dir():
+        raise FileNotFoundError(f"Profile '{name}' not found.")
+    return name, home
+
+
+def _load_profile_config_for_settings(profile_home: Path) -> dict:
+    config_path = profile_home / 'config.yaml'
+    if not config_path.exists():
+        return {}
+    try:
+        import yaml as _yaml
+        loaded = _yaml.safe_load(config_path.read_text(encoding='utf-8'))
+    except Exception:
+        logger.debug("Failed to load profile settings config from %s", config_path, exc_info=True)
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _save_profile_config_for_settings(profile_home: Path, config_data: dict) -> None:
+    try:
+        import yaml as _yaml
+    except ImportError as exc:
+        raise RuntimeError('PyYAML is required to update profile settings') from exc
+    config_path = profile_home / 'config.yaml'
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        _yaml.safe_dump(config_data, default_flow_style=False, allow_unicode=True, sort_keys=False),
+        encoding='utf-8',
+    )
+
+
+def _extract_profile_model_settings(config_data: dict) -> tuple[str | None, str | None]:
+    model_cfg = config_data.get('model') if isinstance(config_data, dict) else None
+    if isinstance(model_cfg, dict):
+        model = model_cfg.get('default') or model_cfg.get('model') or model_cfg.get('name')
+        provider = model_cfg.get('provider')
+    elif isinstance(model_cfg, str):
+        model = model_cfg
+        provider = None
+    else:
+        model = None
+        provider = None
+    model_s = str(model).strip() if model is not None else None
+    provider_s = str(provider).strip() if provider is not None else None
+    return (model_s or None, provider_s or None)
+
+
+def _normalize_model_provider_inputs(provider, model) -> tuple[str | object, str | object]:
+    normalized_provider = provider
+    normalized_model = model
+    if model is not _MISSING:
+        if not isinstance(model, str):
+            raise ValueError('model must be a string')
+        selected = model.strip()
+        if not selected:
+            raise ValueError('model is required')
+        if selected.startswith('@') and ':' in selected:
+            provider_hint, bare_model = selected[1:].split(':', 1)
+            provider_hint = provider_hint.strip()
+            bare_model = bare_model.strip()
+            if not bare_model:
+                raise ValueError('model is required')
+            selected = bare_model
+            if provider is _MISSING and provider_hint:
+                normalized_provider = provider_hint
+        normalized_model = selected
+    if normalized_provider is not _MISSING:
+        if normalized_provider is None:
+            pass
+        elif not isinstance(normalized_provider, str):
+            raise ValueError('provider must be a string')
+        else:
+            normalized_provider = normalized_provider.strip()
+            if not normalized_provider:
+                raise ValueError('provider is required')
+    return normalized_provider, normalized_model
+
+
+def _merge_profile_model_settings(config_data: dict, provider, model) -> bool:
+    provider, model = _normalize_model_provider_inputs(provider, model)
+    current = config_data.get('model')
+    if isinstance(current, dict):
+        model_cfg = dict(current)
+    elif isinstance(current, str) and current.strip():
+        model_cfg = {'default': current.strip()}
+    else:
+        model_cfg = {}
+
+    before = dict(model_cfg)
+    if model is not _MISSING:
+        model_cfg['default'] = model
+    if provider is not _MISSING:
+        if provider is None:
+            model_cfg.pop('provider', None)
+        else:
+            model_cfg['provider'] = provider
+    config_data['model'] = model_cfg
+    return before != model_cfg
+
+
+def _profile_settings_state_path(profile_home: Path) -> Path:
+    return profile_home / 'webui_state' / _PROFILE_SETTINGS_FILE
+
+
+def _read_profile_settings_state(profile_home: Path) -> dict:
+    path = _profile_settings_state_path(profile_home)
+    if not path.exists():
+        return {}
+    try:
+        loaded = json.loads(path.read_text(encoding='utf-8'))
+    except Exception:
+        logger.debug("Failed to load WebUI profile settings from %s", path, exc_info=True)
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _write_profile_settings_state(profile_home: Path, state: dict) -> None:
+    path = _profile_settings_state_path(profile_home)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + '.tmp')
+    tmp.write_text(
+        json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding='utf-8',
+    )
+    tmp.replace(path)
+
+
+def _read_profile_avatar_for_home(profile_home: Path):
+    state = _read_profile_settings_state(profile_home)
+    avatar = state.get('avatar')
+    return avatar if isinstance(avatar, dict) else None
+
+
+def _normalize_avatar_payload(avatar):
+    if avatar is None:
+        return None
+    if not isinstance(avatar, dict):
+        raise ValueError('avatar must be an object')
+    avatar_type = str(avatar.get('type') or '').strip().lower()
+    value = avatar.get('value')
+    if avatar_type not in _AVATAR_TYPES:
+        raise ValueError('avatar type must be emoji, url, asset, or image')
+    if not isinstance(value, str):
+        raise ValueError('avatar value must be a string')
+    value = value.strip()
+    if not value:
+        raise ValueError('avatar value is required')
+    if len(value) > _MAX_AVATAR_VALUE_LEN:
+        raise ValueError('avatar value is too large')
+    if avatar_type == 'emoji' and len(value) > _MAX_EMOJI_AVATAR_LEN:
+        raise ValueError('emoji avatar value is too large')
+    if avatar_type == 'url':
+        from urllib.parse import urlparse
+        parsed = urlparse(value)
+        if parsed.scheme not in {'http', 'https'} or not parsed.netloc:
+            raise ValueError('avatar URL must start with http:// or https://')
+    if avatar_type == 'image':
+        compact_value = ''.join(value.split())
+        if not _IMAGE_AVATAR_RE.fullmatch(compact_value):
+            raise ValueError('uploaded avatar must be a PNG, JPEG, GIF, or WebP data image')
+        value = compact_value
+    if avatar_type == 'asset':
+        if value.startswith(('/', '\\')) or '..' in value.split('/') or '\\' in value or ':' in value:
+            raise ValueError('avatar asset must be a safe relative asset path')
+    return {'type': avatar_type, 'value': value}
+
+
+def get_profile_settings_api(name: str) -> dict:
+    """Return structured WebUI settings for a profile."""
+    name, profile_home = _require_profile_home_for_settings(name)
+    config_data = _load_profile_config_for_settings(profile_home)
+    model, provider = _extract_profile_model_settings(config_data)
+    return {
+        'name': name,
+        'provider': provider,
+        'model': model,
+        'avatar': _read_profile_avatar_for_home(profile_home),
+    }
+
+
+def update_profile_settings_api(name: str, *, provider=_MISSING, model=_MISSING, avatar=_MISSING) -> dict:
+    """Update model/provider and/or WebUI avatar metadata for a profile."""
+    if provider is _MISSING and model is _MISSING and avatar is _MISSING:
+        raise ValueError('At least one of provider, model, or avatar is required')
+    name, profile_home = _require_profile_home_for_settings(name)
+
+    if provider is not _MISSING or model is not _MISSING:
+        config_data = _load_profile_config_for_settings(profile_home)
+        model_changed = _merge_profile_model_settings(config_data, provider, model)
+        if model_changed:
+            _save_profile_config_for_settings(profile_home, config_data)
+            from api.config import invalidate_models_cache
+            invalidate_models_cache()
+
+    if avatar is not _MISSING:
+        normalized_avatar = _normalize_avatar_payload(avatar)
+        state = _read_profile_settings_state(profile_home)
+        if normalized_avatar is None:
+            state.pop('avatar', None)
+        else:
+            state['avatar'] = normalized_avatar
+        _write_profile_settings_state(profile_home, state)
+
+    return get_profile_settings_api(name)
+
+
 def list_profiles_api() -> list:
     """List all profiles with metadata, serialized for JSON response."""
     try:
@@ -854,6 +1092,7 @@ def list_profiles_api() -> list:
             'gateway_running': p.gateway_running,
             'model': p.model,
             'provider': p.provider,
+            'avatar': _read_profile_avatar_for_home(Path(p.path)),
             'has_env': p.has_env,
             'skill_count': p.skill_count,
         })
@@ -870,6 +1109,7 @@ def _default_profile_dict() -> dict:
         'gateway_running': False,
         'model': None,
         'provider': None,
+        'avatar': _read_profile_avatar_for_home(_DEFAULT_HERMES_HOME),
         'has_env': (_DEFAULT_HERMES_HOME / '.env').exists(),
         'skill_count': 0,
     }

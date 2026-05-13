@@ -115,8 +115,10 @@ For self-hosted VM or homelab installs, `ctl.sh` wraps the common daemon lifecyc
 ./ctl.sh start              # background daemon, PID at ~/.hermes/webui.pid
 ./ctl.sh status             # PID, uptime, bound host/port, log path, /health
 ./ctl.sh logs --lines 100   # tail ~/.hermes/webui.log
-./ctl.sh restart
-./ctl.sh stop
+./ctl.sh restart            # refuses if /health reports active streams
+./ctl.sh stop               # refuses if /health reports active streams
+./ctl.sh restart --force    # emergency override for active-stream guard
+./ctl.sh stop --force       # emergency override for active-stream guard
 ```
 
 `ctl.sh start` runs the bootstrap in foreground/no-browser mode behind the daemon wrapper, writes logs to `~/.hermes/webui.log`, and respects `.env` plus inline overrides such as `HERMES_WEBUI_HOST=0.0.0.0 ./ctl.sh start`.

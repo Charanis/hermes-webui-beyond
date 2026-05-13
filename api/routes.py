@@ -2279,7 +2279,7 @@ def _handle_logs(handler, parsed) -> bool:
 # ── Insights endpoint ──────────────────────────────────────────────────────────
 
 _LLM_WIKI_DOCS_URL = "https://hermes-agent.nousresearch.com/docs/user-guide/skills/bundled/research/research-llm-wiki"
-_LLM_WIKI_PAGE_DIRS = ("entities", "concepts", "comparisons", "queries")
+_LLM_WIKI_PAGE_DIRS = ("entities", "concepts", "comparisons", "queries", "decisions", "dossiers", "projects", "playbooks", "glossary")
 
 
 def _llm_wiki_active_hermes_home() -> Path:
@@ -2393,30 +2393,68 @@ def _llm_wiki_count_files(root: Path) -> int:
     return count
 
 
+def _llm_wiki_subwiki_roots(wiki_path: Path) -> list[Path]:
+    """Return flat and federated wiki roots without reading page bodies."""
+    roots: list[Path] = []
+    seen: set[str] = set()
+
+    def add(root: Path) -> None:
+        try:
+            resolved = root.resolve()
+        except Exception:
+            return
+        if str(resolved) in _LLM_WIKI_FORBIDDEN_ROOTS:
+            return
+        if not root.exists() or not root.is_dir():
+            return
+        key = str(resolved)
+        if key in seen:
+            return
+        seen.add(key)
+        roots.append(root)
+
+    add(wiki_path)
+    add(wiki_path / "global")
+    spaces_root = wiki_path / "spaces"
+    try:
+        space_dirs = sorted(spaces_root.iterdir()) if spaces_root.exists() and spaces_root.is_dir() else []
+    except Exception:
+        space_dirs = []
+    for space_dir in space_dirs:
+        add(space_dir / "wiki")
+    return roots
+
+
 def _llm_wiki_page_files(wiki_path: Path) -> list[Path]:
     pages: list[Path] = []
-    # Defense in depth: refuse forbidden system roots.
-    try:
-        if str(wiki_path.resolve()) in _LLM_WIKI_FORBIDDEN_ROOTS:
-            return pages
-    except Exception:
-        return pages
     iterated = 0
-    for dirname in _LLM_WIKI_PAGE_DIRS:
-        section = wiki_path / dirname
-        if not section.exists() or not section.is_dir():
-            continue
-        for item in section.rglob("*.md"):
-            iterated += 1
-            if iterated > _LLM_WIKI_MAX_FILES:
-                return pages  # bounded
-            try:
-                rel = item.relative_to(section)
-                if item.is_file() and not any(part.startswith(".") for part in rel.parts):
-                    pages.append(item)
-            except Exception:
+    for root in _llm_wiki_subwiki_roots(wiki_path):
+        for dirname in _LLM_WIKI_PAGE_DIRS:
+            section = root / dirname
+            if not section.exists() or not section.is_dir():
                 continue
+            for item in section.rglob("*.md"):
+                iterated += 1
+                if iterated > _LLM_WIKI_MAX_FILES:
+                    return pages  # bounded
+                try:
+                    rel = item.relative_to(section)
+                    if item.is_file() and not any(part.startswith(".") for part in rel.parts):
+                        pages.append(item)
+                except Exception:
+                    continue
     return pages
+
+
+def _llm_wiki_raw_source_count(wiki_path: Path) -> int:
+    return sum(_llm_wiki_count_files(root / "raw") for root in _llm_wiki_subwiki_roots(wiki_path))
+
+
+def _llm_wiki_status_files(wiki_path: Path) -> list[Path]:
+    files: list[Path] = []
+    for root in _llm_wiki_subwiki_roots(wiki_path):
+        files.extend(p for p in (root / "SCHEMA.md", root / "index.md", root / "log.md") if p.exists() and p.is_file())
+    return files
 
 
 def _build_llm_wiki_status() -> dict:
@@ -2445,7 +2483,7 @@ def _build_llm_wiki_status() -> dict:
             return base
 
         page_files = _llm_wiki_page_files(wiki_path)
-        status_files = [p for p in (wiki_path / "SCHEMA.md", wiki_path / "index.md", wiki_path / "log.md") if p.exists() and p.is_file()]
+        status_files = _llm_wiki_status_files(wiki_path)
         status_files.extend(page_files)
         latest = None
         for item in status_files:
@@ -2461,7 +2499,7 @@ def _build_llm_wiki_status() -> dict:
             "status": "ready" if page_files else "empty",
             "entry_count": len(page_files),
             "page_count": len(page_files),
-            "raw_source_count": _llm_wiki_count_files(wiki_path / "raw"),
+            "raw_source_count": _llm_wiki_raw_source_count(wiki_path),
             "last_updated": _llm_wiki_safe_iso(latest),
         })
         return base
@@ -3865,12 +3903,29 @@ def handle_get(handler, parsed) -> bool:
         )
 
     if parsed.path == "/api/profile/active":
-        from api.profiles import get_active_profile_name, get_active_hermes_home
+        from api.profiles import get_active_profile_name, get_active_hermes_home, get_profile_settings_api
 
-        return j(
-            handler,
-            {"name": get_active_profile_name(), "path": str(get_active_hermes_home())},
-        )
+        name = get_active_profile_name()
+        payload = {"name": name, "path": str(get_active_hermes_home())}
+        try:
+            payload["avatar"] = get_profile_settings_api(name).get("avatar")
+        except Exception:
+            payload["avatar"] = None
+        return j(handler, payload)
+
+    if parsed.path == "/api/profile/settings":
+        from api.profiles import get_profile_settings_api
+
+        qs = parse_qs(parsed.query)
+        name = str(qs.get("name", [""])[0] or "").strip()
+        if not name:
+            return bad(handler, "name is required")
+        try:
+            return j(handler, get_profile_settings_api(name))
+        except FileNotFoundError as e:
+            return bad(handler, _sanitize_error(e), 404)
+        except ValueError as e:
+            return bad(handler, _sanitize_error(e), 400)
 
     # ── Profile Files API (GET) ──
     if parsed.path == "/api/profile/files":
@@ -4868,6 +4923,23 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, _sanitize_error(e))
         except RuntimeError as e:
             return bad(handler, str(e), 409)
+
+    if parsed.path == "/api/profile/settings":
+        from api.profiles import update_profile_settings_api
+
+        name = str(body.get("name", "") or "").strip()
+        if not name:
+            return bad(handler, "name is required")
+        updates = {}
+        for key in ("provider", "model", "avatar"):
+            if key in body:
+                updates[key] = body.get(key)
+        try:
+            return j(handler, update_profile_settings_api(name, **updates))
+        except FileNotFoundError as e:
+            return bad(handler, _sanitize_error(e), 404)
+        except ValueError as e:
+            return bad(handler, _sanitize_error(e), 400)
 
     # ── Profile Files API (POST) ──
     if parsed.path == "/api/profile/files":
