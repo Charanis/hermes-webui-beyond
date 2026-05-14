@@ -123,3 +123,87 @@ def test_unavailable_when_no_backend_and_no_hook():
             assert result["ok"] is False
             assert result.get("unavailable") is True
             assert "not available" in result["message"].lower()
+
+
+# ── State write on successful start (rework Task 6) ───────────────────────────
+
+
+def test_gateway_start_writes_last_run_at_state():
+    """On a successful start the profile's .gateway-state.json must contain
+    a last_run_at ISO-8601 UTC timestamp. The activity line reads this to show
+    "gateway last ran ..." even after the gateway is stopped."""
+    import json as _json
+
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        profile_dir = _seed_named_profile(base, "coder")
+        profiles = _reload_profiles_module(base)
+
+        def fake_hook(name, action):
+            return {"ok": True, "running": action != "stop"}
+
+        profiles._set_gateway_control_hook(fake_hook)
+        try:
+            result = profiles.profile_gateway_control_api("coder", "start")
+            assert result["ok"] is True
+        finally:
+            profiles._set_gateway_control_hook(None)
+
+        state_path = profile_dir / ".gateway-state.json"
+        assert state_path.exists()
+        state = _json.loads(state_path.read_text(encoding="utf-8"))
+        assert isinstance(state.get("last_run_at"), str)
+        # ISO-8601 UTC: ends with Z (we normalize +00:00 -> Z for the wire).
+        assert state["last_run_at"].endswith("Z")
+
+
+def test_gateway_stop_does_not_overwrite_last_run_at():
+    """Only start/restart should bump last_run_at; a stop must preserve it."""
+    import json as _json
+
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        profile_dir = _seed_named_profile(base, "coder")
+        profiles = _reload_profiles_module(base)
+
+        # Pre-existing state from a prior successful start.
+        state_path = profile_dir / ".gateway-state.json"
+        state_path.write_text(
+            _json.dumps({"last_run_at": "2026-05-01T12:00:00Z"}),
+            encoding="utf-8",
+        )
+
+        def fake_hook(name, action):
+            return {"ok": True, "running": False}
+
+        profiles._set_gateway_control_hook(fake_hook)
+        try:
+            profiles.profile_gateway_control_api("coder", "stop")
+        finally:
+            profiles._set_gateway_control_hook(None)
+
+        state = _json.loads(state_path.read_text(encoding="utf-8"))
+        assert state["last_run_at"] == "2026-05-01T12:00:00Z"
+
+
+def test_gateway_failed_start_does_not_write_state():
+    """If the hook raises, the start "failed" — no state write."""
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        profile_dir = _seed_named_profile(base, "coder")
+        profiles = _reload_profiles_module(base)
+
+        def boom(name, action):
+            raise RuntimeError("nope")
+
+        profiles._set_gateway_control_hook(boom)
+        try:
+            result = profiles.profile_gateway_control_api("coder", "start")
+        finally:
+            profiles._set_gateway_control_hook(None)
+
+        assert result["ok"] is False
+        assert not (profile_dir / ".gateway-state.json").exists()

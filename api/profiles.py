@@ -1709,6 +1709,8 @@ def profile_gateway_control_api(name: str, action: str) -> dict:
         hook_result.setdefault('profile', name)
         hook_result.setdefault('action', action)
         hook_result.setdefault('configured', True)
+        if hook_result.get('ok') and action in ('start', 'restart'):
+            _write_gateway_last_run(profile_home)
         return hook_result
 
     try:
@@ -1744,7 +1746,36 @@ def profile_gateway_control_api(name: str, action: str) -> dict:
     result.setdefault('profile', name)
     result.setdefault('action', action)
     result.setdefault('configured', True)
+    if result.get('ok') and action in ('start', 'restart'):
+        _write_gateway_last_run(profile_home)
     return result
+
+
+def _write_gateway_last_run(profile_home: Path) -> None:
+    """Stamp ``.gateway-state.json`` with last_run_at on a successful start.
+
+    Best-effort: never fail the gateway action because the state write
+    failed. The activity line reads this back via :func:`_read_gateway_state`.
+    """
+    import datetime as _dt
+    state_path = profile_home / '.gateway-state.json'
+    try:
+        payload: dict = {}
+        if state_path.exists():
+            try:
+                existing = json.loads(state_path.read_text(encoding='utf-8'))
+                if isinstance(existing, dict):
+                    payload = existing
+            except (ValueError, OSError):
+                payload = {}
+        payload['last_run_at'] = (
+            _dt.datetime.now(_dt.timezone.utc)
+            .isoformat()
+            .replace('+00:00', 'Z')
+        )
+        state_path.write_text(json.dumps(payload), encoding='utf-8')
+    except OSError:
+        logger.debug("Failed to write gateway last_run_at state", exc_info=True)
 
 
 _SECRET_PATTERN = re.compile(
