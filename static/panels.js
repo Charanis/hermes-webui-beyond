@@ -4810,10 +4810,118 @@ function _renderProfileDetail(p, activeName){
 // as no-op-renderers so the skeleton still produces a working page during
 // the transition.
 function _profileHeroDossier(p, isActive, isDefault){
-  return `<section class="profile-hero"><div class="profile-hero-avatar"></div><div><div id="profileHeroName" class="profile-hero-name">${esc(p.name)}</div><div id="profileHeroVoice" class="profile-hero-voice placeholder">Loading persona…</div></div></section>`;
+  const name = esc(p.name);
+  // Active is conveyed by the inline pill — there is intentionally no bare
+  // status dot next to the profile name in v3 (the pill carries it).
+  const activePill = isActive
+    ? `<span class="profile-hero-active-pill"><span class="profile-status-dot ok" aria-hidden="true"></span>Active</span>`
+    : '';
+  // When inactive, "Make active" takes the primary slot; otherwise "Start chat" does.
+  const startBtn = `<button id="opsStartChat" class="profile-ops-button ${isActive ? 'primary' : ''}" type="button">Start chat${isActive ? '' : ` with ${name}`}</button>`;
+  const makeActiveBtn = isActive
+    ? ''
+    : `<button id="opsMakeActive" class="profile-ops-button primary" type="button">Make active</button>`;
+  const removeAttrs = isDefault
+    ? 'disabled aria-disabled="true" title="The default profile cannot be removed."'
+    : '';
+  const defaultSuffix = isDefault ? ' · default for new chats' : '';
+  return `
+    <section class="profile-hero" aria-labelledby="profileHeroName">
+      <div class="profile-hero-avatar" id="profileHeroAvatar" tabindex="0" role="button" aria-label="Avatar for ${name}. Activate to change.">
+        ${_profileAvatarForUi(p, 'profile-avatar--hero')}
+        <button id="profileHeroAvatarEdit" type="button" class="profile-hero-avatar-edit" aria-label="Change avatar" title="Change avatar">✎</button>
+      </div>
+      <div>
+        <div id="profileHeroName" class="profile-hero-name">${name}${activePill ? ' ' + activePill : ''}</div>
+        <div class="profile-hero-handle">profile/${name} · local${defaultSuffix}</div>
+        <div id="profileHeroVoice" class="profile-hero-voice placeholder">Loading persona…</div>
+        <div class="profile-hero-actions" aria-label="Primary actions for ${name}">
+          ${makeActiveBtn}
+          ${startBtn}
+          <button class="profile-ops-button" type="button" data-ops-action="edit-soul">Edit persona</button>
+          <button class="profile-ops-button" type="button" data-ops-action="rename">Rename</button>
+          <button class="profile-ops-button" type="button" data-ops-action="duplicate">Duplicate</button>
+          <button class="profile-ops-button danger" type="button" data-ops-action="remove" ${removeAttrs}>Remove</button>
+        </div>
+      </div>
+    </section>`;
 }
+
 function _profileActivityLine(p){
-  return `<div id="profileActivityLine" class="profile-activity-line empty"><span>Loading activity…</span></div>`;
+  // Container only; _hydrateProfileActivity fills it in after fetching
+  // /api/profile/activity. The empty class drops the right-aligned button
+  // until we know we have something to link to.
+  return `<div id="profileActivityLine" class="profile-activity-line empty"><span style="color:var(--muted)">Loading activity…</span></div>`;
+}
+
+// ── Persona + activity hydration (network) ──────────────────────────────
+
+async function _hydrateProfilePersona(profile){
+  const el = $('profileHeroVoice');
+  if (!el || !profile || !profile.name) return;
+  try {
+    const data = await api('/api/profile/persona?name=' + encodeURIComponent(profile.name));
+    if (data && typeof data.voice === 'string' && data.voice.length > 0) {
+      el.textContent = '"' + data.voice + '"';
+      el.classList.remove('placeholder');
+    } else {
+      el.textContent = (data && data.soul_present)
+        ? 'SOUL.md is empty. Edit persona to give this agent a voice.'
+        : 'No persona set. Edit SOUL.md to give this agent a voice.';
+      el.classList.add('placeholder');
+    }
+  } catch (e) {
+    el.textContent = 'Could not load persona.';
+    el.classList.add('placeholder');
+  }
+}
+
+function _formatRelativeTime(iso){
+  if (!iso) return null;
+  const t0 = Date.parse(iso);
+  if (!Number.isFinite(t0)) return null;
+  const secs = Math.max(1, Math.round((Date.now() - t0) / 1000));
+  if (secs < 60) return secs + 's ago';
+  const mins = Math.round(secs / 60); if (mins < 60) return mins + ' min ago';
+  const hrs = Math.round(mins / 60);  if (hrs < 24) return hrs + ' h ago';
+  const days = Math.round(hrs / 24);  if (days === 1) return 'yesterday';
+  if (days < 30) return days + ' days ago';
+  const months = Math.round(days / 30);
+  return months + ' mo ago';
+}
+
+async function _hydrateProfileActivity(profile){
+  const el = $('profileActivityLine');
+  if (!el || !profile || !profile.name) return;
+  try {
+    const a = await api('/api/profile/activity?name=' + encodeURIComponent(profile.name));
+    const isEmpty = !(a.sessions_week | 0) && !a.last_used_at && !a.gateway_last_run_at;
+    if (isEmpty) {
+      el.className = 'profile-activity-line empty';
+      el.innerHTML = `<span>No activity yet. Start a chat to see usage here.</span>`;
+      return;
+    }
+    const parts = [];
+    if (a.last_used_at) {
+      const rel = _formatRelativeTime(a.last_used_at);
+      parts.push(`Last used <b>${esc(rel || a.last_used_at)}</b>`);
+    }
+    if (a.sessions_week) {
+      parts.push(`<b>${a.sessions_week}</b> session${a.sessions_week === 1 ? '' : 's'} this week`);
+    }
+    if (a.spend_week_usd != null) {
+      parts.push(`~<b>$${Number(a.spend_week_usd).toFixed(2)}</b> spend`);
+    }
+    if (a.gateway_last_run_at) {
+      const rel = _formatRelativeTime(a.gateway_last_run_at);
+      parts.push(`gateway last ran <b>${esc(rel || a.gateway_last_run_at)}</b>`);
+    }
+    el.className = 'profile-activity-line';
+    el.innerHTML = `<span>${parts.join(' · ')}</span><button class="profile-ops-button" type="button" data-ops-action="open-activity">Open activity ›</button>`;
+  } catch (e) {
+    el.className = 'profile-activity-line empty';
+    el.innerHTML = `<span style="color:var(--muted)">Activity unavailable.</span>`;
+  }
 }
 function _profileRuntimePanel(p, isActive){
   return `<article class="profile-ops-tile" aria-labelledby="opsRuntimeTitle"><div class="profile-ops-tile-head"><span class="profile-ops-tile-label" id="opsRuntimeTitle">Runtime</span></div><div class="profile-ops-tile-note">Runtime chips load shortly.</div></article>`;
@@ -4824,8 +4932,8 @@ function _profileGatewayTile(p, isActive){
 function _profileSkillsTile(p, isActive){
   return `<article class="profile-ops-tile" aria-labelledby="opsSkillsTitle"><div class="profile-ops-tile-head"><span class="profile-ops-tile-label" id="opsSkillsTitle">Skills</span></div><div class="profile-ops-tile-note">Skills load shortly.</div></article>`;
 }
-async function _hydrateProfilePersona(p){ /* filled in by Task 9 */ }
-async function _hydrateProfileActivity(p){ /* filled in by Task 10 */ }
+// _hydrateProfilePersona — full body above (Task 9).
+// _hydrateProfileActivity — full body above (Task 10).
 async function _hydrateProfileRuntimeChips(p){ /* filled in by Task 11 */ }
 async function _loadProfileSkillsTile(p){ /* filled in by Task 13 */ }
 
