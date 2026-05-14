@@ -5499,25 +5499,35 @@ function _bindProfileOpsConsole(p, isActive, isDefault){
     });
   }
 
-  // Gateway controls — also flip the wifi indicator after a successful action.
-  document.querySelectorAll('[data-gateway-action]').forEach(btn => {
+  // Gateway controls — flip the wifi indicator only after we confirm the
+  // gateway actually transitioned. A failed start must NOT light the icon
+  // green (review F1). Selector scoped to #profileDetailBody so a future
+  // sidebar with `data-gateway-action` doesn't bind to the wrong profile.
+  if (body) body.querySelectorAll('[data-gateway-action]').forEach(btn => {
     btn.onclick = async () => {
       const action = btn.dataset.gatewayAction;
-      await _opsGatewayControl(profileName, action);
+      const result = await _opsGatewayControl(profileName, action);
+      const ok = !!(result && result.ok !== false && !result.unavailable);
       const wifi = $('profileGatewayWifi');
-      if (wifi) {
-        const nowRunning = (action === 'start' || action === 'restart');
-        wifi.classList.toggle('on', nowRunning);
-        if (nowRunning) {
-          wifi.classList.add('just-started');
-          setTimeout(() => wifi.classList.remove('just-started'), 1400);
-        }
+      if (!wifi) return;
+      if (action === 'start' && ok) {
+        wifi.classList.add('on');
+        wifi.classList.add('just-started');
+        setTimeout(() => wifi.classList.remove('just-started'), 1400);
+      } else if (action === 'restart' && ok) {
+        wifi.classList.add('on');
+        wifi.classList.add('just-started');
+        setTimeout(() => wifi.classList.remove('just-started'), 1400);
+      } else if (action === 'stop' && ok) {
+        wifi.classList.remove('on');
+        wifi.classList.remove('just-started');
       }
+      // Failed action: leave the indicator in its prior state.
     };
   });
 
-  // Profile file widgets
-  document.querySelectorAll('[data-profile-file]').forEach(btn => {
+  // Profile file widgets — scoped to the detail body (review F2).
+  if (body) body.querySelectorAll('[data-profile-file]').forEach(btn => {
     btn.onclick = () => _openProfileFileEditor(profileName, btn.dataset.profileFile);
   });
 }
@@ -5606,9 +5616,11 @@ async function _opsGatewayControl(profileName, action){
     }
     // Refresh profile list so the gateway running flag is updated.
     await loadProfilesPanel();
+    return result;
   } catch (e) {
     showToast('Gateway action failed: ' + (e.message || e));
     await loadProfilesPanel();
+    return { ok: false, message: String(e && e.message || e) };
   }
 }
 
