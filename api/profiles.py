@@ -1146,6 +1146,111 @@ def _first_non_blank_paragraph(text: str) -> str:
     return ''
 
 
+# ── Activity aggregator (profile screen rework 2026-05-14) ─────────────────
+#
+# The activity line on the reworked profile screen reports last-used,
+# sessions-this-week, optional spend, and the gateway's last-run timestamp.
+# Sessions live in a single global WebUI index keyed by profile name, so the
+# aggregation is a pure data filter; the gateway timestamp lives inside the
+# profile's HOME at .gateway-state.json, written by the gateway control path
+# on successful start (Task 6 below).
+
+_ACTIVITY_WINDOW_DAYS = 7
+
+
+def _compute_profile_activity(rows, name: str, *, now: float) -> dict:
+    """Aggregate session-index *rows* for profile *name* over the last week.
+
+    A row whose ``profile`` field is missing is treated as belonging to the
+    default profile (this matches the index's pre-multi-profile behaviour).
+    Spend is intentionally ``None`` in v1 — the UI hides the segment until
+    cost tracking lands.
+    """
+    import datetime as _dt
+
+    cutoff = now - _ACTIVITY_WINDOW_DAYS * 86400.0
+    mine = []
+    for r in rows or ():
+        if not isinstance(r, dict):
+            continue
+        row_profile = r.get('profile') or 'default'
+        if row_profile != name:
+            continue
+        ts = r.get('updated_at')
+        if not isinstance(ts, (int, float)):
+            continue
+        if ts < cutoff:
+            continue
+        mine.append(ts)
+
+    last_used_at = None
+    if mine:
+        most_recent = max(mine)
+        last_used_at = _dt.datetime.fromtimestamp(
+            most_recent, tz=_dt.timezone.utc
+        ).isoformat().replace('+00:00', 'Z')
+
+    return {
+        'sessions_week': len(mine),
+        'last_used_at': last_used_at,
+        'spend_week_usd': None,
+    }
+
+
+def _read_gateway_state(profile_home: Path) -> dict:
+    """Read .gateway-state.json — return {} on missing or malformed file."""
+    state_path = profile_home / '.gateway-state.json'
+    if not state_path.exists():
+        return {}
+    try:
+        data = json.loads(state_path.read_text(encoding='utf-8'))
+    except (ValueError, OSError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _load_session_index_rows() -> list:
+    """Best-effort read of the WebUI session index. Returns [] on any failure.
+
+    The index is global to the WebUI installation (not per-profile), so we
+    can compute activity for any profile from a single read.
+    """
+    try:
+        from api.config import SESSION_INDEX_FILE
+    except ImportError:
+        return []
+    if not SESSION_INDEX_FILE.exists():
+        return []
+    try:
+        data = json.loads(SESSION_INDEX_FILE.read_text(encoding='utf-8'))
+    except (ValueError, OSError):
+        return []
+    return data if isinstance(data, list) else []
+
+
+def read_profile_activity_api(name: str) -> dict:
+    """Return aggregated activity signals for the profile detail screen.
+
+    Raises:
+        ValueError: invalid profile name.
+        FileNotFoundError: profile directory does not exist.
+    """
+    import time as _time
+    name, profile_home = _require_profile_home_for_settings(name)
+    rows = _load_session_index_rows()
+    agg = _compute_profile_activity(rows, name, now=_time.time())
+    state = _read_gateway_state(profile_home)
+    gateway_last = state.get('last_run_at') if isinstance(state.get('last_run_at'), str) else None
+    return {
+        'name': name,
+        'sessions_week': agg['sessions_week'],
+        'last_used_at': agg['last_used_at'],
+        'ever_started_gateway': gateway_last is not None,
+        'gateway_last_run_at': gateway_last,
+        'spend_week_usd': agg['spend_week_usd'],
+    }
+
+
 def read_profile_persona_api(name: str) -> dict:
     """Return the SOUL.md voice excerpt for *name* without leaking the body.
 

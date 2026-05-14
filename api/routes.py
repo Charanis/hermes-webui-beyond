@@ -3947,6 +3947,22 @@ def handle_get(handler, parsed) -> bool:
         except ValueError as e:
             return bad(handler, _sanitize_error(e), 400)
 
+    # ── Profile Activity API (GET) ──
+    # last-used + sessions-this-week + gateway-last-run for the activity line.
+    if parsed.path == "/api/profile/activity":
+        from api.profiles import read_profile_activity_api
+
+        qs = parse_qs(parsed.query)
+        name = str(qs.get("name", [""])[0] or "").strip()
+        if not name:
+            return bad(handler, "name is required")
+        try:
+            return j(handler, read_profile_activity_api(name))
+        except FileNotFoundError as e:
+            return bad(handler, _sanitize_error(e), 404)
+        except ValueError as e:
+            return bad(handler, _sanitize_error(e), 400)
+
     # ── Gateway Status (GET) ──
     if parsed.path == "/api/gateway/status":
         import datetime
