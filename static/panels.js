@@ -4775,16 +4775,21 @@ function _renderProfileDetail(p, activeName){
   title.textContent = p.name;
   const isActive = p.name === activeName;
   const isDefault = !!p.is_default;
-  const profileName = esc(p.name);
 
+  // Profile screen rework v3 (2026-05-14):
+  //   Row 1 — hero dossier (256×256 avatar + voice + inline actions)
+  //   Row 2 — activity line
+  //   Row 3 — runtime panel · gateway tile · skills tile (3-col)
+  //   Row 4 — files grid (Lucide icons)
   body.innerHTML = `
-    <div class="main-view-content profile-ops-console">
+    <div class="main-view-content profile-detail-v3">
       ${_profileOpsAvatarDialog(p)}
-      <div class="profile-ops-card">
-        <div class="profile-ops-top">
-          ${_profileIdentityPlane(p, isActive, isDefault)}
-          ${_profileOpsTiles(p, isActive)}
-        </div>
+      ${_profileHeroDossier(p, isActive, isDefault)}
+      ${_profileActivityLine(p)}
+      <div class="profile-ops-grid" aria-label="${esc(p.name)} operations controls">
+        ${_profileRuntimePanel(p, isActive)}
+        ${_profileGatewayTile(p, isActive)}
+        ${_profileSkillsTile(p, isActive)}
       </div>
       ${_profileFilesSection(p)}
     </div>`;
@@ -4792,211 +4797,69 @@ function _renderProfileDetail(p, activeName){
   if (empty) empty.style.display = 'none';
   _profileMode = 'read';
   _setProfileHeaderButtons('read', p, activeName);
-  _hydrateProfileIdentityControls(p).catch(e=>console.warn('profile identity controls failed',e));
+  _hydrateProfilePersona(p).catch(e=>console.warn('profile persona failed',e));
+  _hydrateProfileActivity(p).catch(e=>console.warn('profile activity failed',e));
+  _hydrateProfileRuntimeChips(p).catch(e=>console.warn('profile runtime chips failed',e));
+  _loadProfileSkillsTile(p).catch(e=>console.warn('profile skills tile failed',e));
   _bindProfileOpsConsole(p, isActive, isDefault);
 }
 
-function _profileIdentityPlane(p, isActive, isDefault){
-  const profileName = esc(p.name);
-  const activeDot = isActive ? 'ok' : 'off';
-  const defaultSuffix = isDefault ? ` · ${esc(t('profile_default_label'))}` : '';
-  // Remove menu disabled state for default profile (plan section 3C)
-  const removeAttrs = isDefault
-    ? 'role="menuitem" aria-disabled="true" disabled title="The default profile cannot be removed."'
-    : 'role="menuitem"';
-  return `
-    <aside class="profile-id-card" aria-labelledby="profileIdName">
-      <div class="profile-id-card-header">
-        <div>
-          <div class="profile-section-label">Digital agent ID</div>
-          <div class="profile-id-name" id="profileIdName"><span class="profile-status-dot ${activeDot}" id="profileIdActiveDot" aria-hidden="true"></span>${profileName}</div>
-          <div class="profile-id-meta">Profile ID: ${profileName} · local profile${defaultSuffix}</div>
-        </div>
-      </div>
-      <div class="profile-avatar-block">
-        <div class="profile-avatar-frame">
-          <div id="profileAvatarPreview" class="profile-avatar-preview" role="img" tabindex="0" aria-label="Profile avatar for ${profileName}. Activate to edit.">${_profileAvatarForUi(p,'profile-avatar--detail')}</div>
-          <button id="profileAvatarEdit" type="button" class="profile-avatar-corner-action" aria-label="Edit avatar and shape" title="Edit avatar and shape">✎</button>
-        </div>
-        <div>
-          <span class="profile-avatar-caption">Profile avatar</span>
-          <span class="profile-avatar-shape-note">Square default · circle optional while editing.</span>
-        </div>
-      </div>
-      <div class="profile-id-actions" aria-label="Primary actions for ${profileName}">
-        <button id="opsStartChat" class="profile-ops-button primary profile-start-chat" type="button">Start chat with ${profileName}</button>
-        <div class="profile-overflow-wrap">
-          <button id="opsMoreActions" class="profile-ops-button" type="button" aria-label="More profile actions" aria-haspopup="menu" aria-expanded="false" aria-controls="opsProfileMenu">•••</button>
-          <div id="opsProfileMenu" class="profile-overflow-menu" role="menu" hidden>
-            <button class="profile-menu-item" type="button" role="menuitem" data-ops-action="rename">Rename</button>
-            <button class="profile-menu-item" type="button" role="menuitem" data-ops-action="duplicate">Duplicate</button>
-            <button class="profile-menu-item danger" type="button" data-ops-action="remove" ${removeAttrs}>Remove</button>
-          </div>
-        </div>
-      </div>
-    </aside>`;
+// ── v3 helpers ───────────────────────────────────────────────────────────
+// Placeholder helpers landed here; their full bodies are filled in by
+// subsequent commits in the rework series (Tasks 9-13 + 15). Keeping them
+// as no-op-renderers so the skeleton still produces a working page during
+// the transition.
+function _profileHeroDossier(p, isActive, isDefault){
+  return `<section class="profile-hero"><div class="profile-hero-avatar"></div><div><div id="profileHeroName" class="profile-hero-name">${esc(p.name)}</div><div id="profileHeroVoice" class="profile-hero-voice placeholder">Loading persona…</div></div></section>`;
 }
-
-function _profileOpsTiles(p, isActive){
-  const profileName = esc(p.name);
-  const activeStateText = isActive ? 'Active' : 'Inactive';
-  const activeDot = isActive ? 'ok' : 'off';
-  const activeValue = isActive
-    ? `${profileName} is active in this browser`
-    : `${profileName} is selected, not active`;
-  const activeNote = isActive
-    ? 'Switching profiles changes model, workspace, and identity context.'
-    : 'Activate to make this profile drive new chats from this browser.';
-  const makeActiveAttrs = isActive ? 'disabled aria-disabled="true"' : '';
-  const makeActiveLabel = isActive ? 'Active now' : 'Make active';
-  const makeActiveClass = isActive ? 'profile-ops-button' : 'profile-ops-button primary';
-
-  const gatewayRunning = !!p.gateway_running;
-  const gatewayDot = gatewayRunning ? 'ok' : 'off';
-  const gatewayStateText = gatewayRunning ? 'Running' : 'Stopped';
-  const gatewayNote = gatewayRunning
-    ? `Activity: gateway is listening for ${profileName}. Restart and Stop are available.`
-    : `Activity: stopped. Starting here activates the gateway for ${profileName}, not globally.`;
-  const startAttrs = gatewayRunning ? 'disabled aria-disabled="true"' : '';
-  const restartAttrs = gatewayRunning ? '' : 'disabled aria-disabled="true" title="Start gateway first"';
-  const stopAttrs = gatewayRunning ? '' : 'disabled aria-disabled="true" title="Start gateway first"';
-  const startLabel = gatewayRunning ? 'Gateway running' : 'Start gateway';
-  const startClass = gatewayRunning ? 'profile-ops-button' : 'profile-ops-button primary';
-
-  const credentialsReady = !!p.has_env;
-  const readyDot = credentialsReady ? 'ok' : 'warn';
-  const readyState = credentialsReady ? 'Ready' : 'Warning';
-  const readyValue = credentialsReady
-    ? (gatewayRunning ? 'Chat ready, gateway online' : 'Chat ready, gateway offline')
-    : 'ENV not configured';
-  const readyNote = credentialsReady
-    ? 'ENV readiness folded into Profile Files; secrets remain hidden.'
-    : 'Configure provider credentials via the .env profile file below.';
-
-  const skillCount = typeof p.skill_count === 'number' ? p.skill_count : 0;
-  const skillsValue = `${skillCount} profile skill${skillCount === 1 ? '' : 's'}`;
-
-  // Reasoning options match VALID_REASONING_EFFORTS (plus 'none' explicit + default unset).
-  const reasoningOptions = ['', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh'];
-  const reasoningLabels = {
-    '': 'Default',
-    'none': 'None (disabled)',
-    'minimal': 'Minimal',
-    'low': 'Low',
-    'medium': 'Medium',
-    'high': 'High',
-    'xhigh': 'Extra high',
-  };
-  const reasoningOpts = reasoningOptions.map(v =>
-    `<option value="${esc(v)}">${esc(reasoningLabels[v])}</option>`
-  ).join('');
-
-  return `
-    <div class="profile-ops-grid" aria-label="${profileName} operations controls">
-      <article class="profile-ops-tile" aria-labelledby="opsActiveTitle">
-        <div class="profile-ops-tile-head">
-          <span class="profile-ops-tile-label" id="opsActiveTitle">Active profile</span>
-          <span class="profile-ops-status-pill"><span id="opsActiveDot" class="profile-status-dot ${activeDot}" aria-hidden="true"></span><span id="opsActiveState">${esc(activeStateText)}</span></span>
-        </div>
-        <div>
-          <span class="profile-ops-tile-value" id="opsActiveValue">${esc(activeValue)}</span>
-          <span class="profile-ops-tile-note" id="opsActiveNote">${esc(activeNote)}</span>
-        </div>
-        <div class="profile-ops-control-row">
-          <button id="opsMakeActive" class="${makeActiveClass}" type="button" ${makeActiveAttrs}>${esc(makeActiveLabel)}</button>
-        </div>
-      </article>
-
-      <article class="profile-ops-tile" aria-labelledby="opsGatewayTitle">
-        <div class="profile-ops-tile-head">
-          <span class="profile-ops-tile-label" id="opsGatewayTitle">Gateway for ${profileName}</span>
-          <span class="profile-ops-status-pill"><span id="opsGatewayDot" class="profile-status-dot ${gatewayDot}" aria-hidden="true"></span><span id="opsGatewayState">${esc(gatewayStateText)}</span></span>
-        </div>
-        <div>
-          <span class="profile-ops-tile-value">Profile-specific gateway</span>
-          <span class="profile-ops-tile-note" id="opsGatewayNote">${esc(gatewayNote)}</span>
-        </div>
-        <div class="profile-ops-control-row" aria-label="Gateway controls for ${profileName}">
-          <button id="opsGatewayStart" class="${startClass}" type="button" data-gateway-action="start" ${startAttrs}>${esc(startLabel)}</button>
-          <button id="opsGatewayRestart" class="profile-ops-button" type="button" data-gateway-action="restart" ${restartAttrs}>Restart</button>
-          <button id="opsGatewayStop" class="profile-ops-button" type="button" data-gateway-action="stop" ${stopAttrs}>Stop</button>
-        </div>
-      </article>
-
-      <article class="profile-ops-tile profile-ops-tile--wide" aria-labelledby="opsRuntimeTitle">
-        <div class="profile-ops-tile-head">
-          <span class="profile-ops-tile-label" id="opsRuntimeTitle">Runtime / models</span>
-          <span class="profile-ops-status-pill"><span id="opsRuntimeDot" class="profile-status-dot ok" aria-hidden="true"></span><span id="opsRuntimeState">Saved</span></span>
-        </div>
-        <div>
-          <div class="profile-runtime-controls">
-            <label class="profile-runtime-field">
-              <span>Provider</span>
-              <select id="profileInlineProvider" class="profile-ops-select" aria-label="Provider for ${profileName}"></select>
-            </label>
-            <label class="profile-runtime-field">
-              <span>Model</span>
-              <select id="profileInlineModel" class="profile-ops-select" aria-label="Model for ${profileName}"></select>
-            </label>
-            <label class="profile-runtime-field">
-              <span>Reasoning</span>
-              <select id="profileInlineReasoning" class="profile-ops-select" aria-label="Reasoning effort for ${profileName}">${reasoningOpts}</select>
-            </label>
-          </div>
-          <div class="profile-runtime-save-row">
-            <span class="profile-ops-tile-note" id="profileInlineStatus" data-tone="muted">Saved runtime for ${profileName}.</span>
-            <button id="profileModelSave" type="button" class="profile-ops-button primary">Apply runtime</button>
-          </div>
-        </div>
-      </article>
-
-      <article class="profile-ops-tile" aria-labelledby="opsReadyTitle">
-        <div class="profile-ops-tile-head">
-          <span class="profile-ops-tile-label" id="opsReadyTitle">Ready / diagnostics</span>
-          <span class="profile-ops-status-pill"><span class="profile-status-dot ${readyDot}" aria-hidden="true"></span><span>${esc(readyState)}</span></span>
-        </div>
-        <div>
-          <span class="profile-ops-tile-value">${esc(readyValue)}</span>
-          <span class="profile-ops-tile-note">${esc(readyNote)}</span>
-        </div>
-        <div class="profile-ops-control-row">
-          <button class="profile-ops-button" type="button" data-ops-action="diagnostics">View diagnostics</button>
-        </div>
-      </article>
-
-      <article class="profile-ops-tile" aria-labelledby="opsSkillsTitle">
-        <div class="profile-ops-tile-head">
-          <span class="profile-ops-tile-label" id="opsSkillsTitle">Skills</span>
-          <span class="profile-ops-status-pill"><span class="profile-status-dot ${skillCount > 0 ? 'ok' : 'off'}" aria-hidden="true"></span><span>${skillCount} enabled</span></span>
-        </div>
-        <div>
-          <span class="profile-ops-tile-value">${esc(skillsValue)}</span>
-          <span class="profile-ops-tile-note">Capability management stays profile-scoped and separate from model controls.</span>
-        </div>
-        <div class="profile-ops-control-row">
-          <button class="profile-ops-button" type="button" data-ops-action="skills">Manage skills</button>
-        </div>
-      </article>
-    </div>`;
+function _profileActivityLine(p){
+  return `<div id="profileActivityLine" class="profile-activity-line empty"><span>Loading activity…</span></div>`;
 }
+function _profileRuntimePanel(p, isActive){
+  return `<article class="profile-ops-tile" aria-labelledby="opsRuntimeTitle"><div class="profile-ops-tile-head"><span class="profile-ops-tile-label" id="opsRuntimeTitle">Runtime</span></div><div class="profile-ops-tile-note">Runtime chips load shortly.</div></article>`;
+}
+function _profileGatewayTile(p, isActive){
+  return `<article class="profile-ops-tile" aria-labelledby="opsGatewayTitle"><div class="profile-ops-tile-head"><span class="profile-ops-tile-label" id="opsGatewayTitle">Gateway</span></div><div class="profile-ops-tile-note">Gateway controls load shortly.</div></article>`;
+}
+function _profileSkillsTile(p, isActive){
+  return `<article class="profile-ops-tile" aria-labelledby="opsSkillsTitle"><div class="profile-ops-tile-head"><span class="profile-ops-tile-label" id="opsSkillsTitle">Skills</span></div><div class="profile-ops-tile-note">Skills load shortly.</div></article>`;
+}
+async function _hydrateProfilePersona(p){ /* filled in by Task 9 */ }
+async function _hydrateProfileActivity(p){ /* filled in by Task 10 */ }
+async function _hydrateProfileRuntimeChips(p){ /* filled in by Task 11 */ }
+async function _loadProfileSkillsTile(p){ /* filled in by Task 13 */ }
+
+// _profileIdentityPlane: removed in profile screen rework v3 (2026-05-14).
+// Replaced by _profileHeroDossier (256×256 avatar, inline action buttons, no
+// overflow menu, no bare green diode next to the name).
+
+// _profileOpsTiles: removed in profile screen rework v3 (2026-05-14).
+// Split into three smaller renderers (_profileRuntimePanel,
+// _profileGatewayTile, _profileSkillsTile). The Active and Ready tiles
+// from v2 are dropped — Active is conveyed by the inline pill in the hero
+// dossier, .env readiness by the file widget's status text.
 
 function _profileFilesSection(p){
   const profileName = esc(p.name);
+  const envStatus = p.has_env ? 'Configured · hidden values' : 'Not configured · hidden values';
+  const envClass = p.has_env ? '' : 'warn';
+  // Lucide icons replace the single-letter badges from v2 so the files row
+  // shares iconography with the rest of the webUI (icons.js).
   const files = [
-    { name: 'SOUL.md', icon: 'S', label: 'SOUL.md', desc: 'Persona, operating principles, and profile voice.', status: 'Markdown editor' },
-    { name: 'memories/MEMORY.md', icon: 'M', label: 'Memory', desc: 'Long-lived notes and retrieved context for this profile.', status: 'Profile-scoped' },
-    { name: 'memories/USER.md', icon: 'U', label: 'User preferences', desc: 'Taste, workflow defaults, and interaction preferences.', status: 'Structured editor' },
-    { name: '.env', icon: 'E', label: 'ENV file', desc: 'Secrets hidden; use the safe editor for key passing.', status: p.has_env ? 'Configured · hidden values' : 'Not configured · hidden values' },
-    { name: 'config.yaml', icon: 'Y', label: 'config.yaml', desc: 'Runtime defaults, tools, and profile configuration.', status: 'Validated YAML' },
+    { name: 'SOUL.md',             icon: 'user',      label: 'SOUL.md',          desc: 'Persona, operating principles, and profile voice.',          status: 'Markdown editor', statusClass: '' },
+    { name: 'memories/MEMORY.md',  icon: 'brain',     label: 'Memory',           desc: 'Long-lived notes and retrieved context for this profile.', status: 'Profile-scoped',  statusClass: '' },
+    { name: 'memories/USER.md',    icon: 'settings',  label: 'User preferences', desc: 'Taste, workflow defaults, and interaction preferences.',   status: 'Structured editor', statusClass: '' },
+    { name: '.env',                icon: 'lock',      label: 'ENV file',         desc: 'Secrets hidden; use the safe editor for key passing.',     status: envStatus,         statusClass: envClass },
+    { name: 'config.yaml',         icon: 'file-code', label: 'config.yaml',      desc: 'Runtime defaults, tools, and profile configuration.',      status: 'Validated YAML',  statusClass: '' },
   ];
   const widgets = files.map(f => `
     <button class="profile-file-widget" type="button" data-profile-file="${esc(f.name)}">
-      <span class="profile-file-icon">${esc(f.icon)}</span>
+      <span class="profile-file-icon">${li(f.icon, 16)}</span>
       <span>
         <span class="profile-file-name">${esc(f.label)}</span>
         <span class="profile-file-desc">${esc(f.desc)}</span>
       </span>
-      <span class="profile-file-status">${esc(f.status)}</span>
+      <span class="profile-file-status ${f.statusClass}">${esc(f.status)}</span>
     </button>`).join('');
   return `
     <section class="profile-ops-files-section" aria-labelledby="opsFilesTitle">
@@ -5004,13 +4867,14 @@ function _profileFilesSection(p){
         <div>
           <div class="profile-section-label">Profile files</div>
           <h3 class="profile-ops-files-title" id="opsFilesTitle">Editable source files for ${profileName}</h3>
-          <div class="profile-ops-files-note">Prominent, symmetric widgets open focused editors; no raw config dump in the main card.</div>
         </div>
       </div>
       <div class="profile-ops-files-grid">${widgets}</div>
     </section>`;
 }
 
+// Old v2 _profileFilesSection swallowed below; the call site uses the v3
+// version above. The v2 body had the same shape but with single-letter icons.
 function _profileOpsAvatarDialog(p){
   const profileName = esc(p.name);
   return `
