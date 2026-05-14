@@ -5435,21 +5435,23 @@ function _profileOpsAvatarDialog(p){
 
 function _bindProfileOpsConsole(p, isActive, isDefault){
   const profileName = p.name;
-  // Avatar edit (corner icon + preview itself)
-  const avatarEdit = $('profileAvatarEdit');
-  const avatarPreview = $('profileAvatarPreview');
+  // Avatar — both the hero avatar tile and the corner pencil open the dialog.
+  const heroAvatar = $('profileHeroAvatar');
+  const heroAvatarEdit = $('profileHeroAvatarEdit');
   const openAvatar = () => _openProfileAvatarDialog(profileName);
-  if (avatarEdit) avatarEdit.onclick = openAvatar;
-  if (avatarPreview) {
-    avatarPreview.onclick = openAvatar;
-    avatarPreview.onkeydown = (ev) => {
+  if (heroAvatar) {
+    heroAvatar.onclick = openAvatar;
+    heroAvatar.onkeydown = (ev) => {
       if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); openAvatar(); }
     };
   }
+  if (heroAvatarEdit) heroAvatarEdit.onclick = (ev) => { ev.stopPropagation(); openAvatar(); };
+
   // Start Chat
   const startChat = $('opsStartChat');
   if (startChat) startChat.onclick = () => startChatWithProfile(profileName);
-  // Make active
+
+  // Make active (only present when profile is inactive)
   const makeActive = $('opsMakeActive');
   if (makeActive && !isActive) {
     makeActive.onclick = async () => {
@@ -5465,68 +5467,66 @@ function _bindProfileOpsConsole(p, isActive, isDefault){
       }
     };
   }
-  // Overflow menu
-  const moreBtn = $('opsMoreActions');
-  const menu = $('opsProfileMenu');
-  if (moreBtn && menu) {
-    const setMenu = (open) => {
-      menu.hidden = !open;
-      moreBtn.setAttribute('aria-expanded', String(open));
-    };
-    moreBtn.onclick = (ev) => {
-      ev.stopPropagation();
-      setMenu(menu.hidden);
-    };
-    menu.onclick = (ev) => {
-      const item = ev.target.closest('[data-ops-action]');
-      if (!item || item.disabled) return;
-      setMenu(false);
-      const action = item.dataset.opsAction;
-      if (action === 'rename') _opsRenameProfile(profileName);
-      else if (action === 'duplicate') _opsDuplicateProfile(profileName);
-      else if (action === 'remove' && !isDefault) deleteCurrentProfile();
-    };
-    document.addEventListener('click', _opsOverflowOutsideClick, { capture: true });
-    document.addEventListener('keydown', _opsOverflowEscape);
+
+  // Inline actions in the hero — no more overflow menu in v3.
+  const body = $('profileDetailBody');
+  if (body) {
+    body.querySelectorAll('[data-ops-action="rename"]').forEach(btn => {
+      btn.onclick = () => _opsRenameProfile(profileName);
+    });
+    body.querySelectorAll('[data-ops-action="duplicate"]').forEach(btn => {
+      btn.onclick = () => _opsDuplicateProfile(profileName);
+    });
+    body.querySelectorAll('[data-ops-action="remove"]').forEach(btn => {
+      if (isDefault) return;  // default profile button stays disabled
+      btn.onclick = () => deleteCurrentProfile();
+    });
+    body.querySelectorAll('[data-ops-action="edit-soul"]').forEach(btn => {
+      btn.onclick = () => _openProfileFileEditor(profileName, 'SOUL.md');
+    });
+    body.querySelectorAll('[data-ops-action="open-activity"]').forEach(btn => {
+      btn.onclick = () => {
+        if (typeof switchPanel === 'function') switchPanel('sessions');
+      };
+    });
+    body.querySelectorAll('[data-ops-action="diagnostics"]').forEach(btn => {
+      btn.onclick = () => showToast('Diagnostics drawer not yet wired up.');
+    });
+    body.querySelectorAll('[data-ops-action="skills"]').forEach(btn => {
+      btn.onclick = () => {
+        if (typeof switchPanel === 'function') switchPanel('skills');
+      };
+    });
   }
-  // Gateway controls
+
+  // Gateway controls — also flip the wifi indicator after a successful action.
   document.querySelectorAll('[data-gateway-action]').forEach(btn => {
-    btn.onclick = () => _opsGatewayControl(profileName, btn.dataset.gatewayAction);
+    btn.onclick = async () => {
+      const action = btn.dataset.gatewayAction;
+      await _opsGatewayControl(profileName, action);
+      const wifi = $('profileGatewayWifi');
+      if (wifi) {
+        const nowRunning = (action === 'start' || action === 'restart');
+        wifi.classList.toggle('on', nowRunning);
+        if (nowRunning) {
+          wifi.classList.add('just-started');
+          setTimeout(() => wifi.classList.remove('just-started'), 1400);
+        }
+      }
+    };
   });
+
   // Profile file widgets
   document.querySelectorAll('[data-profile-file]').forEach(btn => {
     btn.onclick = () => _openProfileFileEditor(profileName, btn.dataset.profileFile);
   });
-  // Diagnostics / skills stubs
-  document.querySelectorAll('[data-ops-action="diagnostics"]').forEach(btn => {
-    btn.onclick = () => showToast('Diagnostics drawer not yet wired up.');
-  });
-  document.querySelectorAll('[data-ops-action="skills"]').forEach(btn => {
-    btn.onclick = () => {
-      if (typeof switchPanel === 'function') switchPanel('skills');
-    };
-  });
 }
 
-function _opsOverflowOutsideClick(ev){
-  const menu = $('opsProfileMenu');
-  const wrap = ev.target && ev.target.closest && ev.target.closest('.profile-overflow-wrap');
-  if (menu && !wrap) {
-    menu.hidden = true;
-    const btn = $('opsMoreActions');
-    if (btn) btn.setAttribute('aria-expanded', 'false');
-  }
-}
-
-function _opsOverflowEscape(ev){
-  if (ev.key !== 'Escape') return;
-  const menu = $('opsProfileMenu');
-  if (menu && !menu.hidden) {
-    menu.hidden = true;
-    const btn = $('opsMoreActions');
-    if (btn) btn.setAttribute('aria-expanded', 'false');
-  }
-}
+// v2 overflow-menu helpers — kept temporarily so any lingering reference
+// doesn't ReferenceError; the v3 hero doesn't use them. Safe to remove in
+// the cleanup commit (Task 18).
+function _opsOverflowOutsideClick(ev){ /* v2 only — no-op in v3 */ }
+function _opsOverflowEscape(ev){ /* v2 only — no-op in v3 */ }
 
 async function startChatWithProfile(profileName){
   if (!profileName) return;
