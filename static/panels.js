@@ -4924,18 +4924,409 @@ async function _hydrateProfileActivity(profile){
   }
 }
 function _profileRuntimePanel(p, isActive){
-  return `<article class="profile-ops-tile" aria-labelledby="opsRuntimeTitle"><div class="profile-ops-tile-head"><span class="profile-ops-tile-label" id="opsRuntimeTitle">Runtime</span></div><div class="profile-ops-tile-note">Runtime chips load shortly.</div></article>`;
+  // Three composer-style chips stacked vertically. Provider, Model, and
+  // Reasoning all share .composer-model-chip + .model-dropdown chrome with
+  // the chat composer's picker — same component, just bound to a different
+  // save path. The dropdown bodies are populated by
+  // _hydrateProfileRuntimeChips at render time from #modelSelect's optgroups
+  // (the chat composer's canonical model catalog).
+  return `
+    <article class="profile-ops-tile" aria-labelledby="opsRuntimeTitle">
+      <div class="profile-ops-tile-head">
+        <span class="profile-ops-tile-label" id="opsRuntimeTitle">Runtime</span>
+        <span class="profile-ops-status-pill" id="profileRuntimeStatusPill" data-tone="muted" aria-live="polite">
+          <span id="opsRuntimeDot" class="profile-status-dot ok" aria-hidden="true"></span>
+          <span id="opsRuntimeState">Saved</span>
+        </span>
+      </div>
+      <div class="profile-runtime-chiprow v3" aria-label="Runtime controls for ${esc(p.name)}">
+        <div class="composer-model-wrap profile-runtime-chip-wrap">
+          <button class="composer-model-chip" id="profileRuntimeProviderChip" type="button" title="Provider scope for this profile">
+            <span class="composer-model-icon" aria-hidden="true">${li('globe',14)}</span>
+            <span class="composer-model-label" id="profileRuntimeProviderLabel">Auto · default</span>
+            <span class="composer-model-chevron" aria-hidden="true">${li('chevron-down',10)}</span>
+          </button>
+          <div class="model-dropdown profile-runtime-dropdown" id="profileRuntimeProviderDropdown"></div>
+        </div>
+        <div class="composer-model-wrap profile-runtime-chip-wrap">
+          <button class="composer-model-chip" id="profileRuntimeModelChip" type="button" title="Model used when this profile's gateway starts">
+            <span class="composer-model-icon" aria-hidden="true">${li('cpu',14)}</span>
+            <span class="composer-model-label" id="profileRuntimeModelLabel">Loading…</span>
+            <span class="composer-model-chevron" aria-hidden="true">${li('chevron-down',10)}</span>
+          </button>
+          <div class="model-dropdown profile-runtime-dropdown" id="profileRuntimeModelDropdown"></div>
+        </div>
+        <div class="composer-model-wrap profile-runtime-chip-wrap">
+          <button class="composer-model-chip" id="profileRuntimeReasoningChip" type="button" title="Reasoning effort applied when this profile runs">
+            <span class="composer-model-icon" aria-hidden="true">${li('brain',14)}</span>
+            <span class="composer-model-label" id="profileRuntimeReasoningLabel">Default</span>
+            <span class="composer-model-chevron" aria-hidden="true">${li('chevron-down',10)}</span>
+          </button>
+          <div class="model-dropdown profile-runtime-dropdown" id="profileRuntimeReasoningDropdown"></div>
+        </div>
+      </div>
+      <div class="profile-ops-control-row">
+        <button id="opsRuntimeApply" class="profile-ops-button primary" type="button" style="flex:1">Apply</button>
+        <button class="profile-ops-button" type="button" data-ops-action="diagnostics">Diagnostics</button>
+      </div>
+    </article>`;
 }
+
 function _profileGatewayTile(p, isActive){
-  return `<article class="profile-ops-tile" aria-labelledby="opsGatewayTitle"><div class="profile-ops-tile-head"><span class="profile-ops-tile-label" id="opsGatewayTitle">Gateway</span></div><div class="profile-ops-tile-note">Gateway controls load shortly.</div></article>`;
+  const running = !!p.gateway_running;
+  const name = esc(p.name);
+  const dot = running ? 'ok' : 'off';
+  const state = running ? 'Running' : 'Stopped';
+  const value = running ? `Running for ${name}` : 'Not running';
+  const note = running
+    ? 'Restart or stop the profile-scoped gateway.'
+    : `Starts a gateway scoped to <strong>${name}</strong>.`;
+  const startAttrs = running ? 'disabled aria-disabled="true"' : '';
+  const restartAttrs = running ? '' : 'disabled aria-disabled="true" title="Start gateway first"';
+  const stopAttrs = running ? '' : 'disabled aria-disabled="true" title="Start gateway first"';
+  const startLabel = running ? 'Running' : 'Start';
+  const startClass = running ? 'profile-ops-button' : 'profile-ops-button primary';
+  return `
+    <article class="profile-ops-tile" aria-labelledby="opsGatewayTitle">
+      <div class="profile-ops-tile-head">
+        <span class="profile-ops-tile-label" id="opsGatewayTitle" style="display:inline-flex;align-items:center;gap:8px;">
+          <span class="profile-wifi ${running ? 'on' : ''}" id="profileGatewayWifi" title="${running ? 'Gateway online' : 'Gateway offline'}" aria-hidden="true">${li('wifi',18)}</span>
+          Gateway
+        </span>
+        <span class="profile-ops-status-pill"><span id="opsGatewayDot" class="profile-status-dot ${dot}" aria-hidden="true"></span><span id="opsGatewayState">${esc(state)}</span></span>
+      </div>
+      <div>
+        <span class="profile-ops-tile-value">${esc(value)}</span>
+        <span class="profile-ops-tile-note" id="opsGatewayNote">${note}</span>
+      </div>
+      <div class="profile-ops-control-row" aria-label="Gateway controls for ${name}">
+        <button id="opsGatewayStart" class="${startClass}" type="button" data-gateway-action="start" ${startAttrs}>${esc(startLabel)}</button>
+        <button id="opsGatewayRestart" class="profile-ops-button" type="button" data-gateway-action="restart" ${restartAttrs}>Restart</button>
+        <button id="opsGatewayStop" class="profile-ops-button" type="button" data-gateway-action="stop" ${stopAttrs}>Stop</button>
+      </div>
+    </article>`;
 }
+
 function _profileSkillsTile(p, isActive){
-  return `<article class="profile-ops-tile" aria-labelledby="opsSkillsTitle"><div class="profile-ops-tile-head"><span class="profile-ops-tile-label" id="opsSkillsTitle">Skills</span></div><div class="profile-ops-tile-note">Skills load shortly.</div></article>`;
+  // Skill count comes from list_profiles cache; the chip detail is filled
+  // by _loadProfileSkillsTile after render. Empty placeholder while async.
+  const enabled = typeof p.skill_count === 'number' ? p.skill_count : 0;
+  const total = typeof p.skill_total === 'number' ? p.skill_total : Math.max(enabled, 0);
+  const dot = enabled > 0 ? 'ok' : 'off';
+  return `
+    <article class="profile-ops-tile" aria-labelledby="opsSkillsTitle">
+      <div class="profile-ops-tile-head">
+        <span class="profile-ops-tile-label" id="opsSkillsTitle">Skills</span>
+        <span class="profile-ops-status-pill" id="opsSkillsPill">
+          <span id="opsSkillsDot" class="profile-status-dot ${dot}" aria-hidden="true"></span>
+          <span id="opsSkillsPillLabel">${esc(enabled)} / ${esc(total)} enabled</span>
+        </span>
+      </div>
+      <div>
+        <span class="profile-ops-tile-value" id="opsSkillsValue">${enabled === 0 ? 'No skills enabled' : 'Top in this profile'}</span>
+        <div id="opsSkillsTopChips" class="profile-skill-top" role="list"></div>
+      </div>
+      <div class="profile-ops-control-row">
+        <button class="profile-ops-button" type="button" data-ops-action="skills">Manage</button>
+      </div>
+    </article>`;
 }
 // _hydrateProfilePersona — full body above (Task 9).
 // _hydrateProfileActivity — full body above (Task 10).
-async function _hydrateProfileRuntimeChips(p){ /* filled in by Task 11 */ }
-async function _loadProfileSkillsTile(p){ /* filled in by Task 13 */ }
+
+// ── Runtime chips (provider · model · reasoning) ───────────────────────
+//
+// All three chips share the chat composer's .composer-model-chip +
+// .model-dropdown chrome. Their dropdown bodies are populated from
+// #modelSelect's optgroups (the canonical model catalog already loaded by
+// the composer). Selecting a chip writes through to
+// /api/profile/settings without touching the active-profile chat session.
+
+const _PROFILE_REASONING_OPTS_V3 = [
+  ['',        'Default'],
+  ['none',    'None (disabled)'],
+  ['minimal', 'Minimal'],
+  ['low',     'Low'],
+  ['medium',  'Medium'],
+  ['high',    'High'],
+  ['xhigh',   'Extra high'],
+];
+
+let _profileRuntimeCtxV3 = null;
+
+async function _hydrateProfileRuntimeChips(profile){
+  if (!profile || !profile.name) return;
+  _profileRuntimeCtxV3 = { name: profile.name };
+  // Wait for the composer's model catalog so the dropdowns aren't empty
+  // on first paint after a profile switch.
+  const ready = window._modelDropdownReady;
+  if (ready && typeof ready.then === 'function') {
+    try { await ready; } catch (_) {}
+  }
+  if (!_profileModelGroupsFromComposer().length && typeof populateModelDropdown === 'function') {
+    try { await populateModelDropdown(); } catch (_) {}
+  }
+  // Fetch the per-profile reasoning_effort (the rest of the settings live on
+  // the profile row already from /api/profiles).
+  let reasoning = '';
+  try {
+    const settings = await api('/api/profile/settings?name=' + encodeURIComponent(profile.name));
+    if (settings && typeof settings.reasoning_effort === 'string') reasoning = settings.reasoning_effort;
+  } catch (_) { /* keep default empty */ }
+  _applyProfileRuntimeProviderChipV3(profile.provider || '');
+  _applyProfileRuntimeModelChipV3(profile.model || '', profile.provider || '');
+  _applyProfileRuntimeReasoningChipV3(reasoning);
+  _wireProfileRuntimeChipHandlersV3(profile.name);
+  _setProfileRuntimeStatusV3('muted', 'Saved');
+}
+
+function _profileModelGroupsFromComposer(){
+  const sel = $('modelSelect');
+  const groups = [];
+  if (!sel) return groups;
+  for (const og of Array.from(sel.children)) {
+    if (og.tagName !== 'OPTGROUP') continue;
+    const provider = (og.dataset && og.dataset.provider) || '';
+    const label = og.label || provider || 'Models';
+    const models = Array.from(og.children)
+      .filter(o => o.tagName === 'OPTION' && o.value)
+      .map(o => ({ value: o.value, label: o.textContent || o.value, provider }));
+    if (models.length) groups.push({ provider, label, models });
+  }
+  return groups;
+}
+
+function _applyProfileRuntimeProviderChipV3(providerValue){
+  const label = $('profileRuntimeProviderLabel');
+  const chip = $('profileRuntimeProviderChip');
+  const human = providerValue || 'Auto · default';
+  if (label) label.textContent = human;
+  if (chip) {
+    chip.dataset.provider = providerValue || '';
+    chip.title = 'Provider scope: ' + human;
+  }
+}
+
+function _applyProfileRuntimeModelChipV3(modelValue, providerHint){
+  const label = $('profileRuntimeModelLabel');
+  const chip = $('profileRuntimeModelChip');
+  const text = modelValue ? (typeof getModelLabel === 'function' ? getModelLabel(modelValue) : modelValue) : 'Select model…';
+  if (label) label.textContent = text;
+  if (chip) {
+    chip.dataset.modelValue = modelValue || '';
+    chip.dataset.modelProvider = providerHint || '';
+    chip.title = 'Profile default model: ' + text;
+  }
+}
+
+function _applyProfileRuntimeReasoningChipV3(effort){
+  const norm = String(effort || '').trim().toLowerCase();
+  const label = $('profileRuntimeReasoningLabel');
+  const chip = $('profileRuntimeReasoningChip');
+  const display = (_PROFILE_REASONING_OPTS_V3.find(([v]) => v === norm) || ['', 'Default'])[1];
+  if (label) label.textContent = display;
+  if (chip) chip.dataset.effort = norm;
+}
+
+function _setProfileRuntimeStatusV3(tone, msg){
+  const pill = $('profileRuntimeStatusPill');
+  const dot = $('opsRuntimeDot');
+  const state = $('opsRuntimeState');
+  if (pill) pill.dataset.tone = tone || 'muted';
+  if (dot) {
+    dot.classList.remove('ok', 'warn', 'off');
+    dot.classList.add(tone === 'warn' ? 'warn' : tone === 'off' ? 'off' : 'ok');
+  }
+  if (state) state.textContent = msg || 'Saved';
+}
+
+function _wireProfileRuntimeChipHandlersV3(profileName){
+  const providerChip = $('profileRuntimeProviderChip');
+  const modelChip = $('profileRuntimeModelChip');
+  const reasoningChip = $('profileRuntimeReasoningChip');
+  if (providerChip) providerChip.onclick = (ev) => { ev.stopPropagation(); _toggleProfileRuntimeDropdownV3('provider', profileName); };
+  if (modelChip)    modelChip.onclick    = (ev) => { ev.stopPropagation(); _toggleProfileRuntimeDropdownV3('model', profileName); };
+  if (reasoningChip)reasoningChip.onclick= (ev) => { ev.stopPropagation(); _toggleProfileRuntimeDropdownV3('reasoning', profileName); };
+  const apply = $('opsRuntimeApply');
+  if (apply) apply.onclick = () => _persistProfileRuntimeV3(profileName);
+}
+
+function _closeAllProfileRuntimeDropdownsV3(){
+  ['profileRuntimeProviderDropdown', 'profileRuntimeModelDropdown', 'profileRuntimeReasoningDropdown']
+    .forEach(id => { const el = $(id); if (el) el.classList.remove('open'); });
+  ['profileRuntimeProviderChip', 'profileRuntimeModelChip', 'profileRuntimeReasoningChip']
+    .forEach(id => { const el = $(id); if (el) el.classList.remove('active'); });
+}
+
+function _toggleProfileRuntimeDropdownV3(kind, profileName){
+  const map = {
+    provider:  ['profileRuntimeProviderDropdown',  'profileRuntimeProviderChip',  _renderProfileRuntimeProviderDropdownV3],
+    model:     ['profileRuntimeModelDropdown',     'profileRuntimeModelChip',     _renderProfileRuntimeModelDropdownV3],
+    reasoning: ['profileRuntimeReasoningDropdown', 'profileRuntimeReasoningChip', _renderProfileRuntimeReasoningDropdownV3],
+  };
+  const [ddId, chipId, render] = map[kind] || [];
+  const dd = $(ddId), chip = $(chipId);
+  if (!dd || !chip) return;
+  if (dd.classList.contains('open')) { _closeAllProfileRuntimeDropdownsV3(); return; }
+  if (typeof closeModelDropdown === 'function') closeModelDropdown();
+  if (typeof closeReasoningDropdown === 'function') closeReasoningDropdown();
+  _closeAllProfileRuntimeDropdownsV3();
+  render(profileName);
+  dd.classList.add('open');
+  chip.classList.add('active');
+}
+
+function _renderProfileRuntimeProviderDropdownV3(profileName){
+  const dd = $('profileRuntimeProviderDropdown');
+  if (!dd) return;
+  const groups = _profileModelGroupsFromComposer();
+  const rows = [`<div class="model-row" data-value=""><span class="model-name">Auto · default</span></div>`];
+  for (const g of groups) {
+    const label = esc(g.label || g.provider || 'Models');
+    const count = g.models.length;
+    rows.push(`<div class="model-row" data-value="${esc(g.provider)}"><span class="model-name">${label}</span><span class="model-id" style="opacity:.55">${count} model${count === 1 ? '' : 's'}</span></div>`);
+  }
+  dd.innerHTML = `<div class="model-list">${rows.join('')}</div>`;
+  dd.querySelectorAll('[data-value]').forEach(row => {
+    row.onclick = () => {
+      const v = row.dataset.value || '';
+      _closeAllProfileRuntimeDropdownsV3();
+      _selectProfileRuntimeProviderV3(profileName, v);
+    };
+  });
+}
+
+function _selectProfileRuntimeProviderV3(profileName, providerValue){
+  _applyProfileRuntimeProviderChipV3(providerValue);
+  // Clear the model chip if its current model isn't in the new provider's group.
+  const modelChip = $('profileRuntimeModelChip');
+  if (modelChip && providerValue) {
+    const currentProvider = modelChip.dataset.modelProvider || '';
+    if (currentProvider && currentProvider !== providerValue) {
+      _applyProfileRuntimeModelChipV3('', providerValue);
+    }
+  }
+  _setProfileRuntimeStatusV3('warn', 'Unsaved');
+}
+
+function _renderProfileRuntimeModelDropdownV3(profileName){
+  const dd = $('profileRuntimeModelDropdown');
+  if (!dd) return;
+  const providerChip = $('profileRuntimeProviderChip');
+  const providerFilter = providerChip ? (providerChip.dataset.provider || '') : '';
+  const groups = _profileModelGroupsFromComposer();
+  const html = [];
+  for (const g of groups) {
+    if (providerFilter && g.provider !== providerFilter) continue;
+    html.push(`<div class="model-group-label">${esc(g.label || g.provider || 'Models')}</div>`);
+    for (const m of g.models) {
+      html.push(`<div class="model-row" data-value="${esc(m.value)}" data-provider="${esc(m.provider || '')}"><span class="model-name">${esc(m.label)}</span><span class="model-id" style="opacity:.55">${esc(m.value)}</span></div>`);
+    }
+  }
+  dd.innerHTML = `<div class="model-list">${html.join('') || '<div class="model-row"><span class="model-name" style="color:var(--muted)">No models for this provider.</span></div>'}</div>`;
+  dd.querySelectorAll('[data-value]').forEach(row => {
+    row.onclick = () => {
+      const value = row.dataset.value || '';
+      const provider = row.dataset.provider || '';
+      _closeAllProfileRuntimeDropdownsV3();
+      _applyProfileRuntimeModelChipV3(value, provider);
+      // If no provider chip was set yet, adopt the chosen model's provider so
+      // the saved profile retains its origin (matches composer behaviour).
+      if (!providerFilter && provider) _applyProfileRuntimeProviderChipV3(provider);
+      _setProfileRuntimeStatusV3('warn', 'Unsaved');
+    };
+  });
+}
+
+function _renderProfileRuntimeReasoningDropdownV3(profileName){
+  const dd = $('profileRuntimeReasoningDropdown');
+  if (!dd) return;
+  const chip = $('profileRuntimeReasoningChip');
+  const current = chip ? (chip.dataset.effort || '') : '';
+  const rows = _PROFILE_REASONING_OPTS_V3.map(([value, label]) =>
+    `<div class="model-row${value === current ? ' selected' : ''}" data-value="${esc(value)}"><span class="model-name">${esc(label)}</span></div>`
+  );
+  dd.innerHTML = `<div class="model-list">${rows.join('')}</div>`;
+  dd.querySelectorAll('[data-value]').forEach(row => {
+    row.onclick = () => {
+      const v = row.dataset.value || '';
+      _closeAllProfileRuntimeDropdownsV3();
+      _applyProfileRuntimeReasoningChipV3(v);
+      _setProfileRuntimeStatusV3('warn', 'Unsaved');
+    };
+  });
+}
+
+async function _persistProfileRuntimeV3(profileName){
+  const providerChip = $('profileRuntimeProviderChip');
+  const modelChip = $('profileRuntimeModelChip');
+  const reasoningChip = $('profileRuntimeReasoningChip');
+  const body = {
+    name: profileName,
+    provider: providerChip ? (providerChip.dataset.provider || '') : '',
+    model: modelChip ? (modelChip.dataset.modelValue || '') : '',
+    reasoning_effort: reasoningChip ? (reasoningChip.dataset.effort || '') : '',
+  };
+  _setProfileRuntimeStatusV3('muted', 'Saving…');
+  try {
+    await api('/api/profile/settings', { method: 'POST', body: JSON.stringify(body) });
+    _setProfileRuntimeStatusV3('ok', 'Saved');
+    // Refresh list so the profile row reflects new model/provider on the card.
+    if (typeof loadProfilesPanel === 'function') await loadProfilesPanel();
+  } catch (e) {
+    _setProfileRuntimeStatusV3('warn', 'Save failed');
+    showToast('Runtime save failed: ' + (e.message || e));
+  }
+}
+
+// Click-outside / Escape closes runtime dropdowns.
+document.addEventListener('click', (ev) => {
+  if (!ev.target.closest('.profile-runtime-chip-wrap')) _closeAllProfileRuntimeDropdownsV3();
+});
+document.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Escape') _closeAllProfileRuntimeDropdownsV3();
+});
+
+// ── Skills tile — top-3 enabled chips ──────────────────────────────────
+
+async function _loadProfileSkillsTile(profile){
+  if (!profile || !profile.name) return;
+  const chips = $('opsSkillsTopChips');
+  const pillLabel = $('opsSkillsPillLabel');
+  const pillDot = $('opsSkillsDot');
+  const value = $('opsSkillsValue');
+  if (!chips) return;
+  try {
+    const data = await api('/api/profile/skills?name=' + encodeURIComponent(profile.name));
+    const rows = Array.isArray(data && data.skills) ? data.skills : [];
+    const enabled = rows.filter(s => s && s.enabled);
+    const total = rows.length;
+    if (pillLabel) pillLabel.textContent = `${enabled.length} / ${total} enabled`;
+    if (pillDot) {
+      pillDot.classList.remove('ok', 'off');
+      pillDot.classList.add(enabled.length > 0 ? 'ok' : 'off');
+    }
+    if (value) value.textContent = enabled.length === 0
+      ? (total === 0 ? 'No skills installed' : 'No skills enabled')
+      : 'Top in this profile';
+    // v1 ordering fallback: alphabetical by display name. A persistent
+    // invocation counter is a follow-up; the spec and CLAUDE memory cover it.
+    enabled.sort((a, b) => String(a.label || a.name).localeCompare(String(b.label || b.name)));
+    const TOP = 3;
+    const shown = enabled.slice(0, TOP);
+    const extra = Math.max(0, enabled.length - TOP);
+    const parts = shown.map(s => {
+      const label = esc(s.label || s.name || 'skill');
+      const icon = s.icon ? esc(s.icon) + ' ' : '';
+      return `<span class="profile-skill-chip" role="listitem">${icon}${label}</span>`;
+    });
+    if (extra > 0) parts.push(`<span class="profile-skill-more">+${extra} more</span>`);
+    chips.innerHTML = parts.join('');
+  } catch (e) {
+    // Skills endpoint may not be available in every environment. Fail soft.
+    chips.innerHTML = '';
+  }
+}
 
 // _profileIdentityPlane: removed in profile screen rework v3 (2026-05-14).
 // Replaced by _profileHeroDossier (256×256 avatar, inline action buttons, no
