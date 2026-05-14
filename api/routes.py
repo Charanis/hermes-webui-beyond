@@ -3931,6 +3931,22 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/profile/files":
         return _handle_profile_file_read(handler, parsed)
 
+    # ── Profile Persona API (GET) ──
+    # Voice excerpt from SOUL.md for the hero dossier (rework 2026-05-14).
+    if parsed.path == "/api/profile/persona":
+        from api.profiles import read_profile_persona_api
+
+        qs = parse_qs(parsed.query)
+        name = str(qs.get("name", [""])[0] or "").strip()
+        if not name:
+            return bad(handler, "name is required")
+        try:
+            return j(handler, read_profile_persona_api(name))
+        except FileNotFoundError as e:
+            return bad(handler, _sanitize_error(e), 404)
+        except ValueError as e:
+            return bad(handler, _sanitize_error(e), 400)
+
     # ── Gateway Status (GET) ──
     if parsed.path == "/api/gateway/status":
         import datetime

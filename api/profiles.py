@@ -1105,6 +1105,83 @@ def get_profile_settings_api(name: str) -> dict:
     }
 
 
+# ── Persona excerpt (profile screen rework 2026-05-14) ─────────────────────
+#
+# The hero dossier on the profile detail screen needs a short, italic "voice"
+# line that conveys what makes this agent distinct. We pull it from the first
+# non-blank, non-heading-only paragraph of SOUL.md, truncated to a hard cap so
+# the rest of the file body never reaches the browser through this endpoint.
+
+_PERSONA_VOICE_MAX = 240
+
+
+def _first_non_blank_paragraph(text: str) -> str:
+    """Return the first non-blank, non-heading-only paragraph from a markdown blob.
+
+    Heading marks ('#') are stripped, but a paragraph that contains *only*
+    headings is skipped in favour of a paragraph that has at least one body
+    line. Joined lines are space-separated so a wrapped voice quote survives.
+    """
+    for raw in text.split('\n\n'):
+        para = raw.strip()
+        if not para:
+            continue
+        kept = []
+        for line in para.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            is_heading = stripped.startswith('#')
+            text_line = stripped.lstrip('#').strip() if is_heading else stripped
+            kept.append((text_line, is_heading))
+        if not kept:
+            continue
+        if all(h for _, h in kept):
+            # Whole paragraph is headings — look at the next paragraph instead.
+            continue
+        body = ' '.join(t for t, h in kept if t and not h) or ' '.join(t for t, _ in kept if t)
+        body = body.strip()
+        if body:
+            return body
+    return ''
+
+
+def read_profile_persona_api(name: str) -> dict:
+    """Return the SOUL.md voice excerpt for *name* without leaking the body.
+
+    The response shape is deliberately small: a single voice line plus
+    presence/size signals the UI uses to pick between a quote and a "no
+    persona set yet" placeholder. Full SOUL.md content is never returned by
+    this endpoint — the file editor route owns that.
+
+    Raises:
+        ValueError: invalid profile name.
+        FileNotFoundError: profile directory does not exist.
+    """
+    name, profile_home = _require_profile_home_for_settings(name)
+    soul = profile_home / 'SOUL.md'
+    if not soul.exists():
+        return {
+            'name': name,
+            'soul_present': False,
+            'soul_chars': 0,
+            'voice': '',
+        }
+    try:
+        text = soul.read_text(encoding='utf-8', errors='replace')
+    except OSError:
+        text = ''
+    voice = _first_non_blank_paragraph(text)
+    if len(voice) > _PERSONA_VOICE_MAX:
+        voice = voice[:_PERSONA_VOICE_MAX] + '…'
+    return {
+        'name': name,
+        'soul_present': True,
+        'soul_chars': len(text),
+        'voice': voice,
+    }
+
+
 def update_profile_settings_api(name: str, *, provider=_MISSING, model=_MISSING,
                                 avatar=_MISSING, reasoning_effort=_MISSING) -> dict:
     """Update model/provider, reasoning effort and/or WebUI avatar metadata."""
