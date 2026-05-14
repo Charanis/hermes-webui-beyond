@@ -127,6 +127,24 @@ def test_compute_activity_treats_missing_profile_field_as_default():
         assert result["sessions_week"] == 1
 
 
+def test_compute_activity_last_used_is_unbounded_by_week_window():
+    """Regression for validator F#15: a profile last touched outside the 7-day
+    window must still report a non-null last_used_at — only sessions_week is
+    scoped to the cutoff, last_used_at is the most-recent timestamp ever."""
+    rows = [
+        _row("coder", age_days=30),     # well outside the weekly window
+        _row("coder", age_days=14),     # also outside
+    ]
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        profiles = _reload_profiles_module(base)
+        result = profiles._compute_profile_activity(rows, "coder", now=_now())
+        assert result["sessions_week"] == 0
+        # Last used is the most recent session — 14 days ago, not null.
+        assert result["last_used_at"] is not None
+
+
 def test_compute_activity_spend_is_none_in_v1():
     """V1 ships with no spend display until cost-tracking lands."""
     rows = [_row("coder", age_days=1)]

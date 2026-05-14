@@ -5080,21 +5080,10 @@ async function _hydrateProfileRuntimeChips(profile){
   _setProfileRuntimeStatusV3('muted', 'Saved');
 }
 
-function _profileModelGroupsFromComposer(){
-  const sel = $('modelSelect');
-  const groups = [];
-  if (!sel) return groups;
-  for (const og of Array.from(sel.children)) {
-    if (og.tagName !== 'OPTGROUP') continue;
-    const provider = (og.dataset && og.dataset.provider) || '';
-    const label = og.label || provider || 'Models';
-    const models = Array.from(og.children)
-      .filter(o => o.tagName === 'OPTION' && o.value)
-      .map(o => ({ value: o.value, label: o.textContent || o.value, provider }));
-    if (models.length) groups.push({ provider, label, models });
-  }
-  return groups;
-}
+// _profileModelGroupsFromComposer is defined earlier in this file
+// (~line 4356) and used by both v2 callers and the v3 chips below.
+// Validator F#17 caught a redundant v3 duplicate here that silently
+// shadowed the more-capable v2 implementation; removed.
 
 function _applyProfileRuntimeProviderChipV3(providerValue){
   const label = $('profileRuntimeProviderLabel');
@@ -5340,16 +5329,18 @@ async function _loadProfileSkillsTile(profile){
 
 function _profileFilesSection(p){
   const profileName = esc(p.name);
-  const envStatus = p.has_env ? 'Configured · hidden values' : 'Not configured · hidden values';
+  // Status strings match the spec's Files-grid table exactly (validator
+  // F#16): three Markdowns, env Configured/Not-configured · hidden, YAML.
+  const envStatus = p.has_env ? 'Configured · hidden' : 'Not configured · hidden';
   const envClass = p.has_env ? '' : 'warn';
   // Lucide icons replace the single-letter badges from v2 so the files row
   // shares iconography with the rest of the webUI (icons.js).
   const files = [
-    { name: 'SOUL.md',             icon: 'user',      label: 'SOUL.md',          desc: 'Persona, operating principles, and profile voice.',          status: 'Markdown editor', statusClass: '' },
-    { name: 'memories/MEMORY.md',  icon: 'brain',     label: 'Memory',           desc: 'Long-lived notes and retrieved context for this profile.', status: 'Profile-scoped',  statusClass: '' },
-    { name: 'memories/USER.md',    icon: 'settings',  label: 'User preferences', desc: 'Taste, workflow defaults, and interaction preferences.',   status: 'Structured editor', statusClass: '' },
-    { name: '.env',                icon: 'lock',      label: 'ENV file',         desc: 'Secrets hidden; use the safe editor for key passing.',     status: envStatus,         statusClass: envClass },
-    { name: 'config.yaml',         icon: 'file-code', label: 'config.yaml',      desc: 'Runtime defaults, tools, and profile configuration.',      status: 'Validated YAML',  statusClass: '' },
+    { name: 'SOUL.md',             icon: 'user',      label: 'SOUL.md',          desc: 'Persona & principles.',           status: 'Markdown', statusClass: '' },
+    { name: 'memories/MEMORY.md',  icon: 'brain',     label: 'Memory',           desc: 'Long-lived notes.',               status: 'Markdown', statusClass: '' },
+    { name: 'memories/USER.md',    icon: 'settings',  label: 'User preferences', desc: 'Taste & defaults.',               status: 'Markdown', statusClass: '' },
+    { name: '.env',                icon: 'lock',      label: '.env',             desc: 'Provider credentials.',           status: envStatus,  statusClass: envClass },
+    { name: 'config.yaml',         icon: 'file-code', label: 'config.yaml',      desc: 'Runtime defaults.',               status: 'YAML',     statusClass: '' },
   ];
   const widgets = files.map(f => `
     <button class="profile-file-widget" type="button" data-profile-file="${esc(f.name)}">

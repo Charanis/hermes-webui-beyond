@@ -1159,17 +1159,25 @@ _ACTIVITY_WINDOW_DAYS = 7
 
 
 def _compute_profile_activity(rows, name: str, *, now: float) -> dict:
-    """Aggregate session-index *rows* for profile *name* over the last week.
+    """Aggregate session-index *rows* for profile *name*.
 
-    A row whose ``profile`` field is missing is treated as belonging to the
-    default profile (this matches the index's pre-multi-profile behaviour).
-    Spend is intentionally ``None`` in v1 — the UI hides the segment until
-    cost tracking lands.
+    ``sessions_week`` is the count of profile-tagged sessions within the
+    last 7 days. ``last_used_at`` is the most-recent ``updated_at`` for
+    this profile across ALL time — a profile last touched 30 days ago
+    should still report a non-null last-used (just outside the weekly
+    window). Validator F#15 caught the prior version scoping both signals
+    to the same cutoff.
+
+    A row whose ``profile`` field is missing is treated as belonging to
+    the default profile (matches the index's pre-multi-profile shape).
+    Spend is intentionally ``None`` in v1 — the UI hides the segment
+    until cost tracking lands.
     """
     import datetime as _dt
 
     cutoff = now - _ACTIVITY_WINDOW_DAYS * 86400.0
-    mine = []
+    all_timestamps = []     # unbounded — for last_used_at
+    window_timestamps = []  # within cutoff — for sessions_week
     for r in rows or ():
         if not isinstance(r, dict):
             continue
@@ -1179,19 +1187,19 @@ def _compute_profile_activity(rows, name: str, *, now: float) -> dict:
         ts = r.get('updated_at')
         if not isinstance(ts, (int, float)):
             continue
-        if ts < cutoff:
-            continue
-        mine.append(ts)
+        all_timestamps.append(ts)
+        if ts >= cutoff:
+            window_timestamps.append(ts)
 
     last_used_at = None
-    if mine:
-        most_recent = max(mine)
+    if all_timestamps:
+        most_recent = max(all_timestamps)
         last_used_at = _dt.datetime.fromtimestamp(
             most_recent, tz=_dt.timezone.utc
         ).isoformat().replace('+00:00', 'Z')
 
     return {
-        'sessions_week': len(mine),
+        'sessions_week': len(window_timestamps),
         'last_used_at': last_used_at,
         'spend_week_usd': None,
     }
