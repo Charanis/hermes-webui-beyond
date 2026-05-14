@@ -3765,6 +3765,144 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
 .kanban-task-preview-body{font-size:12px;color:var(--muted);line-height:1.45;white-space:pre-wrap;margin-bottom:6px;}
 .kanban-status-actions{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 4px;}
 .kanban-status-actions .btn{font-size:11px;padding:4px 8px;}
+
+/* ── Profile screen rework v3 (2026-05-14) ─────────────────────────────────
+   Layout:
+     Row 1 — hero dossier (256×256 avatar + voice + inline action buttons)
+     Row 2 — activity line (last-used + sessions-week + gateway-last-run)
+     Row 3 — runtime panel | gateway tile | skills tile  (3-col grid)
+     Row 4 — files grid (Lucide icons)
+   The Active "diode" next to the profile name is intentionally absent here:
+   the inline Active pill in the hero already carries the dot, and a second
+   bare diode would just repeat the signal. */
+
+.profile-detail-v3{display:flex;flex-direction:column;gap:14px;padding:16px;}
+
+/* Hero dossier */
+.profile-hero{
+  display:grid;grid-template-columns:256px 1fr;gap:24px;align-items:start;
+  padding:18px;border:1px solid var(--border);border-radius:12px;
+  background:linear-gradient(135deg,var(--accent-bg),transparent 60%),color-mix(in srgb,var(--surface) 72%,var(--bg));
+}
+.profile-hero-avatar{
+  width:256px;height:256px;border-radius:24px;flex:none;cursor:pointer;
+  border:1px solid var(--accent-bg-strong);
+  background:linear-gradient(135deg,var(--accent-bg),transparent 55%),var(--sidebar);
+  display:grid;place-items:center;position:relative;overflow:hidden;
+  color:var(--accent-text);font-weight:800;font-size:108px;line-height:1;
+  box-shadow:0 16px 40px rgba(0,0,0,.30);
+}
+.profile-hero-avatar:focus-visible{outline:2px solid var(--accent);outline-offset:3px;}
+.profile-hero-avatar img{width:100%;height:100%;border-radius:inherit;object-fit:cover;}
+.profile-hero-avatar .profile-avatar{width:100%;height:100%;border-radius:inherit;border:0;background:transparent;font-size:inherit;}
+.profile-hero-avatar-edit{
+  position:absolute;right:10px;bottom:10px;z-index:3;
+  width:38px;height:38px;display:grid;place-items:center;
+  border:1px solid var(--accent-bg-strong);border-radius:999px;
+  background:color-mix(in srgb,var(--sidebar) 88%,transparent);
+  color:var(--accent-text);cursor:pointer;font:inherit;font-size:14px;font-weight:800;
+  box-shadow:0 8px 18px rgba(0,0,0,.28);
+}
+.profile-hero-avatar-edit:hover{background:var(--accent-bg);}
+.profile-hero-name{
+  font-size:32px;font-weight:830;letter-spacing:-.02em;line-height:1.05;
+  display:flex;align-items:center;gap:10px;flex-wrap:wrap;color:var(--text);
+}
+.profile-hero-handle{
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  color:var(--muted);font-size:12.5px;margin-top:4px;
+}
+.profile-hero-voice{
+  margin-top:14px;font-style:italic;font-size:14px;line-height:1.55;
+  color:color-mix(in srgb,var(--text) 82%,var(--muted));
+  border-left:2px solid var(--accent-bg-strong);padding-left:10px;
+}
+.profile-hero-voice.placeholder{color:var(--muted);font-style:normal;}
+.profile-hero-actions{margin-top:14px;display:flex;gap:6px;flex-wrap:wrap;}
+.profile-hero-active-pill{
+  display:inline-flex;align-items:center;gap:6px;
+  font-size:11px;font-weight:700;letter-spacing:.02em;
+  padding:3px 9px;border-radius:999px;
+  border:1px solid color-mix(in srgb,var(--success) 45%,transparent);
+  background:color-mix(in srgb,var(--success) 12%,transparent);
+  color:color-mix(in srgb,var(--success) 80%,var(--text));
+}
+
+/* Activity line */
+.profile-activity-line{
+  display:flex;justify-content:space-between;align-items:center;gap:12px;
+  padding:10px 14px;border:1px solid var(--border);border-radius:11px;
+  background:color-mix(in srgb,var(--surface) 60%,var(--bg));
+  font-size:12.5px;color:var(--muted);
+}
+.profile-activity-line b{color:var(--text);font-weight:700;}
+.profile-activity-line.empty{justify-content:flex-start;}
+
+/* Gateway tile — wifi indicator */
+.profile-wifi{
+  display:inline-grid;place-items:center;width:32px;height:32px;border-radius:9px;
+  border:1px solid var(--border);background:color-mix(in srgb,var(--sidebar) 70%,transparent);
+  color:var(--muted);transition:color .25s,border-color .25s,background-color .25s,box-shadow .25s;
+}
+.profile-wifi.on{
+  color:var(--success);
+  background:color-mix(in srgb,var(--success) 12%,transparent);
+  border-color:color-mix(in srgb,var(--success) 45%,transparent);
+  box-shadow:0 0 0 3px color-mix(in srgb,var(--success) 14%,transparent);
+}
+@media (prefers-reduced-motion: no-preference){
+  .profile-wifi.on.just-started{animation:profile-wifi-pulse 1.2s ease-out 1;}
+}
+@keyframes profile-wifi-pulse{
+  0%  {box-shadow:0 0 0 0 color-mix(in srgb,var(--success) 50%,transparent);}
+  100%{box-shadow:0 0 0 12px color-mix(in srgb,var(--success) 0%,transparent);}
+}
+
+/* Skills tile — top-skills chips */
+.profile-skill-top{display:flex;flex-wrap:wrap;gap:5px;margin-top:6px;}
+.profile-skill-chip{
+  display:inline-flex;align-items:center;gap:5px;
+  font-size:11px;font-weight:700;
+  background:var(--accent-bg);color:var(--accent-text);
+  border:1px solid var(--accent-bg-strong);border-radius:999px;padding:3px 9px;
+}
+.profile-skill-chip .count{opacity:.65;font-weight:600;}
+.profile-skill-more{
+  display:inline-flex;align-items:center;
+  font-size:11px;color:var(--muted);font-weight:700;padding:3px 6px;
+}
+
+/* Runtime panel — stack composer-style chips vertically inside the tile */
+.profile-runtime-chiprow.v3{
+  flex-direction:column;align-items:stretch;gap:8px;
+}
+.profile-runtime-chiprow.v3 .composer-model-chip,
+.profile-runtime-chiprow.v3 .composer-reasoning-chip{
+  width:100%;max-width:none;justify-content:flex-start;
+}
+
+/* Files grid — Lucide icon container */
+.profile-file-icon svg{color:var(--accent-text);}
+.profile-file-status.warn{color:var(--warning,#FFA726);}
+
+/* Detail screen 3-col tile grid */
+.profile-detail-v3 .profile-ops-grid{
+  display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;
+}
+
+/* Responsive — collapse hero / tile grid on narrower screens */
+@media (max-width:980px){
+  .profile-hero{grid-template-columns:160px 1fr;gap:16px;padding:14px;}
+  .profile-hero-avatar{width:160px;height:160px;border-radius:18px;font-size:68px;}
+  .profile-hero-avatar-edit{width:30px;height:30px;right:6px;bottom:6px;font-size:12px;}
+  .profile-hero-name{font-size:24px;}
+  .profile-detail-v3 .profile-ops-grid{grid-template-columns:repeat(2,minmax(0,1fr));}
+}
+@media (max-width:760px){
+  .profile-hero{grid-template-columns:1fr;}
+  .profile-hero-avatar{width:120px;height:120px;font-size:52px;align-self:center;}
+  .profile-detail-v3 .profile-ops-grid{grid-template-columns:1fr;}
+}
 /* Generic styled buttons used throughout the Kanban panel. The Kanban PR
    stack standardised on `.btn` / `.btn.secondary` class names but never
    shipped the matching CSS, so without these rules buttons fall back to
