@@ -1875,6 +1875,7 @@ def list_profile_skills_api(name: str) -> dict:
             "skills": [],
             "total_count": 0,
             "enabled_count": 0,
+            "categories": [],
         }
 
     # --- Iterate SKILL.md files across all search roots ---
@@ -1933,6 +1934,7 @@ def list_profile_skills_api(name: str) -> dict:
                 "description": cached["description"],
                 "enabled": cached["name"] not in disabled_set,
                 "path": path_str,
+                "source": str(skills_root),
             })
 
     # Sort alphabetically by name (case-insensitive)
@@ -1940,12 +1942,14 @@ def list_profile_skills_api(name: str) -> dict:
 
     total_count = len(skills)
     enabled_count = sum(1 for s in skills if s["enabled"])
+    categories = sorted({s["category"] for s in skills if s.get("category")})
     return {
         "ok": True,
         "profile": name,
         "skills": skills,
         "total_count": total_count,
         "enabled_count": enabled_count,
+        "categories": categories,
     }
 
 

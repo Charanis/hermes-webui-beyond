@@ -3863,6 +3863,31 @@ def handle_get(handler, parsed) -> bool:
         except ValueError as exc:
             return bad(handler, str(exc), status=400)
 
+    if parsed.path == "/api/profile/skill_content":
+        from api.profiles import resolve_profile_skill_file
+        qs = parse_qs(parsed.query)
+        name = str(qs.get("name", [""])[0] or "").strip() or "default"
+        skill = str(qs.get("skill", [""])[0] or "").strip()
+        if not skill:
+            return bad(handler, "skill is required")
+        try:
+            skill_md = resolve_profile_skill_file(name, skill)
+        except FileNotFoundError as e:
+            return bad(handler, str(e), status=404)
+        except ValueError as e:
+            return bad(handler, str(e), status=400)
+        try:
+            content = skill_md.read_text(encoding="utf-8", errors="replace")
+        except (PermissionError, OSError) as e:
+            return bad(handler, str(e))
+        return j(handler, {
+            "ok": True,
+            "profile": name,
+            "skill": skill,
+            "content": content,
+            "path": str(skill_md),
+        })
+
     # ── Skills API (GET) ──
     if parsed.path == "/api/skills":
         qs = parse_qs(parsed.query)
@@ -4914,6 +4939,48 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "profile not found", status=404)
         except ValueError as exc:
             return bad(handler, str(exc), status=400)
+
+    # Batched save alias — same as /set-disabled but at the canonical URL
+    # the modal uses (POST /api/profile/skills body {name, disabled:[...]}).
+    if parsed.path == "/api/profile/skills":
+        name = (body or {}).get("name")
+        disabled = (body or {}).get("disabled")
+        if not isinstance(name, str) or not name:
+            return bad(handler, "name required")
+        try:
+            from api.profiles import set_profile_disabled_skills_api
+            return j(handler, set_profile_disabled_skills_api(name, disabled))
+        except FileNotFoundError:
+            return bad(handler, "profile not found", status=404)
+        except ValueError as exc:
+            return bad(handler, str(exc), status=400)
+
+    if parsed.path == "/api/profile/skill_content":
+        from api.profiles import resolve_profile_skill_file, _invalidate_skill_cache_for_path
+        name = str((body or {}).get("name") or "").strip() or "default"
+        skill = str((body or {}).get("skill") or "").strip()
+        content = (body or {}).get("content", "")
+        if not skill:
+            return bad(handler, "skill is required")
+        if not isinstance(content, str):
+            return bad(handler, "content must be a string", status=400)
+        try:
+            skill_md = resolve_profile_skill_file(name, skill)
+        except FileNotFoundError as e:
+            return bad(handler, str(e), status=404)
+        except ValueError as e:
+            return bad(handler, str(e), status=400)
+        try:
+            skill_md.write_text(content, encoding="utf-8")
+        except (PermissionError, OSError) as e:
+            return bad(handler, str(e))
+        _invalidate_skill_cache_for_path(skill_md)
+        return j(handler, {
+            "ok": True,
+            "profile": name,
+            "skill": skill,
+            "path": str(skill_md),
+        })
 
     # ── Skills (POST) ──
     if parsed.path == "/api/skills/save":
