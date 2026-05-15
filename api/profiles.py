@@ -2650,7 +2650,7 @@ def _sanitize_gateway_message(message: str) -> str:
         return ''
     text = _SECRET_PATTERN.sub(r'\1=[redacted]', message)
     # Truncate to avoid dumping arbitrary subprocess output into UI toasts.
-    return text[:280]
+    return text[:500]
 
 
 def delete_profile_api(name: str) -> dict:

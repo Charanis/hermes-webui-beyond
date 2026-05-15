@@ -211,6 +211,11 @@ async function switchPanel(name, opts = {}) {
   if (prevPanel === 'kanban' && nextPanel !== 'kanban') {
     if (typeof _kanbanStopPolling === 'function') _kanbanStopPolling();
   }
+  // Stop the 1500ms gateway status interval when leaving the Profiles panel
+  // so we don't leak pollers across panel switches.
+  if (prevPanel === 'profiles' && nextPanel !== 'profiles') {
+    if (typeof _stopAllGatewayPollers === 'function') _stopAllGatewayPollers();
+  }
   _currentPanel = nextPanel;
   // Update nav tabs (rail + mobile sidebar-nav share data-panel)
   document.querySelectorAll('[data-panel]').forEach(t => t.classList.toggle('active', t.dataset.panel === nextPanel));
@@ -4982,7 +4987,9 @@ function _repaintGatewayTile(profileName){
   if (wifi) wifi.setAttribute('data-state', phase);
   if (pill) {
     pill.setAttribute('data-state', phase);
-    pill.setAttribute('data-error', phase === 'failed' ? (state.last_error || 'Gateway failed to start.') : '');
+    const errMsg = phase === 'failed' ? (state.last_error || 'Gateway failed to start.') : '';
+    pill.setAttribute('data-error', errMsg);
+    pill.setAttribute('title', errMsg);
   }
   if (dot) dot.setAttribute('data-state', phase);
   if (stateLabel) stateLabel.textContent = _gatewayLabelForPhase(phase);
@@ -5016,7 +5023,7 @@ function _profileGatewayTile(p){
           <span class="profile-wifi profile-wifi-lg" id="profileGatewayWifi" data-state="${phase}" aria-hidden="true">${li('wifi',26)}</span>
           <span class="profile-gateway-title">Agent Gateway</span>
         </span>
-        <span class="profile-ops-status-pill profile-gateway-pill" id="opsGatewayPill" data-state="${phase}" data-error="${esc(lastError)}">
+        <span class="profile-ops-status-pill profile-gateway-pill" id="opsGatewayPill" data-state="${phase}" data-error="${esc(lastError)}" title="${esc(lastError)}">
           <span id="opsGatewayDot" class="profile-status-dot profile-gateway-dot" data-state="${phase}" aria-hidden="true"><span class="dot-info" aria-hidden="true">ⓘ</span></span>
           <span id="opsGatewayState">${esc(labelText)}</span>
         </span>
@@ -6463,6 +6470,7 @@ function openProfileDetail(name, el){
 }
 
 function _clearProfileDetail(){
+  _stopAllGatewayPollers();
   _currentProfileDetail = null;
   _profileMode = 'empty';
   const title = $('profileDetailTitle');
