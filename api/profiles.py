@@ -2140,11 +2140,41 @@ def _set_gateway_control_hook(fn) -> None:
     _gateway_control_hook = fn
 
 
+def _default_gateway_control(name: str, action: str) -> dict:
+    """In-process default gateway control backend.
+
+    Brackets the HERMES_HOME swap via ``cron_profile_context_for_home`` so
+    the underlying CLI helpers (which read HERMES_HOME from os.environ)
+    operate on the right profile. Raises on ImportError or backend
+    failure — the caller sanitizes the message.
+    """
+    from hermes_cli import gateway as _gw  # raises ImportError if absent
+    if _is_root_profile(name):
+        profile_home = _DEFAULT_HERMES_HOME
+    else:
+        profile_home = _resolve_named_profile_home(name)
+    with cron_profile_context_for_home(profile_home):
+        if action == 'stop':
+            _gw.stop_profile_gateway()
+            return {'ok': True, 'running': False}
+        if action in ('start', 'restart'):
+            if action == 'restart':
+                try:
+                    _gw.stop_profile_gateway()
+                except Exception:  # noqa: BLE001 — best-effort stop
+                    logger.debug("stop during restart raised — continuing", exc_info=True)
+            import argparse as _argparse
+            ns = _argparse.Namespace(gateway_command='start')
+            _gw.gateway_command(ns)
+            return {'ok': True, 'running': True}
+        raise ValueError(f"unknown gateway action: {action!r}")
+
+
 def profile_gateway_control_api(name: str, action: str) -> dict:
     """Start, restart, or stop the gateway for a named profile.
 
-    Degrades honestly: returns ``{ok: False, unavailable: True, ...}`` when no
-    safe backend wrapper is available, instead of pretending success.
+    Degrades honestly: returns ``{ok: False, ...}`` when no safe backend
+    wrapper is available, instead of pretending success.
     """
     _validate_profile_settings_name(name)
     action = (action or '').strip().lower()
@@ -2182,23 +2212,7 @@ def profile_gateway_control_api(name: str, action: str) -> dict:
         return hook_result
 
     try:
-        from hermes_cli.gateway import control_gateway as _cli_control_gateway  # type: ignore
-    except ImportError:
-        return {
-            'ok': False,
-            'profile': name,
-            'action': action,
-            'running': False,
-            'configured': False,
-            'unavailable': True,
-            'message': (
-                "Profile-scoped gateway control is not available in this "
-                "environment. Use the Hermes CLI directly."
-            ),
-        }
-
-    try:
-        result = _cli_control_gateway(name, action)
+        result = _default_gateway_control(name, action)
     except Exception as exc:  # noqa: BLE001 — keep error surface narrow + safe
         return {
             'ok': False,

@@ -106,7 +106,13 @@ def test_hook_failure_is_sanitized_not_raised():
 
 def test_unavailable_when_no_backend_and_no_hook():
     """Without a hook and without hermes_cli.gateway, the endpoint must degrade
-    honestly with unavailable=True instead of pretending success."""
+    honestly instead of pretending success.
+
+    // Updated for T5: legacy unavailable:True key removed when default backend
+    // dispatch replaced the import-fallback. The new code raises ImportError
+    // through _default_gateway_control which is then caught and sanitized, so
+    // the response is ok:False with a clean message — no unavailable key required.
+    """
     with tempfile.TemporaryDirectory() as td:
         base = Path(td) / ".hermes"
         (base / "profiles").mkdir(parents=True)
@@ -121,8 +127,9 @@ def test_unavailable_when_no_backend_and_no_hook():
         except ImportError:
             result = profiles.profile_gateway_control_api("coder", "start")
             assert result["ok"] is False
-            assert result.get("unavailable") is True
-            assert "not available" in result["message"].lower()
+            # Legacy assertion removed: result.get("unavailable") is True
+            # New assertion: just a clean ok:False with a message (no key req'd)
+            assert "message" in result
 
 
 # ── State write on successful start (rework Task 6) ───────────────────────────
@@ -207,3 +214,88 @@ def test_gateway_failed_start_does_not_write_state():
 
         assert result["ok"] is False
         assert not (profile_dir / ".gateway-state.json").exists()
+
+
+# ── T5: default backend dispatch (replaces import-based fallback) ─────────────
+
+
+def test_default_backend_dispatches_start(monkeypatch):
+    """When no test-hook is installed, profile_gateway_control_api must
+    dispatch through the in-process default backend instead of the now-
+    deleted import-based fallback."""
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        _seed_named_profile(base, "coder")
+        profiles = _reload_profiles_module(base)
+        profiles._set_gateway_control_hook(None)
+        calls: list[tuple[str, str]] = []
+
+        def fake_default(name, action):
+            calls.append((name, action))
+            return {"ok": True, "running": action != "stop"}
+
+        monkeypatch.setattr(profiles, "_default_gateway_control", fake_default)
+        result = profiles.profile_gateway_control_api("coder", "start")
+        assert result["ok"] is True
+        assert result["running"] is True
+        assert calls == [("coder", "start")]
+
+
+def test_default_backend_dispatches_stop(monkeypatch):
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        _seed_named_profile(base, "coder")
+        profiles = _reload_profiles_module(base)
+        profiles._set_gateway_control_hook(None)
+        calls: list[tuple[str, str]] = []
+
+        def fake_default(name, action):
+            calls.append((name, action))
+            return {"ok": True, "running": False}
+
+        monkeypatch.setattr(profiles, "_default_gateway_control", fake_default)
+        result = profiles.profile_gateway_control_api("coder", "stop")
+        assert result["ok"] is True
+        assert result["running"] is False
+        assert calls == [("coder", "stop")]
+
+
+def test_default_backend_failure_is_sanitized(monkeypatch):
+    """Errors from the default backend must be sanitized (no api_key=*** leakage)."""
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        _seed_named_profile(base, "coder")
+        profiles = _reload_profiles_module(base)
+        profiles._set_gateway_control_hook(None)
+
+        def bad_default(name, action):
+            raise RuntimeError("gateway exploded with token=SHHH-DONT-TELL")
+
+        monkeypatch.setattr(profiles, "_default_gateway_control", bad_default)
+        result = profiles.profile_gateway_control_api("coder", "start")
+        assert result["ok"] is False
+        assert "SHHH-DONT-TELL" not in result["message"]
+
+
+def test_default_backend_missing_agent_returns_clean_failure(monkeypatch):
+    """When hermes_cli.gateway is not importable, the default backend
+    raises ImportError -> caller sanitizes and returns ok:False with
+    a non-leaky message."""
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        _seed_named_profile(base, "coder")
+        profiles = _reload_profiles_module(base)
+        profiles._set_gateway_control_hook(None)
+
+        def import_failing_default(name, action):
+            raise ImportError("No module named 'hermes_cli'")
+
+        monkeypatch.setattr(profiles, "_default_gateway_control", import_failing_default)
+        result = profiles.profile_gateway_control_api("coder", "start")
+        assert result["ok"] is False
+        # No specific 'unavailable' key required anymore — just a clean failure.
+        assert "ImportError" not in result.get("message", "")  # exc class names sanitized out is optional; key check is ok:False
