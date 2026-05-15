@@ -3837,6 +3837,16 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
 .profile-hero-description.placeholder{color:var(--muted);font-style:italic;}
 .profile-hero-description[data-editing="1"]{
   padding-left:0;border-left:0;background:transparent;
+  cursor:auto;
+  display:block;
+}
+/* While editing, the description claims the whole row so the textarea and
+   counter/actions footer aren't squeezed by the (now redundant) pencil. */
+.profile-hero-description-row:has(.profile-hero-description[data-editing="1"]){
+  display:block;
+}
+.profile-hero-description-row:has(.profile-hero-description[data-editing="1"]) .profile-hero-description-edit{
+  display:none;
 }
 .profile-hero-description-edit-textarea{
   width:100%;box-sizing:border-box;

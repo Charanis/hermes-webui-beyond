@@ -4929,10 +4929,21 @@ function _enterProfileDescriptionEdit(profile){
     });
   }
   host.querySelectorAll('[data-desc-action]').forEach(btn => {
-    btn.addEventListener('click', () => {
+    btn.addEventListener('click', (ev) => {
+      // Stop propagation so the host's click listener doesn't see the bubble
+      // AFTER _exitProfileDescriptionEdit has already cleared dataset.editing —
+      // the guard there checks editing === '1' and would re-enter edit mode
+      // immediately, breaking both Cancel (appears to do nothing) and Save
+      // (leaves the editor open after the POST resolves).
+      ev.stopPropagation();
       _exitProfileDescriptionEdit(profile, btn.dataset.descAction === 'save');
     });
   });
+  // Textarea clicks must not bubble to the host either — the host guard checks
+  // dataset.editing === '1' which is currently true, so the bug only bites
+  // when the inner handler flips that flag first, but defense in depth is cheap.
+  const taEl = host.querySelector('textarea');
+  if (taEl) taEl.addEventListener('click', (ev) => ev.stopPropagation());
 }
 
 async function _exitProfileDescriptionEdit(profile, save){

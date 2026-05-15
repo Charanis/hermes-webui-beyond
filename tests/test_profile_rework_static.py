@@ -370,3 +370,46 @@ def test_hero_menu_css_defined():
                      ".profile-hero-menu-button",
                      ".profile-hero-menu-item"):
         assert selector in STYLE_CSS, f"missing CSS selector {selector}"
+
+
+# ── Description editor: Cancel/Save bubble-trigger fix (2026-05-15) ──────
+
+
+def test_description_inline_action_clicks_stop_propagation():
+    """The Cancel/Save buttons inside the inline description editor MUST call
+    event.stopPropagation() on click. Otherwise the click bubbles up to the
+    #profileHeroDescription host listener — but by the time the bubble
+    arrives, _exitProfileDescriptionEdit has already cleared
+    dataset.editing, so the host's guard (editing === '1') misses, and the
+    host re-enters edit mode immediately. Result before fix: Cancel appeared
+    to do nothing; Save left the editor open after the POST resolved.
+    """
+    fn = _extract_function(PANELS_JS, "_enterProfileDescriptionEdit")
+    # Locate the inner click handler that dispatches on data-desc-action.
+    idx = fn.find("data-desc-action")
+    assert idx >= 0, "edit-mode binding for [data-desc-action] is missing"
+    # Grep the tail of the function for stopPropagation — the handler must
+    # call it before invoking _exitProfileDescriptionEdit.
+    tail = fn[idx:]
+    assert "stopPropagation" in tail, (
+        "Cancel/Save click handlers in the inline description editor must "
+        "call event.stopPropagation() so the click does not bubble to the "
+        "host's click listener and re-enter edit mode."
+    )
+
+
+def test_description_editor_full_width_when_active():
+    """While the inline editor is active, the description host promotes to a
+    block so the textarea + counter/actions row reclaim the full width of the
+    hero body (otherwise the row's flex track shares space with the now-
+    redundant pencil button and clips the editor at narrow viewports)."""
+    # Find the rule for the active-editing state.
+    assert re.search(
+        r"\.profile-hero-description-row:has\(\s*\.profile-hero-description\[data-editing=\"1\"\]\s*\)\s*\{[^}]*display\s*:\s*block",
+        STYLE_CSS,
+    ), "row must switch to block layout while the editor is active"
+    # The pencil must be hidden while editing (it's redundant — the editor is open).
+    assert re.search(
+        r"\.profile-hero-description-row:has\(\s*\.profile-hero-description\[data-editing=\"1\"\]\s*\)\s*\.profile-hero-description-edit\s*\{[^}]*display\s*:\s*none",
+        STYLE_CSS,
+    ), "pencil must be hidden while editing"
