@@ -230,6 +230,32 @@ def test_status_redacts_secrets_in_last_error():
         assert "[redacted]" in (result["last_error"] or "").lower() or "redacted" in (result["last_error"] or "")
 
 
+def test_status_last_error_captures_tail_not_head_of_stderr():
+    """When stderr log has stale noise at the front (e.g., a previous
+    failed run's box-drawing) and the actual failure cause at the end
+    (e.g., 'No messaging platforms enabled'), last_error must reflect
+    the tail so the UI tooltip shows the meaningful diagnostic — not
+    the box-drawing prefix that happened to land at offset 0 of the
+    last-5KB read."""
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        profile = _seed_named_profile(base, "coder")
+        profiles = _reload_profiles_module(base)
+        _install_fake_pid_alive(profiles, alive_pids=set())
+        head_noise = "X" * 1200  # simulate stale prior-run output
+        tail_signal = "WARNING gateway.run: No messaging platforms enabled.\n"
+        (profile / ".gateway-stderr.log").write_text(
+            head_noise + "\n" + tail_signal, encoding="utf-8"
+        )
+        _write_state(profile, phase="starting", phase_started_at=_past_iso(10))
+        result = profiles.profile_gateway_status_api("coder")
+        assert result["phase"] == "failed"
+        assert "No messaging platforms enabled" in (result["last_error"] or "")
+        # The head noise should be truncated away by the tail slice.
+        assert "X" * 1000 not in (result["last_error"] or "")
+
+
 def test_status_synthesizes_running_when_no_phase_but_pid_alive():
     """Orphaned-process recovery: PID file exists, process alive, but state
     file is empty. The status API should synthesize a 'running' state."""

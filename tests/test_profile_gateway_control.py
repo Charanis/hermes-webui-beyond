@@ -355,8 +355,9 @@ def test_default_backend_start_spawns_subprocess(monkeypatch):
         # argv[0] must be a resolved binary (absolute path or shutil.which result
         # ending with 'hermes'/'hermes.exe'), NOT the bare string 'hermes'.
         # The exact value depends on the runtime env; assert the tail is right
-        # and that the subcommands are unchanged.
-        assert args[-2:] == ("gateway", "run")
+        # and that the subcommands are unchanged. --replace clears stale PIDs
+        # so subsequent toggle clicks don't trip "Gateway already running".
+        assert args[-3:] == ("gateway", "run", "--replace")
         assert 'hermes' in args[0].lower()
         # Detached on at least one of the two flavors.
         if __import__('sys').platform == "win32":
@@ -478,7 +479,46 @@ def test_default_backend_start_uses_resolvable_hermes_binary(monkeypatch):
             f"argv[0] should be an absolute path, got: {args[0]!r}"
         )
         # The trailing args remain unchanged.
-        assert args[-2:] == ['gateway', 'run']
+        assert args[-3:] == ['gateway', 'run', '--replace']
+
+
+def test_default_backend_start_passes_replace_flag(monkeypatch):
+    """The gateway spawn must include `--replace` so a stale gateway.pid
+    file from a previous run (gateway exited but didn't clean up its PID,
+    or PID got recycled) doesn't block subsequent starts with
+    `❌ Gateway already running (PID X)`. Without this flag, every start
+    after the first exits with that error and the user is stuck at
+    'Starting Failed' on every toggle click."""
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        _seed_named_profile(base, "coder")
+        profiles = _reload_profiles_module(base)
+        profiles._set_gateway_control_hook(None)
+
+        spawned: list[list] = []
+
+        class FakePopen:
+            def __init__(self, args, **kwargs):
+                spawned.append(list(args))
+
+        import types as _types
+        fake_gw = _types.SimpleNamespace(
+            stop_profile_gateway=lambda: False,
+            gateway_command=lambda *a, **k: (_ for _ in ()).throw(AssertionError()),
+        )
+        monkeypatch.setitem(sys.modules, 'hermes_cli', _types.SimpleNamespace(gateway=fake_gw))
+        monkeypatch.setitem(sys.modules, 'hermes_cli.gateway', fake_gw)
+        monkeypatch.setattr('subprocess.Popen', FakePopen)
+
+        profiles._default_gateway_control("coder", "start")
+        assert len(spawned) == 1
+        args = spawned[0]
+        assert '--replace' in args, (
+            f"spawn argv must include --replace to clear stale gateway.pid, got: {args!r}"
+        )
+        # Order matters: --replace must follow `gateway run` (it's a subcommand flag).
+        assert args[-3:] == ['gateway', 'run', '--replace']
 
 
 def test_control_rejects_restart_action():

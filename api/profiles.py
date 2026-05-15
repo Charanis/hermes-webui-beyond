@@ -2351,8 +2351,14 @@ def _default_gateway_control(name: str, action: str) -> dict:
         except OSError:
             pass  # Best-effort logging only.
         try:
+            # `--replace` clears any stale gateway.pid the hermes CLI
+            # would otherwise refuse to overwrite ("Gateway already
+            # running (PID X)"). Without this, a clean gateway exit
+            # (e.g. 'No messaging platforms enabled') leaves a PID file
+            # that blocks every subsequent start until the user
+            # manually deletes it inside HERMES_HOME.
             _subprocess.Popen(
-                [hermes_bin, "gateway", "run"],
+                [hermes_bin, "gateway", "run", "--replace"],
                 stdin=_subprocess.DEVNULL,
                 stdout=log_fh if log_fh else _subprocess.DEVNULL,
                 stderr=log_fh if log_fh else _subprocess.DEVNULL,
@@ -2645,12 +2651,18 @@ _SECRET_PATTERN = re.compile(
 
 
 def _sanitize_gateway_message(message: str) -> str:
-    """Strip obviously secret-looking substrings from gateway runner output."""
+    """Strip obviously secret-looking substrings from gateway runner output.
+
+    Truncates to the LAST 500 chars — for a stderr tail the final lines
+    carry the actual exit reason (e.g. 'No messaging platforms enabled'),
+    while the head of the buffer is usually box-drawing noise or stale
+    output from prior runs. Redaction runs on the full string first so
+    secrets are not preserved by the slice.
+    """
     if not message:
         return ''
     text = _SECRET_PATTERN.sub(r'\1=[redacted]', message)
-    # Truncate to avoid dumping arbitrary subprocess output into UI toasts.
-    return text[:500]
+    return text[-500:]
 
 
 def delete_profile_api(name: str) -> dict:
