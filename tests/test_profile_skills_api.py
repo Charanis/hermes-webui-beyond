@@ -282,3 +282,19 @@ def test_list_raises_for_unknown_named_profile(tmp_path, monkeypatch):
     importlib.reload(profiles_mod)
     with pytest.raises(FileNotFoundError):
         profiles_mod.list_profile_skills_api("ghost-profile")
+
+
+def test_toggle_validates_boolean_input_at_function_boundary(profile_home_with_skills):
+    """Defensive: the api function accepts whatever bool() returns from caller.
+    The route's job is to validate that 'enabled' is a real boolean before
+    calling — see test_route_rejects_non_bool below. The function itself
+    accepts any truthy/falsy and uses set algebra, so it doesn't need to
+    re-validate. This test pins the function's contract: True enables,
+    False disables, idempotent on repeat."""
+    profiles_mod, _home = profile_home_with_skills
+    a = profiles_mod.toggle_profile_skill_api("default", "deep-dive", False)
+    assert a["changed"] is True
+    b = profiles_mod.toggle_profile_skill_api("default", "deep-dive", False)
+    assert b["changed"] is False
+    c = profiles_mod.toggle_profile_skill_api("default", "deep-dive", True)
+    assert c["changed"] is True

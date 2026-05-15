@@ -1983,7 +1983,7 @@ def toggle_profile_skill_api(name: str, skill: str, enabled: bool) -> dict:
                 if not cfg["skills"]:
                     del cfg["skills"]
         config_path.write_text(
-            _yaml.safe_dump(cfg, default_flow_style=False),
+            _yaml.safe_dump(cfg, default_flow_style=False, allow_unicode=True, sort_keys=False),
             encoding="utf-8",
         )
 
@@ -2064,7 +2064,7 @@ def set_profile_disabled_skills_api(name: str, disabled_list: list) -> dict:
                 if not cfg["skills"]:
                     del cfg["skills"]
         config_path.write_text(
-            _yaml.safe_dump(cfg, default_flow_style=False),
+            _yaml.safe_dump(cfg, default_flow_style=False, allow_unicode=True, sort_keys=False),
             encoding="utf-8",
         )
 
@@ -2096,8 +2096,6 @@ def resolve_profile_skill_file(name: str, skill: str):
                            matching skill was found.
         ValueError: *name* or *skill* fails validation.
     """
-    import yaml as _yaml
-
     _validate_profile_settings_name(name)
     _validate_skill_name(skill)
 

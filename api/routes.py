@@ -4887,14 +4887,16 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/profile/skills/toggle":
         name = (body or {}).get("name")
         skill = (body or {}).get("skill")
-        enabled = bool((body or {}).get("enabled"))
+        enabled_raw = (body or {}).get("enabled")
         if not isinstance(name, str) or not name:
             return bad(handler, "name required")
         if not isinstance(skill, str) or not skill:
             return bad(handler, "skill required")
+        if not isinstance(enabled_raw, bool):
+            return bad(handler, "enabled must be a boolean")
         try:
             from api.profiles import toggle_profile_skill_api
-            return j(handler, toggle_profile_skill_api(name, skill, enabled))
+            return j(handler, toggle_profile_skill_api(name, skill, enabled_raw))
         except FileNotFoundError:
             return bad(handler, "profile not found", status=404)
         except ValueError as exc:
