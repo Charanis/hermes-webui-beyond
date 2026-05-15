@@ -3855,9 +3855,9 @@ def handle_get(handler, parsed) -> bool:
         name = qs.get("name", [""])[0]
         if not name:
             return bad(handler, "name required")
-        from api.profiles import profile_skills_api
         try:
-            return j(handler, profile_skills_api(name))
+            from api.profiles import list_profile_skills_api
+            return j(handler, list_profile_skills_api(name))
         except FileNotFoundError:
             return bad(handler, "profile not found", status=404)
         except ValueError as exc:

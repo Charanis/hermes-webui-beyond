@@ -1742,43 +1742,156 @@ def duplicate_profile_api(name: str, new_name: str, *, clone_all: bool = False) 
     }
 
 
-def profile_skills_api(name: str) -> dict:
-    """Return the list of skills the agent has installed, annotated with
-    whether each is enabled for the named profile.
+# ── Per-profile skills list API ────────────────────────────────────────────
 
-    Raises FileNotFoundError if the profile does not exist.
+# Module-level cache: absolute SKILL.md path string → {name, description, category}
+# Does NOT store `enabled` or `path` — those are recomputed per call.
+_skill_md_cache: dict[str, dict] = {}
+
+
+def _invalidate_skill_cache_for_path(path) -> None:
+    """Remove the cached metadata entry for *path* (if any).
+
+    Accepts a Path object or a string.  Key normalisation uses str(Path(path))
+    with no resolve() call so it stays consistent with how list_profile_skills_api
+    stores keys (using the raw absolute path string from rglob).
     """
-    _validate_profile_settings_name(name)
+    key = str(path)
+    _skill_md_cache.pop(key, None)
+
+
+def _parse_skill_frontmatter(content: str) -> tuple[dict, str]:
+    """Parse YAML frontmatter from SKILL.md content.
+
+    Returns (frontmatter_dict, body_str).  If no frontmatter block is present
+    the returned dict is empty and body_str is the full content.
+
+    Implemented inline so ``api/profiles`` does not depend on the hermes-agent
+    ``tools.skills_tool`` package (which may not be installed in the WebUI venv).
+    """
+    import yaml
+
+    if not content.startswith("---"):
+        return {}, content
+    # Find the closing ---
+    end = content.find("\n---", 3)
+    if end == -1:
+        return {}, content
+    fm_text = content[3:end].strip()
+    body = content[end + 4:].lstrip("\n")
+    try:
+        fm = yaml.safe_load(fm_text) or {}
+        if not isinstance(fm, dict):
+            fm = {}
+    except Exception:
+        fm = {}
+    return fm, body
+
+
+def list_profile_skills_api(name: str) -> dict:
+    """Return the skills installed in *name*'s skills directory, with enabled status.
+
+    The disabled set is read from ``<profile-home>/config.yaml`` (key
+    ``skills.disabled``).  Disabled skills are INCLUDED in the response list
+    with ``enabled: False``; enabled skills get ``enabled: True``.
+
+    Results are cached by SKILL.md absolute path.  Call
+    ``_invalidate_skill_cache_for_path(path)`` after writing a SKILL.md to
+    force a re-parse on the next list call.
+
+    Raises:
+        FileNotFoundError: profile home directory does not exist.
+        ValueError: *name* fails basic validation.
+    """
+    import yaml as _yaml
+
     if _is_root_profile(name):
         profile_home = _DEFAULT_HERMES_HOME
     else:
         profile_home = _resolve_named_profile_home(name)
-    if not profile_home.is_dir():
-        raise FileNotFoundError(f"Profile '{name}' not found.")
 
-    skills_root = _DEFAULT_HERMES_HOME / "skills"
-    enabled_path = profile_home / "skills.enabled.json"
-    enabled_set: set[str] = set()
-    if enabled_path.is_file():
+    skills_dir = profile_home / "skills"
+    if not skills_dir.exists():
+        return {
+            "ok": True,
+            "profile": name,
+            "skills": [],
+            "total_count": 0,
+            "enabled_count": 0,
+        }
+
+    # --- Read disabled set from config.yaml ---
+    disabled_set: set[str] = set()
+    config_path = profile_home / "config.yaml"
+    if config_path.is_file():
         try:
-            data = json.loads(enabled_path.read_text(encoding="utf-8"))
-            if isinstance(data, list):
-                enabled_set = {str(x) for x in data if isinstance(x, str)}
-        except (ValueError, OSError):
-            enabled_set = set()
+            cfg = _yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+            if isinstance(cfg, dict):
+                disabled_list = cfg.get("skills", {}).get("disabled", [])
+                if isinstance(disabled_list, list):
+                    disabled_set = {str(x) for x in disabled_list if isinstance(x, str)}
+        except Exception:
+            disabled_set = set()
 
+    # --- Iterate SKILL.md files ---
     skills: list[dict] = []
-    if skills_root.is_dir():
-        for entry in sorted(skills_root.iterdir(), key=lambda p: p.name.lower()):
-            if not entry.is_dir():
+    for skill_md in sorted(skills_dir.rglob("SKILL.md")):
+        # Derive category: first path segment after skills_dir
+        try:
+            rel = skill_md.relative_to(skills_dir)
+        except ValueError:
+            continue
+        parts = rel.parts  # e.g. ("research", "deep-dive", "SKILL.md")
+        if len(parts) < 3:
+            # Must be <category>/<skill-name>/SKILL.md — skip malformed layouts
+            continue
+        category = parts[0]
+        skill_dir_name = parts[1]
+
+        # Check cache by absolute path string (no resolve — consistent with invalidation)
+        path_str = str(skill_md)
+        cached = _skill_md_cache.get(path_str)
+        if cached is None:
+            try:
+                content = skill_md.read_text(encoding="utf-8")[:4000]
+            except (OSError, UnicodeDecodeError):
                 continue
-            skill_name = entry.name
-            skills.append({
+            fm, body = _parse_skill_frontmatter(content)
+            skill_name = str(fm.get("name", skill_dir_name))[:64]
+            description = fm.get("description", "")
+            if not description:
+                for line in body.strip().split("\n"):
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        description = line
+                        break
+            cached = {
                 "name": skill_name,
-                "label": skill_name,
-                "enabled": skill_name in enabled_set,
-            })
-    return {"profile": name, "skills": skills}
+                "description": description,
+                "category": category,
+            }
+            _skill_md_cache[path_str] = cached
+
+        skills.append({
+            "name": cached["name"],
+            "category": cached["category"],
+            "description": cached["description"],
+            "enabled": cached["name"] not in disabled_set,
+            "path": path_str,
+        })
+
+    # Sort alphabetically by name (case-insensitive)
+    skills.sort(key=lambda s: s["name"].lower())
+
+    total_count = len(skills)
+    enabled_count = sum(1 for s in skills if s["enabled"])
+    return {
+        "ok": True,
+        "profile": name,
+        "skills": skills,
+        "total_count": total_count,
+        "enabled_count": enabled_count,
+    }
 
 
 # Gateway control helper override hook — tests monkeypatch this with a fake
