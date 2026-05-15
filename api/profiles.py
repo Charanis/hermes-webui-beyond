@@ -2144,30 +2144,66 @@ def _default_gateway_control(name: str, action: str) -> dict:
     """In-process default gateway control backend.
 
     Brackets the HERMES_HOME swap via ``cron_profile_context_for_home`` so
-    the underlying CLI helpers (which read HERMES_HOME from os.environ)
-    operate on the right profile. Raises on ImportError or backend
-    failure — the caller sanitizes the message.
+    the child gateway process inherits the right profile via os.environ
+    at fork time.
+
+    Start/restart spawn the gateway as a DETACHED background subprocess
+    invoking ``hermes gateway run`` (the foreground runner). We do NOT call
+    ``gateway_command(Namespace(gateway_command='start'))`` because that
+    routes through service-manager logic which sys.exit()s inside Docker
+    containers — the production deployment is containerized.
+
+    Stop uses the in-process ``stop_profile_gateway()`` which kills the
+    PID recorded by start_gateway.
     """
+    import subprocess as _subprocess
+    import sys as _sys
     from hermes_cli import gateway as _gw  # raises ImportError if absent
+
     if _is_root_profile(name):
         profile_home = _DEFAULT_HERMES_HOME
     else:
         profile_home = _resolve_named_profile_home(name)
-    with cron_profile_context_for_home(profile_home):
-        if action == 'stop':
-            _gw.stop_profile_gateway()
-            return {'ok': True, 'running': False}
-        if action in ('start', 'restart'):
-            if action == 'restart':
-                try:
-                    _gw.stop_profile_gateway()
-                except Exception:  # noqa: BLE001 — best-effort stop
-                    logger.debug("stop during restart raised — continuing", exc_info=True)
-            import argparse as _argparse
-            ns = _argparse.Namespace(gateway_command='start')
-            _gw.gateway_command(ns)
-            return {'ok': True, 'running': True}
-        raise ValueError(f"unknown gateway action: {action!r}")
+
+    def _spawn_gateway() -> None:
+        # Detached background process. Stdout/stderr inherit from parent;
+        # the gateway daemon manages its own logging once running.
+        # On POSIX: start_new_session=True severs the controlling terminal.
+        # On Windows: DETACHED_PROCESS via creationflags.
+        kwargs: dict = {"close_fds": True}
+        if _sys.platform == "win32":
+            DETACHED_PROCESS = 0x00000008
+            CREATE_NEW_PROCESS_GROUP = 0x00000200
+            kwargs["creationflags"] = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+        else:
+            kwargs["start_new_session"] = True
+        _subprocess.Popen(
+            ["hermes", "gateway", "run"],
+            stdin=_subprocess.DEVNULL,
+            stdout=_subprocess.DEVNULL,
+            stderr=_subprocess.DEVNULL,
+            **kwargs,
+        )
+
+    try:
+        with cron_profile_context_for_home(profile_home):
+            if action == 'stop':
+                _gw.stop_profile_gateway()
+                return {'ok': True, 'running': False}
+            if action in ('start', 'restart'):
+                if action == 'restart':
+                    try:
+                        _gw.stop_profile_gateway()
+                    except Exception:  # noqa: BLE001 — best-effort stop
+                        logger.debug("stop during restart raised — continuing", exc_info=True)
+                _spawn_gateway()
+                return {'ok': True, 'running': True}
+            raise ValueError(f"unknown gateway action: {action!r}")
+    except SystemExit as exc:
+        # Defensive: the underlying CLI helpers may call sys.exit() in some
+        # platforms (notably container/wsl/termux). Converting to a normal
+        # exception prevents process termination of the WebUI itself.
+        raise RuntimeError(f"gateway subsystem aborted: {exc}") from exc
 
 
 def profile_gateway_control_api(name: str, action: str) -> dict:

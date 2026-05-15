@@ -299,3 +299,112 @@ def test_default_backend_missing_agent_returns_clean_failure(monkeypatch):
         assert result["ok"] is False
         # No specific 'unavailable' key required anymore — just a clean failure.
         assert "ImportError" not in result.get("message", "")  # exc class names sanitized out is optional; key check is ok:False
+
+
+# ── T6: subprocess-spawn fix (containers sys.exit() on gateway_command) ──────
+
+
+def test_default_backend_start_spawns_subprocess(monkeypatch):
+    """Start must invoke `hermes gateway run` as a detached subprocess,
+    NOT call gateway_command (which sys.exit()s inside containers)."""
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        _seed_named_profile(base, "coder")
+        profiles = _reload_profiles_module(base)
+        profiles._set_gateway_control_hook(None)
+
+        spawned: list[tuple] = []
+
+        class FakePopen:
+            def __init__(self, args, **kwargs):
+                spawned.append((tuple(args), kwargs))
+
+        # Stub the optional hermes_cli.gateway with a minimal namespace.
+        import types as _types
+        fake_gw = _types.SimpleNamespace(
+            stop_profile_gateway=lambda: False,
+            # We must NOT reach gateway_command in the new code path; if a
+            # test of this stub gets called the assertion below will fail.
+            gateway_command=lambda *a, **k: (_ for _ in ()).throw(
+                AssertionError("gateway_command should not be called")
+            ),
+        )
+        monkeypatch.setitem(
+            __import__('sys').modules, 'hermes_cli', _types.SimpleNamespace(gateway=fake_gw)
+        )
+        monkeypatch.setitem(
+            __import__('sys').modules, 'hermes_cli.gateway', fake_gw
+        )
+        monkeypatch.setattr('subprocess.Popen', FakePopen)
+
+        result = profiles._default_gateway_control("coder", "start")
+        assert result == {'ok': True, 'running': True}
+        assert len(spawned) == 1
+        args, kwargs = spawned[0]
+        assert args == ("hermes", "gateway", "run")
+        # Detached on at least one of the two flavors.
+        if __import__('sys').platform == "win32":
+            assert "creationflags" in kwargs
+        else:
+            assert kwargs.get("start_new_session") is True
+
+
+def test_default_backend_restart_stops_then_spawns(monkeypatch):
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        _seed_named_profile(base, "coder")
+        profiles = _reload_profiles_module(base)
+        profiles._set_gateway_control_hook(None)
+
+        events: list[str] = []
+        class FakePopen:
+            def __init__(self, args, **kwargs):
+                events.append("spawn")
+
+        import types as _types
+        fake_gw = _types.SimpleNamespace(
+            stop_profile_gateway=lambda: (events.append("stop") or True),
+            gateway_command=lambda *a, **k: (_ for _ in ()).throw(AssertionError()),
+        )
+        monkeypatch.setitem(
+            __import__('sys').modules, 'hermes_cli', _types.SimpleNamespace(gateway=fake_gw)
+        )
+        monkeypatch.setitem(
+            __import__('sys').modules, 'hermes_cli.gateway', fake_gw
+        )
+        monkeypatch.setattr('subprocess.Popen', FakePopen)
+
+        profiles._default_gateway_control("coder", "restart")
+        assert events == ["stop", "spawn"]
+
+
+def test_default_backend_shields_systemexit(monkeypatch):
+    """A sys.exit() inside the dispatch path must NOT propagate — it would
+    kill the WebUI process. Verify the SystemExit shield converts it to a
+    normal RuntimeError that the caller can sanitize."""
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        _seed_named_profile(base, "coder")
+        profiles = _reload_profiles_module(base)
+        profiles._set_gateway_control_hook(None)
+
+        def raise_systemexit(*a, **k):
+            raise SystemExit(0)
+
+        import types as _types
+        fake_gw = _types.SimpleNamespace(
+            stop_profile_gateway=raise_systemexit,
+            gateway_command=raise_systemexit,
+        )
+        monkeypatch.setitem(
+            __import__('sys').modules, 'hermes_cli', _types.SimpleNamespace(gateway=fake_gw)
+        )
+        monkeypatch.setitem(
+            __import__('sys').modules, 'hermes_cli.gateway', fake_gw
+        )
+
+        with pytest.raises(RuntimeError, match="gateway subsystem aborted"):
+            profiles._default_gateway_control("coder", "stop")
