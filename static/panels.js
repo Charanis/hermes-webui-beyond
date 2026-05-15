@@ -29,11 +29,6 @@ let _workspacePreFormDetail = null;
 let _currentProfileDetail = null; // full profile object
 let _profileMode = 'empty'; // 'empty' | 'read' | 'create'
 let _profilePreFormDetail = null;
-// Profile scope for the global Skills panel. When `profile` is non-null,
-// the panel renders a banner naming the profile and shows per-skill toggles.
-// Set by the Manage button on a profile, cleared by the "Show all" link or
-// when the user navigates away.
-let _skillsScope = { profile: null, enabledSet: null };
 let _pendingSettingsTargetPanel = null; // destination selected while settings had unsaved changes
 let _logsAutoRefreshTimer = null;
 let _lastLogsLines = [];
@@ -189,11 +184,6 @@ function _consumeSettingsTargetPanel(fallback = 'chat') {
 async function switchPanel(name, opts = {}) {
   const nextPanel = name || 'chat';
   const prevPanel = _currentPanel;
-  // If leaving the skills panel, clear any per-profile scope so a fresh
-  // open via the rail (not via the Manage button) shows the global view.
-  if (prevPanel === 'skills' && nextPanel !== 'skills') {
-    _skillsScope = { profile: null, enabledSet: null };
-  }
   // ── Desktop sidebar collapse toggle (rail-click only) ──
   // If the click came from a rail icon AND we're on desktop, the rail icon
   // does double duty: clicking the already-active panel collapses the sidebar;
@@ -3125,19 +3115,6 @@ async function clearConversation() {
 // ── Skills panel ──
 async function loadSkills() {
   if (_skillsData) {
-    // Even if global list is cached, we may need to (re-)fetch the profile-scoped
-    // enabled set when the scope changed since the last render.
-    if (_skillsScope.profile) {
-      try {
-        const profileData = await api('/api/profile/skills?name=' + encodeURIComponent(_skillsScope.profile));
-        const rows = Array.isArray(profileData && profileData.skills) ? profileData.skills : [];
-        _skillsScope.enabledSet = new Set(rows.filter(r => r.enabled).map(r => r.name));
-      } catch(e) {
-        _skillsScope.enabledSet = new Set();
-      }
-    } else {
-      _skillsScope.enabledSet = null;
-    }
     renderSkills(_skillsData);
     return;
   }
@@ -3149,18 +3126,6 @@ async function loadSkills() {
     // avoiding stale keys when categories are renamed or removed server-side.
     const liveCats = new Set(_skillsData.map(s => s.category || '(general)'));
     for (const c of _collapsedCats) { if (!liveCats.has(c)) _collapsedCats.delete(c); }
-    // If a profile scope is active, fetch that profile's enabled set before rendering.
-    if (_skillsScope.profile) {
-      try {
-        const profileData = await api('/api/profile/skills?name=' + encodeURIComponent(_skillsScope.profile));
-        const rows = Array.isArray(profileData && profileData.skills) ? profileData.skills : [];
-        _skillsScope.enabledSet = new Set(rows.filter(r => r.enabled).map(r => r.name));
-      } catch(e) {
-        _skillsScope.enabledSet = new Set();
-      }
-    } else {
-      _skillsScope.enabledSet = null;
-    }
     renderSkills(_skillsData);
   } catch(e) { box.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">Error: ${esc(e.message)}</div>`; }
 }
@@ -3199,25 +3164,11 @@ function renderSkills(skills) {
   const box = $('skillsList');
   box.innerHTML = '';
 
-  // Build scope banner when a profile is active.
-  const scoped = !!_skillsScope.profile;
-  if (scoped) {
-    const banner = document.createElement('div');
-    banner.className = 'skills-scope-banner';
-    banner.setAttribute('role', 'status');
-    banner.innerHTML = '<span class="skills-scope-banner__label">Skills · <strong>' + esc(_skillsScope.profile) + '</strong></span><button type="button" class="skills-scope-banner__clear" data-skills-action="clear-scope">Show all skills</button>';
-    box.appendChild(banner);
-  }
-
   if (!filtered.length) {
     const empty = document.createElement('div');
     empty.style.cssText = 'padding:12px;color:var(--muted);font-size:12px';
     empty.textContent = t('skills_no_match');
     box.appendChild(empty);
-    // Still need to wire the clear button if it was rendered above.
-    box.querySelectorAll('[data-skills-action="clear-scope"]').forEach(btn => {
-      btn.onclick = () => { _skillsScope = { profile: null, enabledSet: null }; loadSkills(); };
-    });
     return;
   }
   for (const [cat, items] of Object.entries(cats).sort()) {
@@ -3234,17 +3185,6 @@ function renderSkills(skills) {
       const el = document.createElement('div');
       el.className = 'skill-item';
       el.style.display = collapsed ? 'none' : '';
-      // When scoped, prepend a toggle checkbox before the skill label/description.
-      if (scoped) {
-        const isEnabled = _skillsScope.enabledSet && _skillsScope.enabledSet.has(skill.name);
-        const toggleLabel = document.createElement('label');
-        toggleLabel.className = 'skill-row-toggle';
-        toggleLabel.innerHTML = '<input type="checkbox" data-skill-toggle="' + esc(skill.name) + '" ' + (isEnabled ? 'checked' : '') + ' aria-label="Enable ' + esc(skill.name) + ' for ' + esc(_skillsScope.profile) + '"><span class="skill-row-toggle__track"></span>';
-        // Label onclick stops the bubble so neither the track span nor the
-        // input's keyboard activation re-fires the row's openSkill handler.
-        toggleLabel.onclick = (ev) => ev.stopPropagation();
-        el.appendChild(toggleLabel);
-      }
       const nameSpan = document.createElement('span');
       nameSpan.className = 'skill-name';
       nameSpan.textContent = skill.name;
@@ -3257,37 +3197,6 @@ function renderSkills(skills) {
       sec.appendChild(el);
     }
     box.appendChild(sec);
-  }
-
-  // Attach event listeners after DOM is built.
-  // Banner clear button.
-  box.querySelectorAll('[data-skills-action="clear-scope"]').forEach(btn => {
-    btn.onclick = () => { _skillsScope = { profile: null, enabledSet: null }; loadSkills(); };
-  });
-  // Per-skill toggle checkboxes.
-  if (scoped) {
-    box.querySelectorAll('[data-skill-toggle]').forEach(input => {
-      // TODO: guard with `input.disabled = true` during in-flight request to
-      // prevent rapid-toggle desync between local enabledSet and server state.
-      input.onchange = async () => {
-        if (!_skillsScope.profile) return;
-        const skillName = input.dataset.skillToggle;
-        const wantOn = input.checked;
-        try {
-          const res = await api('/api/profile/skills/toggle', { method: 'POST', body: JSON.stringify({ name: _skillsScope.profile, skill: skillName, enabled: wantOn }) });
-          if (res && typeof res === 'object' && res.ok !== false) {
-            if (wantOn) _skillsScope.enabledSet.add(skillName);
-            else _skillsScope.enabledSet.delete(skillName);
-          } else {
-            input.checked = !wantOn;
-            if (typeof showToast === 'function') showToast('Could not toggle skill', 4000, 'error');
-          }
-        } catch (e) {
-          input.checked = !wantOn;
-          if (typeof showToast === 'function') showToast('Could not toggle skill: ' + (e && e.message || 'unknown'), 4000, 'error');
-        }
-      };
-    });
   }
 }
 
@@ -5416,42 +5325,467 @@ document.addEventListener('keydown', (ev) => {
 
 // ── Skills tile — top-3 enabled chips ──────────────────────────────────
 
+const _profileSkillsCache = Object.create(null);
+
 async function _loadProfileSkillsTile(profile){
-  if (!profile || !profile.name) return;
-  const chips = $('opsSkillsTopChips');
-  const pillLabel = $('opsSkillsPillLabel');
-  const pillDot = $('opsSkillsDot');
-  const value = $('opsSkillsValue');
-  if (!chips) return;
+  // Accept either a profile object {name:...} or a plain name string.
+  const profileName = profile && typeof profile === 'object' ? profile.name : profile;
+  if (!profileName) return;
+  let data;
   try {
-    const data = await api('/api/profile/skills?name=' + encodeURIComponent(profile.name));
-    const rows = Array.isArray(data && data.skills) ? data.skills : [];
-    const enabled = rows.filter(s => s && s.enabled);
-    const total = rows.length;
-    if (pillLabel) pillLabel.textContent = `${enabled.length} / ${total} enabled`;
-    if (pillDot) {
-      pillDot.classList.remove('ok', 'off');
-      pillDot.classList.add(enabled.length > 0 ? 'ok' : 'off');
-    }
-    if (value) value.textContent = enabled.length === 0
-      ? (total === 0 ? 'No skills installed' : 'No skills enabled')
-      : 'Top in this profile';
-    // v1 ordering fallback: alphabetical by display name. A persistent
-    // invocation counter is a follow-up; the spec and CLAUDE memory cover it.
-    enabled.sort((a, b) => String(a.label || a.name).localeCompare(String(b.label || b.name)));
-    const TOP = 3;
-    const shown = enabled.slice(0, TOP);
-    const extra = Math.max(0, enabled.length - TOP);
-    const parts = shown.map(s => {
-      const label = esc(s.label || s.name || 'skill');
-      const icon = s.icon ? esc(s.icon) + ' ' : '';
-      return `<span class="profile-skill-chip" role="listitem">${icon}${label}</span>`;
-    });
-    if (extra > 0) parts.push(`<span class="profile-skill-more">+${extra} more</span>`);
-    chips.innerHTML = parts.join('');
+    data = await api('/api/profile/skills?name=' + encodeURIComponent(profileName));
   } catch (e) {
-    // Skills endpoint may not be available in every environment. Fail soft.
-    chips.innerHTML = '';
+    // Backend unreachable / agent missing — leave the initial render in place.
+    return;
+  }
+  _profileSkillsCache[profileName] = data;
+  // Only repaint if the user is still on this profile.
+  if (!_currentProfileDetail || _currentProfileDetail.name !== profileName) return;
+  _applyProfileSkillsSummary(data);
+}
+
+function _applyProfileSkillsSummary(data){
+  if (!data) return;
+  const enabled_count = data.enabled_count || 0;
+  const total_count = data.total_count || 0;
+  const dot = $('opsSkillsDot');
+  const pillLabel = $('opsSkillsPillLabel');
+  const value = $('opsSkillsValue');
+  const chips = $('opsSkillsTopChips');
+  if (dot) { dot.classList.remove('ok','off'); dot.classList.add(enabled_count > 0 ? 'ok' : 'off'); }
+  if (pillLabel) pillLabel.textContent = `${enabled_count} / ${total_count} enabled`;
+  if (value) {
+    if (total_count === 0) value.textContent = 'No skills installed';
+    else if (enabled_count === 0) value.textContent = 'No skills enabled';
+    else value.textContent = 'Top in this profile';
+  }
+  if (chips) {
+    const sample = (data.skills || [])
+      .filter(s => s.enabled)
+      .slice(0, 3);
+    if (sample.length && enabled_count > 0) {
+      const extra = enabled_count - sample.length;
+      const parts = sample.map(s => {
+        const label = esc(s.label || s.name || 'skill');
+        const icon = s.icon ? esc(s.icon) + ' ' : '';
+        return `<span class="profile-skill-chip" role="listitem">${icon}${label}</span>`;
+      });
+      if (extra > 0) parts.push(`<span class="profile-skill-more">+${extra} more</span>`);
+      chips.innerHTML = parts.join('');
+    } else {
+      chips.innerHTML = '';
+    }
+  }
+}
+
+// ── Per-profile Skills manager modal ─────────────────────────────────────
+//
+// Opened from the Ops Console "Manage" button. Lists every skill visible
+// to the profile with a toggle per row; the Edit button opens a markdown
+// editor for the shared skill content (writes back to the same file the
+// agent reads at runtime).
+
+let _skillsManagerProfile = null;
+let _skillsManagerFilter = '';
+
+// Pending-state model for the batched Save/Cancel UX.
+//
+// The modal holds a draft disabled-set in memory. Toggling a row mutates
+// _skillsManagerPendingDisabled only — no network call until Save. This keeps
+// the disk write to a single POST per editing session and gives the user a
+// clear "I'm done experimenting" commit boundary.
+let _skillsManagerSkills = [];          // [{name, description, category, source, path}]
+let _skillsManagerInitialDisabled = null;   // Set<string> — server state at open
+let _skillsManagerPendingDisabled = null;   // Set<string> — what Save will write
+let _skillsManagerCategories = [];
+let _skillsManagerSaving = false;
+
+function _skillsManagerIsDirty(){
+  if (!_skillsManagerInitialDisabled || !_skillsManagerPendingDisabled) return false;
+  if (_skillsManagerInitialDisabled.size !== _skillsManagerPendingDisabled.size) return true;
+  for (const v of _skillsManagerPendingDisabled) {
+    if (!_skillsManagerInitialDisabled.has(v)) return true;
+  }
+  return false;
+}
+
+function _skillsManagerPendingDelta(){
+  // Returns {willDisable, willEnable} arrays of skill names.
+  const a = _skillsManagerInitialDisabled || new Set();
+  const b = _skillsManagerPendingDisabled || new Set();
+  const willDisable = [];
+  const willEnable = [];
+  for (const v of b) if (!a.has(v)) willDisable.push(v);
+  for (const v of a) if (!b.has(v)) willEnable.push(v);
+  return { willDisable, willEnable };
+}
+
+async function _openProfileSkillsManager(profileName){
+  if (!profileName) return;
+  _skillsManagerProfile = profileName;
+  _skillsManagerFilter = '';
+  _skillsManagerSkills = [];
+  _skillsManagerInitialDisabled = null;
+  _skillsManagerPendingDisabled = null;
+  _skillsManagerCategories = [];
+  _skillsManagerSaving = false;
+  // Reuse the cached payload from the tile hydrator when available so the
+  // modal pops instantly; refresh in the background regardless.
+  const cached = _profileSkillsCache[profileName];
+  _renderSkillsManagerModal(cached || { ok: true, profile: profileName, skills: [], enabled_count: 0, total_count: 0 }, !cached);
+  try {
+    const fresh = await api('/api/profile/skills?name=' + encodeURIComponent(profileName));
+    _profileSkillsCache[profileName] = fresh;
+    if (_skillsManagerProfile === profileName) _renderSkillsManagerModal(fresh, false);
+    if (_currentProfileDetail && _currentProfileDetail.name === profileName) {
+      _applyProfileSkillsSummary(fresh);
+    }
+  } catch (e) {
+    if (_skillsManagerProfile === profileName) {
+      const body = $('profileSkillsManagerBody');
+      if (body) body.innerHTML = `<div class="profile-skills-error">Failed to load skills: ${esc(e.message || String(e))}</div>`;
+    }
+  }
+}
+
+async function _attemptCloseSkillsManager(){
+  if (_skillsManagerSaving) return;
+  if (_skillsManagerIsDirty()) {
+    const ok = await showConfirmDialog({
+      title: 'Discard pending changes?',
+      message: 'You have unsaved toggle changes. Closing now will discard them.',
+      confirmLabel: 'Discard',
+      cancelLabel: 'Keep editing',
+      danger: true,
+      focusCancel: true,
+    });
+    if (!ok) return;
+  }
+  _closeProfileSkillsManager();
+}
+
+function _closeProfileSkillsManager(){
+  _skillsManagerProfile = null;
+  _skillsManagerSkills = [];
+  _skillsManagerInitialDisabled = null;
+  _skillsManagerPendingDisabled = null;
+  _skillsManagerSaving = false;
+  const overlay = $('profileSkillsManagerOverlay');
+  if (overlay) overlay.remove();
+  document.removeEventListener('keydown', _skillsManagerEscape, true);
+}
+
+function _skillsManagerEscape(ev){
+  if (ev.key === 'Escape') _attemptCloseSkillsManager();
+}
+
+function _renderSkillsManagerModal(data, loading){
+  let overlay = $('profileSkillsManagerOverlay');
+  const firstRender = !overlay;
+  if (firstRender) {
+    overlay = document.createElement('div');
+    overlay.id = 'profileSkillsManagerOverlay';
+    overlay.className = 'profile-skills-manager-overlay';
+    overlay.innerHTML = `
+      <div class="profile-skills-manager-card" role="dialog" aria-modal="true" aria-labelledby="profileSkillsManagerTitle">
+        <div class="profile-skills-manager-head">
+          <div class="profile-skills-manager-head-text">
+            <div class="profile-skills-manager-kicker">Skills</div>
+            <h3 class="profile-skills-manager-title" id="profileSkillsManagerTitle">Skills for <span id="profileSkillsManagerName"></span></h3>
+            <div class="profile-skills-manager-subtitle" id="profileSkillsManagerSummary"></div>
+          </div>
+          <div class="profile-skills-manager-actions">
+            <span id="profileSkillsManagerDirtyPill" class="profile-ops-status-pill" data-state="saved" aria-live="polite">
+              <span class="profile-status-dot ok" aria-hidden="true"></span>
+              <span id="profileSkillsManagerDirtyLabel">No changes</span>
+            </span>
+            <button type="button" class="profile-ops-button primary" data-skills-manager-save disabled>Save</button>
+            <button type="button" class="profile-skills-manager-close" aria-label="Close">&times;</button>
+          </div>
+        </div>
+        <div class="profile-skills-manager-toolbar">
+          <input type="search" id="profileSkillsManagerSearch" placeholder="Filter by name, description, or category…" autocomplete="off" spellcheck="false">
+        </div>
+        <div id="profileSkillsManagerBody" class="profile-skills-manager-body"></div>
+        <div class="profile-skills-manager-footer">
+          <span class="profile-skills-manager-note">Toggling enabled/disabled is scoped to this agent. Editing a skill changes content shared by every agent that uses it.</span>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    overlay.querySelector('.profile-skills-manager-close').onclick = _attemptCloseSkillsManager;
+    overlay.querySelector('[data-skills-manager-save]').onclick = _saveSkillsManager;
+    overlay.addEventListener('click', (ev) => {
+      if (ev.target === overlay) _attemptCloseSkillsManager();
+    });
+    const search = overlay.querySelector('#profileSkillsManagerSearch');
+    if (search) {
+      search.value = _skillsManagerFilter;
+      search.addEventListener('input', () => {
+        _skillsManagerFilter = search.value || '';
+        _paintSkillsManagerRows();
+      });
+    }
+    document.addEventListener('keydown', _skillsManagerEscape, true);
+  }
+  const nameEl = $('profileSkillsManagerName');
+  if (nameEl) nameEl.textContent = data.profile || _skillsManagerProfile || '';
+  // Seed pending-state on first render (or when we still have no state),
+  // then prefer the in-memory pending set across subsequent refreshes so
+  // the user's mid-edit toggles survive a background reload.
+  const all = Array.isArray(data && data.skills) ? data.skills : [];
+  _skillsManagerSkills = all.map(s => ({
+    name: s.name,
+    description: s.description,
+    category: s.category,
+    source: s.source,
+    path: s.path,
+  }));
+  _skillsManagerCategories = Array.isArray(data && data.categories) ? data.categories : [];
+  if (_skillsManagerInitialDisabled === null) {
+    const seed = new Set(all.filter(s => !s.enabled).map(s => s.name));
+    _skillsManagerInitialDisabled = seed;
+    _skillsManagerPendingDisabled = new Set(seed);
+  } else {
+    // Drop any pending entries for skills that no longer exist server-side.
+    const known = new Set(all.map(s => s.name));
+    for (const v of [..._skillsManagerPendingDisabled]) {
+      if (!known.has(v)) _skillsManagerPendingDisabled.delete(v);
+    }
+  }
+  const body = $('profileSkillsManagerBody');
+  if (body && loading) body.innerHTML = '<div class="profile-skills-loading">Loading skills…</div>';
+  _paintSkillsManagerRows();
+  _paintSkillsManagerFooter();
+}
+
+function _paintSkillsManagerFooter(){
+  const total = _skillsManagerSkills.length;
+  const pendingDisabled = _skillsManagerPendingDisabled || new Set();
+  const enabledNow = total - pendingDisabled.size;
+  const summary = $('profileSkillsManagerSummary');
+  if (summary) {
+    summary.textContent = total === 0
+      ? 'No skills visible to this agent yet.'
+      : `${enabledNow} of ${total} enabled${_skillsManagerCategories.length
+          ? ` · ${_skillsManagerCategories.length} categor${_skillsManagerCategories.length === 1 ? 'y' : 'ies'}`
+          : ''}`;
+  }
+  const dirty = _skillsManagerIsDirty();
+  const pill = $('profileSkillsManagerDirtyPill');
+  const label = $('profileSkillsManagerDirtyLabel');
+  const dot = pill ? pill.querySelector('.profile-status-dot') : null;
+  if (pill) pill.dataset.state = dirty ? 'dirty' : 'saved';
+  if (dot) { dot.classList.remove('ok','warn'); dot.classList.add(dirty ? 'warn' : 'ok'); }
+  if (label) {
+    if (!dirty) {
+      label.textContent = 'No changes';
+    } else {
+      const { willDisable, willEnable } = _skillsManagerPendingDelta();
+      const n = willDisable.length + willEnable.length;
+      label.textContent = `${n} change${n === 1 ? '' : 's'} pending`;
+    }
+  }
+  const overlay = $('profileSkillsManagerOverlay');
+  const save = overlay ? overlay.querySelector('[data-skills-manager-save]') : null;
+  if (save) save.disabled = !dirty || _skillsManagerSaving;
+}
+
+function _paintSkillsManagerRows(){
+  const body = $('profileSkillsManagerBody');
+  if (!body) return;
+  const all = _skillsManagerSkills;
+  if (all.length === 0) {
+    body.innerHTML = `<div class="profile-skills-empty">
+      <p>No skills are visible to this agent yet.</p>
+      <p class="profile-skills-empty-hint">Drop SKILL.md folders into this profile's <code>skills/</code> directory, or configure <code>skills.external_dirs</code> in its <code>config.yaml</code>.</p>
+    </div>`;
+    return;
+  }
+  const filter = (_skillsManagerFilter || '').trim().toLowerCase();
+  const rows = filter
+    ? all.filter(s =>
+        (s.name || '').toLowerCase().includes(filter) ||
+        (s.description || '').toLowerCase().includes(filter) ||
+        (s.category || '').toLowerCase().includes(filter))
+    : all;
+  if (rows.length === 0) {
+    body.innerHTML = `<div class="profile-skills-empty">No skills match "${esc(filter)}".</div>`;
+    return;
+  }
+  const initial = _skillsManagerInitialDisabled || new Set();
+  const pending = _skillsManagerPendingDisabled || new Set();
+  // Group by category for readability.
+  const groups = new Map();
+  for (const r of rows) {
+    const key = r.category || 'Uncategorized';
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(r);
+  }
+  const groupKeys = Array.from(groups.keys()).sort((a, b) => a.localeCompare(b));
+  const sections = groupKeys.map(cat => {
+    const items = groups.get(cat).map(s => {
+      const isEnabledPending = !pending.has(s.name);
+      const wasEnabledInitial = !initial.has(s.name);
+      const isDirty = isEnabledPending !== wasEnabledInitial;
+      const checked = isEnabledPending ? 'checked' : '';
+      const desc = s.description ? `<span class="profile-skill-row-desc">${esc(s.description)}</span>` : '';
+      const pendingChip = isDirty
+        ? `<span class="profile-skill-row-pending" title="Unsaved change">${isEnabledPending ? 'will enable' : 'will disable'}</span>`
+        : '';
+      return `
+        <div class="profile-skill-row${isDirty ? ' is-pending' : ''}" data-skill-name="${esc(s.name)}">
+          <label class="profile-skill-row-toggle" title="Enable / disable for this agent">
+            <input type="checkbox" data-skill-toggle="${esc(s.name)}" ${checked}>
+            <span class="profile-skill-row-switch" aria-hidden="true"></span>
+          </label>
+          <div class="profile-skill-row-text">
+            <span class="profile-skill-row-name">${esc(s.name)}${pendingChip}</span>
+            ${desc}
+          </div>
+          <button type="button" class="profile-ops-button profile-skill-row-edit" data-skill-edit="${esc(s.name)}">Edit</button>
+        </div>`;
+    }).join('');
+    return `
+      <section class="profile-skill-group">
+        <h4 class="profile-skill-group-title">${esc(cat)}</h4>
+        <div class="profile-skill-group-list">${items}</div>
+      </section>`;
+  });
+  body.innerHTML = sections.join('');
+  // Wire toggles and edit buttons.
+  body.querySelectorAll('[data-skill-toggle]').forEach(input => {
+    input.addEventListener('change', () => _toggleProfileSkill(input.dataset.skillToggle, input.checked));
+  });
+  body.querySelectorAll('[data-skill-edit]').forEach(btn => {
+    btn.addEventListener('click', () => _editProfileSkillContent(btn.dataset.skillEdit));
+  });
+}
+
+function _toggleProfileSkill(skillName, enabled){
+  if (!skillName || !_skillsManagerPendingDisabled) return;
+  if (enabled) _skillsManagerPendingDisabled.delete(skillName);
+  else _skillsManagerPendingDisabled.add(skillName);
+  _paintSkillsManagerRows();
+  _paintSkillsManagerFooter();
+}
+
+async function _saveSkillsManager(){
+  if (!_skillsManagerProfile || !_skillsManagerPendingDisabled) return;
+  if (!_skillsManagerIsDirty()) return;
+  const profileName = _skillsManagerProfile;
+  const disabled = Array.from(_skillsManagerPendingDisabled).sort();
+  _skillsManagerSaving = true;
+  _paintSkillsManagerFooter();
+  try {
+    const result = await api('/api/profile/skills', {
+      method: 'POST',
+      body: JSON.stringify({ name: profileName, disabled }),
+    });
+    _profileSkillsCache[profileName] = result;
+    if (_currentProfileDetail && _currentProfileDetail.name === profileName) {
+      _applyProfileSkillsSummary(result);
+    }
+    _skillsManagerSaving = false;
+    // Saved → clear pending state so close doesn't prompt.
+    _skillsManagerInitialDisabled = null;
+    _skillsManagerPendingDisabled = null;
+    _closeProfileSkillsManager();
+    showToast('Skills saved.');
+  } catch (e) {
+    _skillsManagerSaving = false;
+    _paintSkillsManagerFooter();
+    showToast('Failed to save skills: ' + (e.message || e));
+  }
+}
+
+async function _editProfileSkillContent(skillName){
+  const profileName = _skillsManagerProfile;
+  if (!profileName || !skillName) return;
+  let payload;
+  try {
+    payload = await api('/api/profile/skill_content?name=' + encodeURIComponent(profileName) +
+                        '&skill=' + encodeURIComponent(skillName));
+  } catch (e) {
+    showToast('Could not open skill: ' + (e.message || e));
+    return;
+  }
+  _closeProfileSkillsManager();
+  _openSkillContentEditor(profileName, skillName, payload && payload.content != null ? payload.content : '');
+}
+
+function _openSkillContentEditor(profileName, skillName, content){
+  const body = $('profileDetailBody');
+  const title = $('profileDetailTitle');
+  if (!body || !title) return;
+  title.innerHTML = `<span style="cursor:pointer;color:var(--link)" onclick="openProfileDetail('${esc(profileName)}')">${esc(profileName)}</span> / skill · ${esc(skillName)}`;
+  body.innerHTML = `
+    <div class="main-view-content">
+      <div class="detail-card profile-file-editor-card">
+        <div class="profile-file-editor-toolbar">
+          <button class="profile-ops-button" type="button" data-skill-editor-back>← Back to skills</button>
+          <div class="profile-file-editor-titlebar">
+            <span class="profile-file-editor-name">${esc(skillName)}</span>
+            <span class="profile-file-editor-meta">shared skill content · markdown</span>
+          </div>
+          <span id="profileSkillSaveState" class="profile-ops-status-pill" data-state="saved"><span class="profile-status-dot ok" aria-hidden="true"></span><span>Saved</span></span>
+          <button id="btnSaveProfileSkill" class="profile-ops-button primary" type="button">Save</button>
+        </div>
+        <textarea id="profileSkillEditor" rows="24" spellcheck="false"
+          class="profile-file-editor-textarea"
+          placeholder="# Skill name&#10;Markdown body — what this skill does, when to invoke it, and any required state."></textarea>
+      </div>
+    </div>`;
+  const ta = $('profileSkillEditor');
+  if (ta) ta.value = content || '';
+  const pill = $('profileSkillSaveState');
+  if (ta && pill) {
+    ta.addEventListener('input', () => {
+      if (pill.dataset.state === 'dirty') return;
+      pill.dataset.state = 'dirty';
+      const dot = pill.querySelector('.profile-status-dot');
+      const lbl = pill.querySelector('span:last-child');
+      if (dot) { dot.classList.remove('ok'); dot.classList.add('warn'); }
+      if (lbl) lbl.textContent = 'Unsaved';
+    });
+  }
+  const back = body.querySelector('[data-skill-editor-back]');
+  if (back) back.onclick = () => {
+    openProfileDetail(profileName);
+    // Reopen the manager once the detail re-renders.
+    setTimeout(() => _openProfileSkillsManager(profileName), 60);
+  };
+  const saveBtn = $('btnSaveProfileSkill');
+  if (saveBtn) saveBtn.onclick = () => _saveProfileSkillContent(profileName, skillName);
+}
+
+async function _saveProfileSkillContent(profileName, skillName){
+  const ta = $('profileSkillEditor');
+  const btn = $('btnSaveProfileSkill');
+  if (!ta) return;
+  const content = ta.value;
+  if (btn) btn.disabled = true;
+  try {
+    const result = await api('/api/profile/skill_content', {
+      method: 'POST',
+      body: JSON.stringify({ name: profileName, skill: skillName, content }),
+    });
+    if (result && result.ok) {
+      showToast(`Saved ${skillName}`);
+      const pill = $('profileSkillSaveState');
+      if (pill) {
+        pill.dataset.state = 'saved';
+        const dot = pill.querySelector('.profile-status-dot');
+        const lbl = pill.querySelector('span:last-child');
+        if (dot) { dot.classList.remove('warn'); dot.classList.add('ok'); }
+        if (lbl) lbl.textContent = 'Saved';
+      }
+    } else {
+      showToast('Save failed: ' + (result && result.error || 'unknown error'));
+    }
+  } catch (e) {
+    showToast('Save failed: ' + (e.message || e));
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -5668,10 +6002,7 @@ function _bindProfileOpsConsole(p, isActive, isDefault){
       btn.onclick = () => { closeHeroMenu(); deleteCurrentProfile(); };
     });
     body.querySelectorAll('[data-ops-action="skills"]').forEach(btn => {
-      btn.onclick = () => {
-        _skillsScope = { profile: profileName, enabledSet: null };
-        if (typeof switchPanel === 'function') switchPanel('skills');
-      };
+      btn.onclick = () => _openProfileSkillsManager(profileName);
     });
   }
 

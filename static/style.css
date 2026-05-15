@@ -767,14 +767,6 @@
   .skill-item.active{background:var(--accent-bg);color:var(--accent-text);}
   .skill-name{font-weight:500;flex-shrink:0;}
   .skill-desc{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;font-size:11px;opacity:.7;}
-  .skills-scope-banner{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 14px;margin-bottom:12px;border-radius:8px;background:var(--accent-bg);border:1px solid var(--accent);color:var(--text);}
-  .skills-scope-banner__label{font-size:13px;}
-  .skills-scope-banner__label strong{color:var(--accent-text);}
-  .skills-scope-banner__clear{background:transparent;border:1px solid var(--border);color:var(--text);padding:4px 10px;border-radius:6px;font-size:12px;cursor:pointer;}
-  .skills-scope-banner__clear:hover{background:var(--hover-bg);}
-  .skills-scope-banner__clear:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
-  .skill-row-toggle{display:inline-flex;align-items:center;margin-right:10px;cursor:pointer;flex-shrink:0;}
-  .skill-row-toggle > input[type="checkbox"]{accent-color:var(--success);width:16px;height:16px;cursor:pointer;}
   /* Memory panel */
   .memory-panel{flex:1;overflow-y:auto;padding:12px;}
   .memory-section{margin-bottom:16px;}
@@ -1793,6 +1785,56 @@
 @media (prefers-reduced-motion: reduce){.profile-avatar-preview::after{animation:none;transform:translateX(0);opacity:.22;}}
 @media (max-width:980px){.profile-ops-top{grid-template-columns:1fr;}.profile-ops-files-grid{grid-template-columns:repeat(2,minmax(0,1fr));}}
 @media (max-width:760px){.profile-ops-grid,.profile-runtime-controls,.profile-ops-files-grid{grid-template-columns:1fr;}.profile-avatar-frame,.profile-avatar-preview{width:132px;}.profile-avatar-preview{height:132px;}}
+
+/* ── Per-profile Skills manager (modal opened from the Skills tile) ── */
+.profile-skills-manager-overlay{position:fixed;inset:0;z-index:200;display:flex;align-items:center;justify-content:center;padding:24px;background:rgba(0,0,0,.55);backdrop-filter:blur(2px);}
+.profile-skills-manager-card{width:min(720px,100%);max-height:min(82vh,840px);display:flex;flex-direction:column;background:var(--surface);border:1px solid var(--border);border-radius:14px;box-shadow:0 30px 80px rgba(0,0,0,.55);overflow:hidden;}
+.profile-skills-manager-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;padding:16px 18px 8px;border-bottom:1px solid var(--border);}
+.profile-skills-manager-head-text{min-width:0;flex:1;}
+.profile-skills-manager-kicker{font-size:11px;font-weight:750;color:var(--muted);letter-spacing:.05em;text-transform:uppercase;}
+.profile-skills-manager-title{margin:4px 0 0;font-size:16px;font-weight:760;color:var(--text);}
+.profile-skills-manager-subtitle{margin-top:4px;font-size:12px;color:var(--muted);}
+.profile-skills-manager-close{width:30px;height:30px;display:grid;place-items:center;border:1px solid var(--border);border-radius:999px;background:transparent;color:var(--text);font-size:18px;line-height:1;cursor:pointer;}
+.profile-skills-manager-close:hover{border-color:var(--accent-bg-strong);color:var(--accent-text);}
+.profile-skills-manager-toolbar{padding:10px 18px;border-bottom:1px solid var(--border);}
+.profile-skills-manager-toolbar input[type="search"]{width:100%;min-height:34px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);padding:6px 10px;font:inherit;font-size:13px;}
+.profile-skills-manager-toolbar input[type="search"]:focus-visible{outline:2px solid var(--accent-bg-strong);outline-offset:2px;}
+.profile-skills-manager-body{flex:1;min-height:0;overflow-y:auto;padding:6px 18px 14px;}
+.profile-skills-manager-footer{display:flex;align-items:center;justify-content:flex-start;gap:12px;padding:10px 18px;border-top:1px solid var(--border);background:color-mix(in srgb,var(--surface) 92%,var(--bg));}
+.profile-skills-manager-note{font-size:11px;color:var(--muted);line-height:1.4;}
+.profile-skills-manager-actions{display:flex;align-items:center;gap:8px;flex-shrink:0;}
+.profile-skills-loading,.profile-skills-empty,.profile-skills-error{padding:24px 4px;font-size:13px;color:var(--muted);text-align:center;}
+.profile-skills-empty-hint{font-size:12px;margin-top:6px;}
+.profile-skill-group{margin-top:12px;}
+.profile-skill-group:first-child{margin-top:6px;}
+.profile-skill-group-title{margin:0 0 6px;font-size:11px;font-weight:750;color:var(--muted);letter-spacing:.05em;text-transform:uppercase;}
+.profile-skill-group-list{display:flex;flex-direction:column;gap:6px;}
+.profile-skill-row{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:12px;padding:10px 12px;border:1px solid var(--border);border-radius:10px;background:color-mix(in srgb,var(--bg) 50%,transparent);}
+.profile-skill-row:hover{border-color:var(--accent-bg-strong);}
+.profile-skill-row-toggle{position:relative;display:inline-flex;align-items:center;cursor:pointer;}
+.profile-skill-row-toggle input{position:absolute;opacity:0;width:34px;height:18px;margin:0;cursor:pointer;}
+.profile-skill-row-switch{width:34px;height:18px;border-radius:999px;border:1px solid var(--border);background:color-mix(in srgb,var(--muted) 28%,transparent);position:relative;transition:background-color .15s ease,border-color .15s ease;}
+.profile-skill-row-switch::after{content:"";position:absolute;top:1px;left:1px;width:14px;height:14px;border-radius:50%;background:var(--text);transition:transform .15s ease;}
+.profile-skill-row-toggle input:checked + .profile-skill-row-switch{background:var(--accent-bg);border-color:var(--accent-bg-strong);}
+.profile-skill-row-toggle input:checked + .profile-skill-row-switch::after{transform:translateX(16px);background:var(--accent-text);}
+.profile-skill-row-toggle input:focus-visible + .profile-skill-row-switch{outline:2px solid var(--accent-bg-strong);outline-offset:2px;}
+.profile-skill-row-toggle input:disabled + .profile-skill-row-switch{opacity:.5;cursor:not-allowed;}
+.profile-skill-row-text{min-width:0;display:flex;flex-direction:column;gap:2px;}
+.profile-skill-row-name{font-size:13px;font-weight:760;color:var(--text);}
+.profile-skill-row-desc{font-size:12px;color:var(--muted);line-height:1.35;}
+.profile-skill-row-edit{font-size:11px;padding:5px 9px;min-height:26px;}
+.profile-skill-row.is-pending{border-color:var(--accent-bg-strong);background:color-mix(in srgb,var(--accent-bg) 8%,var(--bg));}
+.profile-skill-row-pending{margin-left:8px;display:inline-flex;align-items:center;font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;padding:1px 7px;border-radius:999px;background:var(--accent-bg);color:var(--accent-text);border:1px solid var(--accent-bg-strong);vertical-align:middle;}
+@media (max-width:560px){.profile-skill-row{grid-template-columns:auto 1fr;}.profile-skill-row-edit{grid-column:1 / -1;justify-self:start;}}
+
+/* ── Profile file editor (per-file detail view inside Profiles panel) ── */
+.profile-file-editor-card{padding:14px;}
+.profile-file-editor-toolbar{display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap;}
+.profile-file-editor-titlebar{display:flex;flex-direction:column;min-width:0;flex:1;}
+.profile-file-editor-name{font-size:14px;font-weight:760;color:var(--text);line-height:1.2;}
+.profile-file-editor-meta{font-size:11px;color:var(--muted);font-weight:600;letter-spacing:.02em;}
+.profile-file-editor-textarea{width:100%;resize:vertical;font-family:var(--font-mono,monospace);font-size:13px;line-height:1.5;padding:10px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);min-height:360px;}
+.profile-file-editor-textarea:focus-visible{outline:2px solid var(--accent-bg-strong);outline-offset:2px;}
 
 /* ── Slash command autocomplete dropdown ── */
 .cmd-dropdown{display:none;position:absolute;left:0;right:0;bottom:calc(100% + 4px);width:auto;max-width:100%;background:var(--surface);border:1px solid var(--border2);border-radius:10px;box-shadow:0 -8px 24px rgba(0,0,0,.4);z-index:200;max-height:240px;overflow-y:auto;}
