@@ -1638,17 +1638,17 @@
 .profile-chip{user-select:none;color:var(--accent-text)!important;}
 .profile-dropdown{display:none;position:absolute;bottom:calc(100% + 4px);left:0;min-width:260px;max-width:min(260px,calc(100vw - 32px));background:var(--surface);border:1px solid var(--border2);border-radius:10px;box-shadow:0 -4px 24px rgba(0,0,0,.4);z-index:200;overflow:hidden;max-height:380px;overflow-y:auto;}
 .profile-dropdown.open{display:block;}
-.profile-opt{padding:10px 14px;cursor:pointer;transition:background .12s;}
-.profile-opt:hover{background:rgba(255,255,255,.07);}
-.profile-opt.active{background:var(--accent-bg);}
+.profile-opt{padding:10px 14px;cursor:pointer;transition:background .12s;background:var(--surface);border:1px solid var(--border);color:var(--text);}
+.profile-opt:hover{background:var(--hover-bg);}
+.profile-opt.active{background:var(--accent-bg-strong);border-color:var(--accent);color:var(--text);box-shadow:inset 2px 0 0 0 var(--accent);}
 .profile-opt-name{font-size:13px;color:var(--text);font-weight:500;}
 .profile-opt-meta{font-size:11px;color:var(--muted);margin-top:2px;}
 .profile-opt-badge{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px;vertical-align:middle;}
 .profile-opt-badge.running{background:#4caf50;box-shadow:0 0 4px rgba(76,175,80,.5);}
-.profile-opt-badge.stopped{background:rgba(255,255,255,.2);}
-.profile-card{padding:8px 10px;margin-bottom:2px;border:1px solid transparent;border-radius:8px;cursor:pointer;color:var(--muted);transition:background .15s,border-color .15s,color .15s;}
+.profile-opt-badge.stopped{background:var(--border);}
+.profile-card{padding:8px 10px;margin-bottom:2px;border:1px solid var(--border);border-radius:8px;cursor:pointer;color:var(--muted);transition:background .15s,border-color .15s,color .15s;background:var(--surface);}
 .profile-card:hover{background:var(--surface);color:var(--text);}
-.profile-card.active{background:var(--accent-bg);border-color:var(--accent-bg-strong);color:var(--accent-text);}
+.profile-card.active{background:var(--accent-bg);border-color:var(--accent);color:var(--accent-text);}
 .profile-card-header{display:flex;align-items:center;justify-content:space-between;gap:8px;}
 .profile-card-name{font-size:13px;font-weight:600;color:inherit;}
 .profile-card-name.is-active{color:var(--accent-text);}
