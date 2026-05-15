@@ -1278,6 +1278,61 @@ def _read_gateway_state(profile_home: Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+# Grace window for gateway start before a missing/dead PID is considered
+# a failure. Tuned for Telegram + Slack adapter cold-start latency.
+GATEWAY_START_GRACE_SECONDS = 8
+
+
+def _write_gateway_phase(
+    profile_home: Path,
+    phase: str,
+    *,
+    last_error: str | None = None,
+) -> None:
+    """Stamp the gateway phase in .gateway-state.json without clobbering
+    sibling fields (e.g. last_run_at).
+
+    phase values:
+      'starting'  — set phase + phase_started_at + clear last_error
+      'stopping'  — set phase + phase_started_at + clear last_error
+      'running'   — set phase + phase_started_at + clear last_error
+      'failed'    — set phase + phase_started_at + record last_error
+      'stopped'   — clear phase, phase_started_at, last_error
+    """
+    import datetime as _dt
+    state_path = profile_home / '.gateway-state.json'
+    payload: dict = {}
+    if state_path.exists():
+        try:
+            existing = json.loads(state_path.read_text(encoding='utf-8'))
+            if isinstance(existing, dict):
+                payload = existing
+        except (ValueError, OSError):
+            payload = {}
+
+    now_iso = _dt.datetime.now(_dt.timezone.utc).isoformat().replace('+00:00', 'Z')
+
+    if phase == 'stopped':
+        payload['phase'] = None
+        payload['phase_started_at'] = None
+        payload['last_error'] = None
+    elif phase == 'failed':
+        payload['phase'] = 'failed'
+        payload['phase_started_at'] = now_iso
+        payload['last_error'] = last_error
+    elif phase in ('starting', 'stopping', 'running'):
+        payload['phase'] = phase
+        payload['phase_started_at'] = now_iso
+        payload['last_error'] = None
+    else:
+        raise ValueError(f"unknown gateway phase: {phase!r}")
+
+    try:
+        state_path.write_text(json.dumps(payload), encoding='utf-8')
+    except OSError:
+        logger.debug("Failed to write gateway phase state", exc_info=True)
+
+
 def _load_session_index_rows() -> list:
     """Best-effort read of the WebUI session index. Returns [] on any failure.
 
