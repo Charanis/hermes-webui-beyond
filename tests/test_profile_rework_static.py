@@ -198,8 +198,10 @@ def test_default_model_tile_title_and_subtitle():
     fn = _extract_function(PANELS_JS, "_profileRuntimePanel")
     # New tile title is "Default model" (descriptive), subtitle explains scope.
     assert ">Default model<" in fn, "tile title must be 'Default model'"
-    assert "Used for new sessions in this profile" in fn, \
-        "tile must surface the 'won't affect active conversations' subtitle"
+    assert "Used for new sessions" in fn, \
+        "tile must surface a scope-clarifying subtitle"
+    assert "existing chats keep their model" in fn, \
+        "subtitle must use the clearer wording (validator pass 2 polish)"
     assert "profile-default-model-subtitle" in fn, \
         "subtitle must use the dedicated CSS class for muted styling"
 
@@ -362,12 +364,14 @@ def test_bindings_handle_v3_action_buttons():
     fn = _extract_function(PANELS_JS, "_bindProfileOpsConsole")
     # v3.1 dropped the edit-soul and open-activity hero buttons — SOUL is
     # editable via the files grid; activity stats render in the hero itself.
-    for action in ("rename", "duplicate", "remove", "diagnostics", "skills"):
+    # The 2026-05-15 default-model rework follow-up also dropped diagnostics
+    # (its button is not rendered anywhere on the v3 profile screen).
+    for action in ("rename", "duplicate", "remove", "skills"):
         assert f'data-ops-action="{action}"' in fn, \
             f"binding for data-ops-action={action!r} is missing"
-    for dropped in ("edit-soul", "open-activity"):
+    for dropped in ("edit-soul", "open-activity", "diagnostics"):
         assert f'data-ops-action="{dropped}"' not in fn, \
-            f"v3.1 should drop the {dropped!r} action button"
+            f"binding for the dropped action {dropped!r} must be removed"
 
 
 def test_bindings_wire_description_edit():
@@ -481,6 +485,124 @@ def test_description_inline_action_clicks_stop_propagation():
         "call event.stopPropagation() so the click does not bubble to the "
         "host's click listener and re-enter edit mode."
     )
+
+
+# ── Default-model tile follow-up fixes (2026-05-15 pass 2) ──────────────
+
+
+def test_default_model_tile_has_responsive_chip_override():
+    """The shared `.composer-model-chip` class is shrunk to 44×44 at <640px
+    by the composer footer's compaction rules. The profile tile needs a
+    more-specific override so its chip keeps label + chevron and fills the
+    tile column. Specificity = `.profile-default-model-tile .composer-model-*`
+    beats the composer's single-class `@media(max-width:640px)` rule without
+    `!important`."""
+    assert ".profile-default-model-tile .composer-model-label" in STYLE_CSS, \
+        "missing profile-tile-scoped label override (regression: chip becomes icon-only at narrow widths)"
+    assert ".profile-default-model-tile .composer-model-chevron" in STYLE_CSS, \
+        "missing profile-tile-scoped chevron override"
+    assert ".profile-default-model-tile .composer-model-chip" in STYLE_CSS, \
+        "missing profile-tile-scoped chip override"
+    # No !important — the brief says use higher specificity instead.
+    chip_block = re.search(
+        r"\.profile-default-model-tile \.composer-model-chip\s*\{[^}]*\}",
+        STYLE_CSS,
+    )
+    assert chip_block, "could not locate the chip override block"
+    assert "!important" not in chip_block.group(0), \
+        "override must win on specificity alone, not !important"
+
+
+def test_default_model_dropdown_supports_flip_up():
+    """When the tile sits near the viewport bottom on a short screen, the
+    dropdown must flip above the chip instead of clipping. The CSS owns the
+    resting position; a .flipped class swaps top↔bottom."""
+    assert ".profile-default-model-dropdown.model-dropdown.flipped" in STYLE_CSS, \
+        "missing flip-up CSS rule for the model dropdown"
+    assert ".profile-default-reasoning-dropdown.composer-reasoning-dropdown.flipped" in STYLE_CSS, \
+        "missing flip-up CSS rule for the reasoning dropdown"
+    # JS-side helper must exist and be called from at least one toggle path.
+    assert "function _positionProfileDefaultDropdown" in PANELS_JS, \
+        "missing _positionProfileDefaultDropdown flip-up helper"
+    toggle_model = _extract_function(PANELS_JS, "_toggleProfileDefaultModelDropdown")
+    assert "_positionProfileDefaultDropdown" in toggle_model, \
+        "model toggle must call the flip-up positioner after opening"
+    toggle_reasoning = _extract_function(PANELS_JS, "_toggleProfileDefaultReasoningDropdown")
+    assert "_positionProfileDefaultDropdown" in toggle_reasoning, \
+        "reasoning toggle must call the flip-up positioner after opening"
+
+
+def test_persist_default_model_has_revert_path_on_failure():
+    """Auto-save must capture priors, attempt the POST, and on failure revert
+    the chip + select-mirror to the prior values and surface a toast (no
+    'Saved' diode for the happy path by design)."""
+    fn = _extract_function(PANELS_JS, "_persistProfileDefaultModel")
+    assert "try {" in fn or "try{" in fn, "_persistProfileDefaultModel must wrap the POST in try/catch"
+    assert "catch" in fn, "_persistProfileDefaultModel must have a catch branch"
+    assert "showToast" in fn, "failure path must surface a toast"
+    assert "Default model save failed" in fn, \
+        "failure toast must use a recognisable message"
+    assert "console.warn" in fn, "failure path must console-warn for debuggability"
+    # Revert path must restore the prior model chip label.
+    assert "_applyProfileDefaultModelChip(priorModel)" in fn, \
+        "failure path must revert the model chip to the prior value"
+    assert "_applyProfileDefaultReasoningChip(priorReasoning)" in fn, \
+        "failure path must revert the reasoning chip to the prior value"
+
+
+def test_persist_default_model_signature_accepts_priors():
+    """The persist function takes a priors object captured at the call site
+    (before the optimistic UI update) so a failed POST can revert without
+    re-fetching."""
+    assert re.search(
+        r"function _persistProfileDefaultModel\(\s*profileName\s*,\s*priors\s*\)",
+        PANELS_JS,
+    ), "_persistProfileDefaultModel must accept a priors argument"
+    # Both callers must pass priors.
+    model_picked = _extract_function(PANELS_JS, "_onProfileDefaultModelPicked")
+    assert "_persistProfileDefaultModel(profileName, priors)" in model_picked, \
+        "model-picked handler must forward priors"
+    reasoning_picked = _extract_function(PANELS_JS, "_onProfileDefaultReasoningPicked")
+    assert "_persistProfileDefaultModel(profileName, priors)" in reasoning_picked, \
+        "reasoning-picked handler must forward priors"
+
+
+def test_render_reasoning_dropdown_is_parameterised():
+    """Mirrors renderModelDropdown: the reasoning renderer in ui.js must
+    accept an opts object so other surfaces can reuse it without duplicating
+    the row build + click logic."""
+    ui_js = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+    assert "function renderReasoningDropdown" in ui_js, \
+        "missing renderReasoningDropdown extraction"
+    fn = _extract_function(ui_js, "renderReasoningDropdown")
+    assert re.search(r"function renderReasoningDropdown\(\s*opts\s*\)", fn), \
+        "renderReasoningDropdown must accept an optional opts argument"
+    assert "opts && opts.dropdown" in fn or "opts.dropdown" in fn, \
+        "renderReasoningDropdown must read opts.dropdown"
+    assert "opts.onSelect" in fn or "typeof opts.onSelect" in fn, \
+        "renderReasoningDropdown must support opts.onSelect"
+    # When a foreign onSelect is supplied, rows must stop propagation so the
+    # composer's document-level handler doesn't double-fire.
+    assert "stopPropagation" in fn, \
+        "foreign-surface rows must call ev.stopPropagation() to keep the composer's document-level handler from firing"
+
+
+def test_profile_reasoning_uses_shared_renderer_not_local_opts():
+    """The local _PROFILE_DEFAULT_REASONING_OPTS constant must be gone — the
+    profile tile must call renderReasoningDropdown(opts) instead."""
+    assert "_PROFILE_DEFAULT_REASONING_OPTS" not in PANELS_JS, \
+        "local reasoning opts list must be removed — use renderReasoningDropdown(opts) instead"
+    toggle = _extract_function(PANELS_JS, "_toggleProfileDefaultReasoningDropdown")
+    assert "renderReasoningDropdown({" in toggle, \
+        "reasoning toggle must invoke the shared renderer with opts"
+
+
+def test_diagnostics_handler_block_removed():
+    """No `[data-ops-action=\"diagnostics\"]` element is rendered anywhere on
+    the v3 profile screen, so the bindings block that targeted it is dead
+    code. Removed in the 2026-05-15 follow-up."""
+    assert 'data-ops-action="diagnostics"' not in PANELS_JS, \
+        "diagnostics querySelector is dead code — no element renders this attribute on the v3 screen"
 
 
 def test_description_editor_full_width_when_active():

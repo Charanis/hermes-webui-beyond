@@ -3999,6 +3999,39 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
   .profile-default-model-chiprow .composer-model-wrap.profile-default-model-wrap{flex-basis:auto;}
 }
 
+/* The composer's @media(max-width:640px) block cramps `.composer-model-chip`
+   into a 44×44 icon-only puck and `display:none`s its label + chevron — that's
+   correct for the chat footer (space is tight, the chip is icon-recognisable
+   at a glance), but it cascades through the shared `.composer-model-chip`
+   class and turns the profile tile's chip into an icon-only mystery. Restore
+   the label/chevron at narrow widths and let the chip fill its tile column
+   instead of collapsing to a square. Higher specificity (the parent
+   `.profile-default-model-tile` class) wins over the composer's single-class
+   media rule without resorting to `!important`. */
+.profile-default-model-tile .composer-model-label,
+.profile-default-model-tile .composer-model-chevron,
+.profile-default-model-tile #profileDefaultModelLabel,
+.profile-default-model-tile #profileDefaultReasoningLabel{display:inline-flex;}
+.profile-default-model-tile .composer-model-chip{
+  width:100%;
+  max-width:none;
+  min-width:0;
+  min-height:36px;
+  height:auto;
+  padding:6px 10px;
+  justify-content:flex-start;
+  gap:8px;
+  font-size:13px;
+}
+
+/* Flip-up: when _positionProfileDefaultDropdown decides there isn't enough
+   space below the chip, it adds .flipped. The CSS swaps top↔bottom so the
+   list opens above instead of clipping off the viewport edge. */
+.profile-default-model-dropdown.model-dropdown.flipped,
+.profile-default-reasoning-dropdown.composer-reasoning-dropdown.flipped{
+  top:auto;bottom:calc(100% + 4px);
+}
+
 /* Files grid — Lucide icon container */
 .profile-file-icon svg{color:var(--accent-text);}
 .profile-file-status.warn{color:var(--warning,#FFA726);}

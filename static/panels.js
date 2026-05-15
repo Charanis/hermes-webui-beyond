@@ -4889,7 +4889,7 @@ function _profileRuntimePanel(p, isActive){
       <div class="profile-ops-tile-head profile-default-model-head">
         <div class="profile-default-model-titles">
           <span class="profile-ops-tile-label" id="opsDefaultModelTitle">Default model</span>
-          <span class="profile-default-model-subtitle">Used for new sessions in this profile — won't affect active conversations</span>
+          <span class="profile-default-model-subtitle">Used for new sessions only — existing chats keep their model</span>
         </div>
       </div>
       <div class="profile-default-model-chiprow" aria-label="Default model controls for ${esc(p.name)}">
@@ -4986,15 +4986,6 @@ function _profileSkillsTile(p, isActive){
 // minimal · low · medium · high · xhigh); the chip label reads "Default"
 // when no override is set (matches the composer's empty-state label).
 
-const _PROFILE_DEFAULT_REASONING_OPTS = [
-  ['none',    'None'],
-  ['minimal', 'Minimal'],
-  ['low',     'Low'],
-  ['medium',  'Medium'],
-  ['high',    'High'],
-  ['xhigh',   'Extra High'],
-];
-
 async function _hydrateProfileDefaultModel(profile){
   if (!profile || !profile.name) return;
   // Wait for the composer's model catalog before mirroring it into the
@@ -5078,12 +5069,11 @@ function _applyProfileDefaultReasoningChip(effort){
   const chip = $('profileDefaultReasoningChip');
   if (!label || !chip) return;
   // Composer parity: chip shows "Default" when no override is set, else the
-  // effort label. Same as _formatReasoningEffortLabel() in ui.js.
-  let display = 'Default';
-  if (norm) {
-    const entry = _PROFILE_DEFAULT_REASONING_OPTS.find(([v]) => v === norm);
-    display = entry ? entry[1] : norm;
-  }
+  // effort label (lowercase, matching the composer chip's display style via
+  // _formatReasoningEffortLabel() in ui.js).
+  const display = (typeof _formatReasoningEffortLabel === 'function')
+    ? _formatReasoningEffortLabel(norm)
+    : (norm || 'Default');
   label.textContent = display;
   chip.dataset.effort = norm;
   const inactive = !norm || norm === 'none';
@@ -5129,15 +5119,48 @@ function _toggleProfileDefaultModelDropdown(profileName){
     dropdown: dd,
     onSelect: (value) => _onProfileDefaultModelPicked(profileName, value),
     onClose: () => _closeProfileDefaultDropdowns(),
-    scopeNote: "Used for new sessions in this profile — won't affect active conversations.",
+    // The tile subtitle already states this scope; suppress the in-dropdown
+    // duplicate scope-note for the profile case (composer keeps its default).
+    scopeNote: "",
   });
   dd.classList.add('open');
   chip.classList.add('active');
+  _positionProfileDefaultDropdown(chip, dd);
+}
+
+// Flip-up logic: a profile-tile chip can sit near the viewport bottom on
+// short laptop screens, where opening downward (.profile-default-model-dropdown
+// CSS default: top:calc(100% + 4px)) would clip the option list. If there's
+// more headroom above the chip than below it, flip the dropdown above the
+// chip instead. The CSS owns the resting position; this helper toggles a
+// .flipped class that switches top↔bottom.
+function _positionProfileDefaultDropdown(chip, dd){
+  if(!chip || !dd) return;
+  const chipRect = chip.getBoundingClientRect();
+  const vh = window.innerHeight || document.documentElement.clientHeight || 0;
+  const spaceBelow = vh - chipRect.bottom;
+  const spaceAbove = chipRect.top;
+  const ddHeight = dd.offsetHeight || 320; // matches .model-dropdown max-height
+  // Open upward when below-space is too tight AND above-space is more
+  // generous. Threshold: dropdown's measured/expected height + a small
+  // breathing margin so the last row isn't flush against the viewport edge.
+  const minBelow = ddHeight + 12;
+  const flip = (spaceBelow < minBelow) && (spaceAbove > spaceBelow);
+  dd.classList.toggle('flipped', flip);
 }
 
 async function _onProfileDefaultModelPicked(profileName, value){
   const sel = $('profileDefaultModelSelect');
+  const modelChip = $('profileDefaultModelChip');
+  const reasoningChip = $('profileDefaultReasoningChip');
   if (!sel) { _closeProfileDefaultDropdowns(); return; }
+  // Capture prior values BEFORE optimistic UI update so a failed POST can
+  // revert without re-fetching from the server.
+  const priors = {
+    selValue: sel.value || '',
+    modelValue: modelChip ? (modelChip.dataset.modelValue || '') : '',
+    reasoning: reasoningChip ? (reasoningChip.dataset.effort || '') : '',
+  };
   // Mirror selectModelFromDropdown's custom-model handling: if the value
   // isn't an existing option (custom ID typed into the picker's input),
   // append a temporary option so sel.value sticks.
@@ -5152,7 +5175,7 @@ async function _onProfileDefaultModelPicked(profileName, value){
   sel.value = value;
   _applyProfileDefaultModelChip(value);
   _closeProfileDefaultDropdowns();
-  await _persistProfileDefaultModel(profileName);
+  await _persistProfileDefaultModel(profileName, priors);
 }
 
 function _toggleProfileDefaultReasoningDropdown(profileName){
@@ -5163,31 +5186,55 @@ function _toggleProfileDefaultReasoningDropdown(profileName){
   if (typeof closeModelDropdown === 'function') closeModelDropdown();
   if (typeof closeReasoningDropdown === 'function') closeReasoningDropdown();
   _closeProfileDefaultDropdowns();
-  // Build the dropdown body — identical option set to the chat composer's
-  // #composerReasoningDropdown (.reasoning-option rows by data-effort).
-  const current = chip.dataset.effort || '';
-  const rows = _PROFILE_DEFAULT_REASONING_OPTS.map(([value, label]) =>
-    `<div class="reasoning-option${value === current ? ' selected' : ''}" data-effort="${esc(value)}">${esc(label)}</div>`
-  );
-  dd.innerHTML = rows.join('');
-  dd.querySelectorAll('.reasoning-option').forEach(row => {
-    row.onclick = (ev) => {
-      ev.stopPropagation();
-      const v = row.dataset.effort || '';
-      _applyProfileDefaultReasoningChip(v);
-      _closeProfileDefaultDropdowns();
-      _persistProfileDefaultModel(profileName);
-    };
+  // Use the chat composer's reasoning renderer (parameterised in ui.js) so
+  // both surfaces share the same row set + click semantics. The onSelect
+  // callback owns the auto-save flow; renderReasoningDropdown attaches
+  // ev.stopPropagation() on each row so the composer's document-level
+  // .reasoning-option click handler does NOT also fire here.
+  renderReasoningDropdown({
+    dropdown: dd,
+    current: chip.dataset.effort || '',
+    onSelect: (value) => _onProfileDefaultReasoningPicked(profileName, value),
   });
   dd.classList.add('open');
   chip.classList.add('active');
+  _positionProfileDefaultDropdown(chip, dd);
 }
 
-async function _persistProfileDefaultModel(profileName){
+function _onProfileDefaultReasoningPicked(profileName, value){
+  // Capture prior values BEFORE optimistic UI update so a failed POST can
+  // revert without re-fetching from the server.
+  const modelChip = $('profileDefaultModelChip');
+  const reasoningChip = $('profileDefaultReasoningChip');
+  const sel = $('profileDefaultModelSelect');
+  const priors = {
+    selValue: sel ? (sel.value || '') : '',
+    modelValue: modelChip ? (modelChip.dataset.modelValue || '') : '',
+    reasoning: reasoningChip ? (reasoningChip.dataset.effort || '') : '',
+  };
+  _applyProfileDefaultReasoningChip(value);
+  _closeProfileDefaultDropdowns();
+  _persistProfileDefaultModel(profileName, priors);
+}
+
+async function _persistProfileDefaultModel(profileName, priors){
   const modelChip = $('profileDefaultModelChip');
   const reasoningChip = $('profileDefaultReasoningChip');
   const sel = $('profileDefaultModelSelect');
   const modelValue = modelChip ? (modelChip.dataset.modelValue || '') : '';
+  // Prior values are captured at the call site (before the optimistic UI
+  // update). If a caller doesn't pass them — e.g. legacy callers — fall back
+  // to the profiles cache for model/provider; reasoning has no other source.
+  const priorProfile = (_profilesCache && Array.isArray(_profilesCache.profiles))
+    ? _profilesCache.profiles.find(x => x.name === profileName) : null;
+  const priorModel = (priors && typeof priors.modelValue === 'string')
+    ? priors.modelValue
+    : (priorProfile ? (priorProfile.model || '') : '');
+  const priorProvider = priorProfile ? (priorProfile.provider || null) : null;
+  const priorReasoning = (priors && typeof priors.reasoning === 'string')
+    ? priors.reasoning : '';
+  const priorSelValue = (priors && typeof priors.selValue === 'string')
+    ? priors.selValue : (sel ? sel.value : '');
   // Derive the provider from the chosen model (its option's optgroup) the
   // same way the chat composer does — _modelStateForSelect handles both
   // explicit @provider:model values and optgroup-tagged options.
@@ -5229,7 +5276,24 @@ async function _persistProfileDefaultModel(profileName){
     }
     if (typeof loadProfilesPanel === 'function') await loadProfilesPanel();
   } catch (e) {
-    showToast('Default model save failed: ' + (e.message || e));
+    // Revert the optimistic chip + select-mirror state so the UI no longer
+    // claims a value the server doesn't have. Toast the failure (no inline
+    // "Saved" diode by design — failure is the only state worth surfacing).
+    try {
+      if (sel) {
+        if (priorSelValue && Array.from(sel.options).some(o => o.value === priorSelValue)) {
+          sel.value = priorSelValue;
+        } else if (priorModel && typeof _applyModelToDropdown === 'function') {
+          _applyModelToDropdown(priorModel, sel, priorProvider);
+        }
+      }
+      _applyProfileDefaultModelChip(priorModel);
+      _applyProfileDefaultReasoningChip(priorReasoning);
+    } catch (revertErr) {
+      console.warn('Default model revert failed:', revertErr);
+    }
+    console.warn('Default model save failed:', e);
+    showToast('Default model save failed: ' + (e && e.message ? e.message : e));
   }
 }
 
@@ -5493,9 +5557,6 @@ function _bindProfileOpsConsole(p, isActive, isDefault){
     body.querySelectorAll('[data-ops-action="remove"]').forEach(btn => {
       if (isDefault) return;  // default profile menu item stays disabled
       btn.onclick = () => { closeHeroMenu(); deleteCurrentProfile(); };
-    });
-    body.querySelectorAll('[data-ops-action="diagnostics"]').forEach(btn => {
-      btn.onclick = () => showToast('Diagnostics drawer not yet wired up.');
     });
     body.querySelectorAll('[data-ops-action="skills"]').forEach(btn => {
       btn.onclick = () => {

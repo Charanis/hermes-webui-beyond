@@ -1333,6 +1333,64 @@ function _formatReasoningEffortLabel(effort){
   return effort;
 }
 
+// Shared reasoning effort option set. Both the chat composer's static dropdown
+// (index.html #composerReasoningDropdown) and the profile screen's
+// Default-model tile read from this list so they stay in lockstep. Labels
+// are intentionally lowercase to match the composer chip's display style.
+const REASONING_OPTS = [
+  ['none',    'none'],
+  ['minimal', 'minimal'],
+  ['low',     'low'],
+  ['medium',  'medium'],
+  ['high',    'high'],
+  ['xhigh',   'xhigh'],
+];
+
+// renderReasoningDropdown(opts?) — same shape as renderModelDropdown(opts).
+// With no opts it rebuilds the chat composer's reasoning dropdown rows
+// (idempotent re-render of what index.html already ships, kept in sync with
+// REASONING_OPTS). With opts it can be reused by other surfaces (e.g. the
+// profile screen's Default-model tile):
+//   - opts.dropdown:  the dropdown element to paint into
+//   - opts.onSelect:  function(value) called when a row is clicked. The row's
+//                     own click handler calls ev.stopPropagation() before
+//                     invoking onSelect, so the document-level composer
+//                     reasoning handler does NOT fire for foreign surfaces.
+//   - opts.current:   current effort string, used to mark the .selected row.
+function renderReasoningDropdown(opts){
+  const dd = (opts && opts.dropdown) || $('composerReasoningDropdown');
+  if(!dd) return;
+  const current = (opts && typeof opts.current === 'string')
+    ? String(opts.current||'').trim().toLowerCase()
+    : _currentReasoningEffort || '';
+  const onSelect = (opts && typeof opts.onSelect === 'function') ? opts.onSelect : null;
+  // Capitalize for label display (Composer chip historically shows lowercase
+  // but the dropdown row text was capitalized in the original HTML — keep
+  // capitalized labels in rows for visual contrast against the chip label).
+  const _cap = (s) => s ? (s.charAt(0).toUpperCase() + s.slice(1)) : s;
+  const _labelFor = (value) => {
+    if(value === 'xhigh') return 'Extra High';
+    return _cap(value);
+  };
+  dd.innerHTML = REASONING_OPTS.map(([value]) =>
+    `<div class="reasoning-option${value === current ? ' selected' : ''}" data-effort="${esc(value)}">${esc(_labelFor(value))}</div>`
+  ).join('');
+  // When opts.onSelect is supplied, the foreign surface owns the click path —
+  // attach its handler AND stop propagation so the composer's document-level
+  // listener doesn't double-fire and POST to /api/reasoning.
+  if(onSelect){
+    dd.querySelectorAll('.reasoning-option').forEach(row => {
+      row.onclick = (ev) => {
+        ev.stopPropagation();
+        const v = row.dataset.effort || '';
+        onSelect(v);
+      };
+    });
+  }
+  // For composer-default rendering, rows have no per-row onclick — the
+  // document-level click listener handles them (existing behavior).
+}
+
 function _applyReasoningChip(eff){
   const effort=_normalizeReasoningEffort(eff);
   _currentReasoningEffort=effort;
