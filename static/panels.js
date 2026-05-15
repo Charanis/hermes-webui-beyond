@@ -6068,31 +6068,20 @@ function _bindProfileOpsConsole(p, isActive, isDefault){
     });
   }
 
-  // Gateway controls — flip the wifi indicator only after we confirm the
-  // gateway actually transitioned. A failed start must NOT light the icon
-  // green (review F1). Selector scoped to #profileDetailBody so a future
-  // sidebar with `data-gateway-action` doesn't bind to the wrong profile.
-  if (body) body.querySelectorAll('[data-gateway-action]').forEach(btn => {
-    btn.onclick = async () => {
-      const action = btn.dataset.gatewayAction;
-      const result = await _opsGatewayControl(profileName, action);
-      const ok = !!(result && result.ok !== false && !result.unavailable);
-      const wifi = $('profileGatewayWifi');
-      if (!wifi) return;
-      if (action === 'start' && ok) {
-        wifi.classList.add('on');
-        wifi.classList.add('just-started');
-        setTimeout(() => wifi.classList.remove('just-started'), 1400);
-      } else if (action === 'restart' && ok) {
-        wifi.classList.add('on');
-        wifi.classList.add('just-started');
-        setTimeout(() => wifi.classList.remove('just-started'), 1400);
-      } else if (action === 'stop' && ok) {
-        wifi.classList.remove('on');
-        wifi.classList.remove('just-started');
-      }
-      // Failed action: leave the indicator in its prior state.
-    };
+  // Gateway toggle (v3 — replaces data-gateway-action button row).
+  if (body) {
+    const toggle = body.querySelector('[data-gateway-toggle]');
+    if (toggle) {
+      toggle.onclick = () => _onGatewayToggle(profileName);
+    }
+  }
+  // Kick off an initial status read for this profile so the seed phase
+  // is replaced by the authoritative server-side phase.
+  _refreshGatewayStatus(profileName).then(() => {
+    const st = _gatewayStateByProfile.get(profileName);
+    if (st && (st.phase === 'starting' || st.phase === 'stopping')) {
+      _startGatewayPoller(profileName);
+    }
   });
 
   // Profile file widgets — scoped to the detail body (review F2).
@@ -6271,37 +6260,108 @@ async function _opsDuplicateProfile(profileName){
   }
 }
 
-// Task 7 replaces this: v3 tile uses data-gateway-toggle, not data-gateway-action. Element IDs and class-based mutations below are stale.
-async function _opsGatewayControl(profileName, action){
-  if (!profileName || !action) return;
-  const states = {
-    start: { state: 'Starting', note: 'Activity: starting gateway…' },
-    restart: { state: 'Restarting', note: 'Activity: restarting gateway…' },
-    stop: { state: 'Stopping', note: 'Activity: stopping gateway…' },
-  };
-  const stateEl = $('opsGatewayState');
-  const noteEl = $('opsGatewayNote');
-  const dotEl = $('opsGatewayDot');
-  if (stateEl && states[action]) stateEl.textContent = states[action].state;
-  if (noteEl && states[action]) noteEl.textContent = states[action].note;
-  if (dotEl) { dotEl.classList.remove('ok','off'); dotEl.classList.add('warn'); }
+// ── Gateway toggle handler + poller (v3) ──────────────────────────────
+
+async function _onGatewayToggle(profileName){
+  if (!profileName) return;
+  const state = _gatewayStateByProfile.get(profileName) || { phase: 'stopped' };
+  const phase = state.phase || 'stopped';
+  if (phase === 'starting' || phase === 'stopping') return;  // locked
+
+  const action = (phase === 'running') ? 'stop' : 'start';
+  const optimisticPhase = (action === 'start') ? 'starting' : 'stopping';
+  _gatewayStateByProfile.set(profileName, {
+    ...state, phase: optimisticPhase, last_error: null,
+  });
+  _repaintGatewayTile(profileName);
+
   try {
-    const result = await api('/api/profile/gateway', { method: 'POST', body: JSON.stringify({ name: profileName, action }) });
-    if (result && result.unavailable) {
-      showToast(result.message || 'Profile-scoped gateway control is not available here.');
-    } else if (result && result.ok === false) {
+    const result = await api('/api/profile/gateway', {
+      method: 'POST',
+      body: JSON.stringify({ name: profileName, action }),
+    });
+    if (result && result.ok === false) {
+      _gatewayStateByProfile.set(profileName, {
+        phase: 'failed',
+        last_error: result.message || 'Gateway action failed.',
+        phase_started_at: null,
+        pid: null,
+      });
+      _repaintGatewayTile(profileName);
       showToast(result.message || 'Gateway action failed.');
-    } else {
-      showToast(`Gateway ${action} succeeded for ${profileName}.`);
+      return;
     }
-    // Refresh profile list so the gateway running flag is updated.
-    await loadProfilesPanel();
-    return result;
+    if (result && result.phase) {
+      _gatewayStateByProfile.set(profileName, {
+        phase: result.phase,
+        last_error: result.last_error || null,
+        phase_started_at: result.phase_started_at || null,
+        pid: result.pid || null,
+      });
+      _repaintGatewayTile(profileName);
+    }
+    // Fast-track first refresh, then start the poller for transient phases.
+    setTimeout(() => _refreshGatewayStatus(profileName).then(() => {
+      const st = _gatewayStateByProfile.get(profileName);
+      if (st && (st.phase === 'starting' || st.phase === 'stopping')) {
+        _startGatewayPoller(profileName);
+      }
+    }), 250);
   } catch (e) {
-    showToast('Gateway action failed: ' + (e.message || e));
-    await loadProfilesPanel();
-    return { ok: false, message: String(e && e.message || e) };
+    _gatewayStateByProfile.set(profileName, {
+      phase: 'failed',
+      last_error: String((e && e.message) || e),
+      phase_started_at: null,
+      pid: null,
+    });
+    _repaintGatewayTile(profileName);
+    showToast('Gateway action failed: ' + (e && e.message || e));
   }
+}
+
+async function _refreshGatewayStatus(profileName){
+  try {
+    const result = await api(
+      '/api/profile/gateway/status?name=' + encodeURIComponent(profileName)
+    );
+    if (!result || result.ok !== true) return null;
+    _gatewayStateByProfile.set(profileName, {
+      phase: result.phase || 'stopped',
+      last_error: result.last_error || null,
+      phase_started_at: result.phase_started_at || null,
+      pid: result.pid || null,
+    });
+    _repaintGatewayTile(profileName);
+    return result;
+  } catch (_) {
+    // Silent — leave previous state, the next poll will retry.
+    return null;
+  }
+}
+
+function _startGatewayPoller(profileName){
+  if (_gatewayPollers.has(profileName)) return;  // already polling
+  const handle = setInterval(async () => {
+    const result = await _refreshGatewayStatus(profileName);
+    const phase = result && result.phase;
+    if (phase && phase !== 'starting' && phase !== 'stopping') {
+      _stopGatewayPoller(profileName);
+    }
+  }, 1500);
+  _gatewayPollers.set(profileName, handle);
+}
+
+function _stopGatewayPoller(profileName){
+  const handle = _gatewayPollers.get(profileName);
+  if (handle) {
+    clearInterval(handle);
+    _gatewayPollers.delete(profileName);
+  }
+}
+
+function _stopAllGatewayPollers(){
+  for (const handle of _gatewayPollers.values()) clearInterval(handle);
+  _gatewayPollers.clear();
 }
 
 async function _openProfileFileEditor(profileName, filename) {
@@ -6390,6 +6450,10 @@ function openProfileDetail(name, el){
   if (!_profilesCache || !_profilesCache.profiles) return;
   const p = _profilesCache.profiles.find(x => x.name === name);
   if (!p) return;
+  // Tear down any active gateway poller from a previous profile-detail view
+  // before we begin rendering the new one (prevents the old profile's poller
+  // from continuing to update state for a tile that no longer exists).
+  _stopAllGatewayPollers();
   document.querySelectorAll('.profile-card').forEach(e => e.classList.remove('active'));
   const target = el || document.querySelector(`.profile-card[data-name="${CSS.escape(name)}"]`);
   if (target) target.classList.add('active');
