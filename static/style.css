@@ -3804,20 +3804,56 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
   box-shadow:0 8px 18px rgba(0,0,0,.28);
 }
 .profile-hero-avatar-edit:hover{background:var(--accent-bg);}
+.profile-hero-body{display:flex;flex-direction:column;min-width:0;}
 .profile-hero-name{
   font-size:32px;font-weight:830;letter-spacing:-.02em;line-height:1.05;
   display:flex;align-items:center;gap:10px;flex-wrap:wrap;color:var(--text);
 }
-.profile-hero-handle{
-  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-  color:var(--muted);font-size:12.5px;margin-top:4px;
+/* Activity stats — sits in the hero body where the old handle used to be. */
+.profile-hero-activity{
+  margin-top:6px;font-size:12.5px;color:var(--muted);line-height:1.5;
 }
-.profile-hero-voice{
-  margin-top:14px;font-style:italic;font-size:14px;line-height:1.55;
-  color:color-mix(in srgb,var(--text) 82%,var(--muted));
-  border-left:2px solid var(--accent-bg-strong);padding-left:10px;
+.profile-hero-activity b{color:var(--text);font-weight:700;}
+.profile-hero-activity .muted{color:var(--muted);}
+.profile-hero-activity.empty{font-style:italic;}
+
+/* Description — user-authored profile blurb, inline editable. */
+.profile-hero-description-row{
+  margin-top:14px;display:flex;align-items:flex-start;gap:6px;
 }
-.profile-hero-voice.placeholder{color:var(--muted);font-style:normal;}
+.profile-hero-description{
+  flex:1 1 auto;min-width:0;
+  font-size:14px;line-height:1.55;
+  color:color-mix(in srgb,var(--text) 88%,var(--muted));
+  border-left:2px solid var(--accent-bg-strong);padding:2px 0 2px 10px;
+  cursor:text;border-radius:0 6px 6px 0;
+  white-space:pre-wrap;word-wrap:break-word;
+}
+.profile-hero-description:hover{background:color-mix(in srgb,var(--accent-bg) 25%,transparent);}
+.profile-hero-description:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
+.profile-hero-description.placeholder{color:var(--muted);font-style:italic;}
+.profile-hero-description[data-editing="1"]{
+  padding-left:0;border-left:0;background:transparent;
+}
+.profile-hero-description-edit-textarea{
+  width:100%;box-sizing:border-box;
+  font:inherit;font-size:14px;line-height:1.5;
+  background:var(--bg);color:var(--text);
+  border:1px solid var(--border);border-radius:8px;padding:8px 10px;resize:vertical;
+}
+.profile-hero-description-edit-textarea:focus{outline:2px solid var(--accent);outline-offset:1px;}
+.profile-hero-description-edit-actions{
+  display:flex;align-items:center;justify-content:flex-end;gap:8px;margin-top:6px;
+}
+.profile-hero-description-counter{font-size:11px;margin-right:auto;}
+.profile-hero-description-edit{
+  flex:none;width:30px;height:30px;display:grid;place-items:center;
+  margin-top:2px;border:1px solid var(--border);border-radius:8px;
+  background:var(--sidebar);color:var(--muted);cursor:pointer;
+  font:inherit;font-size:12px;font-weight:700;
+}
+.profile-hero-description-edit:hover{background:var(--accent-bg);color:var(--accent-text);border-color:var(--accent-bg-strong);}
+
 .profile-hero-actions{margin-top:14px;display:flex;gap:6px;flex-wrap:wrap;}
 .profile-hero-active-pill{
   display:inline-flex;align-items:center;gap:6px;
@@ -3827,16 +3863,6 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
   background:color-mix(in srgb,var(--success) 12%,transparent);
   color:color-mix(in srgb,var(--success) 80%,var(--text));
 }
-
-/* Activity line */
-.profile-activity-line{
-  display:flex;justify-content:space-between;align-items:center;gap:12px;
-  padding:10px 14px;border:1px solid var(--border);border-radius:11px;
-  background:color-mix(in srgb,var(--surface) 60%,var(--bg));
-  font-size:12.5px;color:var(--muted);
-}
-.profile-activity-line b{color:var(--text);font-weight:700;}
-.profile-activity-line.empty{justify-content:flex-start;}
 
 /* Gateway tile — wifi indicator */
 .profile-wifi{

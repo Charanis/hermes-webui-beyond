@@ -4777,15 +4777,13 @@ function _renderProfileDetail(p, activeName){
   const isDefault = !!p.is_default;
 
   // Profile screen rework v3 (2026-05-14):
-  //   Row 1 — hero dossier (256×256 avatar + voice + inline actions)
-  //   Row 2 — activity line
-  //   Row 3 — runtime panel · gateway tile · skills tile (3-col)
-  //   Row 4 — files grid (Lucide icons)
+  //   Row 1 — hero dossier (256×256 avatar + activity line + description + inline actions)
+  //   Row 2 — runtime panel · gateway tile · skills tile (3-col)
+  //   Row 3 — files grid (Lucide icons)
   body.innerHTML = `
     <div class="main-view-content profile-detail-v3">
       ${_profileOpsAvatarDialog(p)}
       ${_profileHeroDossier(p, isActive, isDefault)}
-      ${_profileActivityLine(p)}
       <div class="profile-ops-grid" aria-label="${esc(p.name)} operations controls">
         ${_profileRuntimePanel(p, isActive)}
         ${_profileGatewayTile(p, isActive)}
@@ -4797,7 +4795,7 @@ function _renderProfileDetail(p, activeName){
   if (empty) empty.style.display = 'none';
   _profileMode = 'read';
   _setProfileHeaderButtons('read', p, activeName);
-  _hydrateProfilePersona(p).catch(e=>console.warn('profile persona failed',e));
+  _hydrateProfileDescription(p).catch(e=>console.warn('profile description failed',e));
   _hydrateProfileActivity(p).catch(e=>console.warn('profile activity failed',e));
   _hydrateProfileRuntimeChips(p).catch(e=>console.warn('profile runtime chips failed',e));
   _loadProfileSkillsTile(p).catch(e=>console.warn('profile skills tile failed',e));
@@ -4824,21 +4822,22 @@ function _profileHeroDossier(p, isActive, isDefault){
   const removeAttrs = isDefault
     ? 'disabled aria-disabled="true" title="The default profile cannot be removed."'
     : '';
-  const defaultSuffix = isDefault ? ' · default for new chats' : '';
   return `
     <section class="profile-hero" aria-labelledby="profileHeroName">
       <div class="profile-hero-avatar" id="profileHeroAvatar" tabindex="0" role="button" aria-label="Avatar for ${name}. Activate to change.">
         ${_profileAvatarForUi(p, 'profile-avatar--hero')}
         <button id="profileHeroAvatarEdit" type="button" class="profile-hero-avatar-edit" aria-label="Change avatar" title="Change avatar">✎</button>
       </div>
-      <div>
+      <div class="profile-hero-body">
         <div id="profileHeroName" class="profile-hero-name">${name}${activePill ? ' ' + activePill : ''}</div>
-        <div class="profile-hero-handle">profile/${name} · local${defaultSuffix}</div>
-        <div id="profileHeroVoice" class="profile-hero-voice placeholder">Loading persona…</div>
+        <div id="profileHeroActivity" class="profile-hero-activity empty" aria-live="polite"><span class="muted">Loading activity…</span></div>
+        <div class="profile-hero-description-row">
+          <div id="profileHeroDescription" class="profile-hero-description placeholder" role="button" tabindex="0" title="Click to edit description">Loading description…</div>
+          <button id="profileHeroDescriptionEdit" type="button" class="profile-hero-description-edit" aria-label="Edit description" title="Edit description">✎</button>
+        </div>
         <div class="profile-hero-actions" aria-label="Primary actions for ${name}">
           ${makeActiveBtn}
           ${startBtn}
-          <button class="profile-ops-button" type="button" data-ops-action="edit-soul">Edit persona</button>
           <button class="profile-ops-button" type="button" data-ops-action="rename">Rename</button>
           <button class="profile-ops-button" type="button" data-ops-action="duplicate">Duplicate</button>
           <button class="profile-ops-button danger" type="button" data-ops-action="remove" ${removeAttrs}>Remove</button>
@@ -4847,32 +4846,113 @@ function _profileHeroDossier(p, isActive, isDefault){
     </section>`;
 }
 
-function _profileActivityLine(p){
-  // Container only; _hydrateProfileActivity fills it in after fetching
-  // /api/profile/activity. The empty class drops the right-aligned button
-  // until we know we have something to link to.
-  return `<div id="profileActivityLine" class="profile-activity-line empty"><span style="color:var(--muted)">Loading activity…</span></div>`;
+// ── Description + activity hydration (network) ──────────────────────────
+//
+// The hero "description" is a short, user-authored summary of the profile's
+// purpose, stored at webui.description in config.yaml. It is intentionally
+// separate from SOUL.md (the agent's persona / voice for the model itself).
+// Clicking the line — or the pencil button — opens an inline textarea editor.
+
+const _PROFILE_DESCRIPTION_MAX = 280;
+const _PROFILE_DESCRIPTION_PLACEHOLDER = 'Add a short description so you remember what this profile is for.';
+let _profileDescriptionCurrent = '';
+
+function _renderProfileDescriptionView(text){
+  const host = $('profileHeroDescription');
+  if (!host) return;
+  _profileDescriptionCurrent = (typeof text === 'string') ? text : '';
+  if (_profileDescriptionCurrent) {
+    host.textContent = _profileDescriptionCurrent;
+    host.classList.remove('placeholder');
+  } else {
+    host.textContent = _PROFILE_DESCRIPTION_PLACEHOLDER;
+    host.classList.add('placeholder');
+  }
 }
 
-// ── Persona + activity hydration (network) ──────────────────────────────
-
-async function _hydrateProfilePersona(profile){
-  const el = $('profileHeroVoice');
-  if (!el || !profile || !profile.name) return;
+async function _hydrateProfileDescription(profile){
+  const host = $('profileHeroDescription');
+  if (!host || !profile || !profile.name) return;
   try {
     const data = await api('/api/profile/persona?name=' + encodeURIComponent(profile.name));
-    if (data && typeof data.voice === 'string' && data.voice.length > 0) {
-      el.textContent = '"' + data.voice + '"';
-      el.classList.remove('placeholder');
-    } else {
-      el.textContent = (data && data.soul_present)
-        ? 'SOUL.md is empty. Edit persona to give this agent a voice.'
-        : 'No persona set. Edit SOUL.md to give this agent a voice.';
-      el.classList.add('placeholder');
-    }
+    _renderProfileDescriptionView(data && typeof data.description === 'string' ? data.description : '');
   } catch (e) {
-    el.textContent = 'Could not load persona.';
-    el.classList.add('placeholder');
+    host.textContent = 'Could not load description.';
+    host.classList.add('placeholder');
+    _profileDescriptionCurrent = '';
+  }
+}
+
+function _enterProfileDescriptionEdit(profile){
+  const host = $('profileHeroDescription');
+  if (!host || !profile || !profile.name) return;
+  // Idempotent: if already editing, focus the existing textarea instead of re-rendering.
+  if (host.dataset.editing === '1') {
+    const ta = host.querySelector('textarea');
+    if (ta) ta.focus();
+    return;
+  }
+  host.dataset.editing = '1';
+  host.classList.remove('placeholder');
+  const current = _profileDescriptionCurrent;
+  host.innerHTML = `
+    <textarea class="profile-hero-description-edit-textarea" maxlength="${_PROFILE_DESCRIPTION_MAX}" rows="3" aria-label="Profile description">${esc(current)}</textarea>
+    <div class="profile-hero-description-edit-actions">
+      <span class="profile-hero-description-counter muted" aria-live="polite">${current.length}/${_PROFILE_DESCRIPTION_MAX}</span>
+      <button type="button" class="profile-ops-button" data-desc-action="cancel">Cancel</button>
+      <button type="button" class="profile-ops-button primary" data-desc-action="save">Save</button>
+    </div>`;
+  const ta = host.querySelector('textarea');
+  const counter = host.querySelector('.profile-hero-description-counter');
+  if (ta) {
+    ta.focus();
+    ta.setSelectionRange(ta.value.length, ta.value.length);
+    ta.addEventListener('input', () => {
+      if (counter) counter.textContent = ta.value.length + '/' + _PROFILE_DESCRIPTION_MAX;
+    });
+    ta.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); _exitProfileDescriptionEdit(profile, /*save*/false); }
+      else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); _exitProfileDescriptionEdit(profile, /*save*/true); }
+    });
+  }
+  host.querySelectorAll('[data-desc-action]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      _exitProfileDescriptionEdit(profile, btn.dataset.descAction === 'save');
+    });
+  });
+}
+
+async function _exitProfileDescriptionEdit(profile, save){
+  const host = $('profileHeroDescription');
+  if (!host) return;
+  if (!save) {
+    host.dataset.editing = '';
+    _renderProfileDescriptionView(_profileDescriptionCurrent);
+    return;
+  }
+  const ta = host.querySelector('textarea');
+  if (!ta) return;
+  const next = (ta.value || '').trim();
+  if (next === _profileDescriptionCurrent) {
+    host.dataset.editing = '';
+    _renderProfileDescriptionView(_profileDescriptionCurrent);
+    return;
+  }
+  // Optimistic: show "Saving…" while the POST is in flight.
+  host.dataset.editing = '';
+  host.textContent = 'Saving…';
+  host.classList.add('placeholder');
+  try {
+    const result = await api('/api/profile/settings', {
+      method: 'POST',
+      body: JSON.stringify({ name: profile.name, description: next }),
+    });
+    const saved = (result && typeof result.description === 'string') ? result.description : next;
+    _renderProfileDescriptionView(saved);
+  } catch (e) {
+    console.warn('save description failed', e);
+    _renderProfileDescriptionView(_profileDescriptionCurrent);
+    if (typeof toast === 'function') toast('Could not save description');
   }
 }
 
@@ -4891,14 +4971,14 @@ function _formatRelativeTime(iso){
 }
 
 async function _hydrateProfileActivity(profile){
-  const el = $('profileActivityLine');
+  const el = $('profileHeroActivity');
   if (!el || !profile || !profile.name) return;
   try {
     const a = await api('/api/profile/activity?name=' + encodeURIComponent(profile.name));
     const isEmpty = !(a.sessions_week | 0) && !a.last_used_at && !a.gateway_last_run_at;
     if (isEmpty) {
-      el.className = 'profile-activity-line empty';
-      el.innerHTML = `<span>No activity yet. Start a chat to see usage here.</span>`;
+      el.className = 'profile-hero-activity empty';
+      el.innerHTML = `<span class="muted">No activity yet — start a chat to see usage here.</span>`;
       return;
     }
     const parts = [];
@@ -4916,11 +4996,11 @@ async function _hydrateProfileActivity(profile){
       const rel = _formatRelativeTime(a.gateway_last_run_at);
       parts.push(`gateway last ran <b>${esc(rel || a.gateway_last_run_at)}</b>`);
     }
-    el.className = 'profile-activity-line';
-    el.innerHTML = `<span>${parts.join(' · ')}</span><button class="profile-ops-button" type="button" data-ops-action="open-activity">Open activity ›</button>`;
+    el.className = 'profile-hero-activity';
+    el.innerHTML = parts.join(' · ');
   } catch (e) {
-    el.className = 'profile-activity-line empty';
-    el.innerHTML = `<span style="color:var(--muted)">Activity unavailable.</span>`;
+    el.className = 'profile-hero-activity empty';
+    el.innerHTML = `<span class="muted">Activity unavailable.</span>`;
   }
 }
 function _profileRuntimePanel(p, isActive){
@@ -5031,8 +5111,7 @@ function _profileSkillsTile(p, isActive){
       </div>
     </article>`;
 }
-// _hydrateProfilePersona — full body above (Task 9).
-// _hydrateProfileActivity — full body above (Task 10).
+// _hydrateProfileDescription / _hydrateProfileActivity — bodies above.
 
 // ── Runtime chips (provider · model · reasoning) ───────────────────────
 //
@@ -5438,6 +5517,25 @@ function _bindProfileOpsConsole(p, isActive, isDefault){
   }
   if (heroAvatarEdit) heroAvatarEdit.onclick = (ev) => { ev.stopPropagation(); openAvatar(); };
 
+  // Description — click the line or the pencil to enter inline-edit mode.
+  // The actual save happens in _exitProfileDescriptionEdit (POST settings).
+  const heroDesc = $('profileHeroDescription');
+  const heroDescEdit = $('profileHeroDescriptionEdit');
+  const enterDescEdit = () => _enterProfileDescriptionEdit(p);
+  if (heroDesc) {
+    heroDesc.addEventListener('click', (ev) => {
+      // Ignore clicks inside the active editor (textarea, action buttons).
+      if (heroDesc.dataset.editing === '1') return;
+      ev.preventDefault();
+      enterDescEdit();
+    });
+    heroDesc.addEventListener('keydown', (ev) => {
+      if (heroDesc.dataset.editing === '1') return;
+      if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); enterDescEdit(); }
+    });
+  }
+  if (heroDescEdit) heroDescEdit.onclick = (ev) => { ev.stopPropagation(); enterDescEdit(); };
+
   // Start Chat
   const startChat = $('opsStartChat');
   if (startChat) startChat.onclick = () => startChatWithProfile(profileName);
@@ -5471,14 +5569,6 @@ function _bindProfileOpsConsole(p, isActive, isDefault){
     body.querySelectorAll('[data-ops-action="remove"]').forEach(btn => {
       if (isDefault) return;  // default profile button stays disabled
       btn.onclick = () => deleteCurrentProfile();
-    });
-    body.querySelectorAll('[data-ops-action="edit-soul"]').forEach(btn => {
-      btn.onclick = () => _openProfileFileEditor(profileName, 'SOUL.md');
-    });
-    body.querySelectorAll('[data-ops-action="open-activity"]').forEach(btn => {
-      btn.onclick = () => {
-        if (typeof switchPanel === 'function') switchPanel('sessions');
-      };
     });
     body.querySelectorAll('[data-ops-action="diagnostics"]').forEach(btn => {
       btn.onclick = () => showToast('Diagnostics drawer not yet wired up.');

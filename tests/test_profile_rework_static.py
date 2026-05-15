@@ -43,13 +43,23 @@ def test_v3_css_classes_defined():
         ".profile-hero",
         ".profile-hero-avatar",
         ".profile-hero-name",
-        ".profile-hero-voice",
-        ".profile-activity-line",
+        ".profile-hero-activity",
+        ".profile-hero-description",
+        ".profile-hero-description-edit",
         ".profile-wifi",
         ".profile-wifi.on",
         ".profile-skill-chip",
     ):
         assert selector in STYLE_CSS, f"missing CSS selector {selector}"
+
+
+def test_v3_dropped_legacy_classes():
+    # The "Activity beam" tile is gone (folded into the hero), as is the
+    # mono-font "handle" line that used to render "profile/<name> · local · …".
+    assert ".profile-activity-line" not in STYLE_CSS, \
+        "standalone activity-line CSS should be removed (folded into hero)"
+    assert ".profile-hero-handle" not in STYLE_CSS, \
+        "profile-hero-handle CSS should be removed"
 
 
 def test_hero_avatar_is_256px():
@@ -66,12 +76,11 @@ def test_hero_avatar_is_256px():
 def test_v3_helpers_defined():
     for helper in (
         "_profileHeroDossier",
-        "_profileActivityLine",
         "_profileRuntimePanel",
         "_profileGatewayTile",
         "_profileSkillsTile",
         "_profileFilesSection",
-        "_hydrateProfilePersona",
+        "_hydrateProfileDescription",
         "_hydrateProfileActivity",
         "_hydrateProfileRuntimeChips",
         "_loadProfileSkillsTile",
@@ -86,12 +95,19 @@ def test_v2_helpers_removed():
     assert "function _profileOpsTiles" not in PANELS_JS
 
 
+def test_standalone_activity_line_helper_removed_in_v3_1():
+    # The activity line was folded into the hero dossier — its dedicated
+    # helper and its container id are both gone.
+    assert "function _profileActivityLine" not in PANELS_JS
+    assert "_hydrateProfilePersona" not in PANELS_JS, \
+        "persona hydrator should be renamed to _hydrateProfileDescription"
+
+
 def test_render_detail_calls_v3_helpers_in_order():
     fn = _extract_function(PANELS_JS, "_renderProfileDetail")
     order = []
     for needle in (
         "_profileHeroDossier",
-        "_profileActivityLine",
         "_profileRuntimePanel",
         "_profileGatewayTile",
         "_profileSkillsTile",
@@ -102,6 +118,9 @@ def test_render_detail_calls_v3_helpers_in_order():
         order.append((idx, needle))
     assert order == sorted(order), \
         f"helpers called in wrong order: {[n for _, n in order]}"
+    # The standalone activity line must NOT be rendered separately anymore.
+    assert "_profileActivityLine" not in fn
+    assert 'id="profileActivityLine"' not in PANELS_JS
 
 
 # ── Hero dossier ──────────────────────────────────────────────────────────
@@ -126,6 +145,50 @@ def test_hero_dossier_uses_inline_actions_not_overflow_menu():
     # The v2 overflow menu IDs must not appear in v3 hero.
     assert "opsMoreActions" not in fn
     assert "opsProfileMenu" not in fn
+
+
+def test_hero_dossier_renders_activity_slot():
+    # The activity line lives inside the hero now (v3.1), replacing the
+    # monospaced "profile/<name> · local" handle line.
+    fn = _extract_function(PANELS_JS, "_profileHeroDossier")
+    assert 'id="profileHeroActivity"' in fn, \
+        "hero must contain the activity slot retargeted from the standalone row"
+    assert "profile-hero-handle" not in fn, \
+        "the v2 handle line must be gone from the hero"
+    assert "profile/${name}" not in fn, \
+        "the v2 handle template literal must be removed"
+
+
+def test_hero_dossier_has_inline_description_editor():
+    fn = _extract_function(PANELS_JS, "_profileHeroDossier")
+    assert 'id="profileHeroDescription"' in fn, \
+        "hero must expose the description slot"
+    assert 'id="profileHeroDescriptionEdit"' in fn, \
+        "hero must expose the description pencil button"
+    # The v2 'Edit persona' SOUL-bound button is gone — SOUL is editable
+    # via the files grid instead.
+    assert 'data-ops-action="edit-soul"' not in fn
+
+
+def test_description_hydrator_targets_correct_element_and_posts_settings():
+    fn = _extract_function(PANELS_JS, "_hydrateProfileDescription")
+    assert "profileHeroDescription" in fn
+    assert "/api/profile/persona" in fn
+    assert "data.description" in fn
+    # Save flow posts to /api/profile/settings with a description field.
+    save = _extract_function(PANELS_JS, "_exitProfileDescriptionEdit")
+    assert "/api/profile/settings" in save
+    assert "description" in save
+
+
+def test_activity_hydrator_writes_into_hero_slot():
+    fn = _extract_function(PANELS_JS, "_hydrateProfileActivity")
+    assert "profileHeroActivity" in fn, \
+        "activity hydrator must write into the hero slot (v3.1)"
+    # The standalone container id is dead.
+    assert "profileActivityLine" not in fn
+    # No more "Open activity ›" link — folded out in v3.1.
+    assert "open-activity" not in fn
 
 
 # ── Runtime panel ─────────────────────────────────────────────────────────
@@ -212,7 +275,21 @@ def test_files_section_drops_single_letter_badges():
 
 def test_bindings_handle_v3_action_buttons():
     fn = _extract_function(PANELS_JS, "_bindProfileOpsConsole")
-    for action in ("rename", "duplicate", "remove", "edit-soul",
-                   "open-activity", "diagnostics", "skills"):
+    # v3.1 dropped the edit-soul and open-activity hero buttons — SOUL is
+    # editable via the files grid; activity stats render in the hero itself.
+    for action in ("rename", "duplicate", "remove", "diagnostics", "skills"):
         assert f'data-ops-action="{action}"' in fn, \
             f"binding for data-ops-action={action!r} is missing"
+    for dropped in ("edit-soul", "open-activity"):
+        assert f'data-ops-action="{dropped}"' not in fn, \
+            f"v3.1 should drop the {dropped!r} action button"
+
+
+def test_bindings_wire_description_edit():
+    fn = _extract_function(PANELS_JS, "_bindProfileOpsConsole")
+    assert "profileHeroDescription" in fn, \
+        "binding for description click is missing"
+    assert "profileHeroDescriptionEdit" in fn, \
+        "binding for description pencil is missing"
+    assert "_enterProfileDescriptionEdit" in fn, \
+        "binding must invoke the inline editor"
