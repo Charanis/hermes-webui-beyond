@@ -58,7 +58,7 @@ def test_write_gateway_phase_stopped_clears_phase_fields():
         profiles._write_gateway_phase(home, "starting")
         profiles._write_gateway_phase(home, "stopped")
         data = json.loads((home / ".gateway-state.json").read_text(encoding="utf-8"))
-        assert data.get("phase") is None or data.get("phase") == "stopped"
+        assert data.get("phase") is None
         # phase_started_at and last_error should be cleared on stopped
         assert data.get("phase_started_at") is None
         assert data.get("last_error") is None
@@ -79,3 +79,11 @@ def test_read_gateway_state_returns_empty_dict_on_missing():
         home = Path(td)
         profiles = _reload_profiles_module(home)
         assert profiles._read_gateway_state(home) == {}
+
+
+def test_write_gateway_phase_unknown_raises():
+    with tempfile.TemporaryDirectory() as td:
+        home = Path(td)
+        profiles = _reload_profiles_module(home)
+        with pytest.raises(ValueError, match="unknown gateway phase"):
+            profiles._write_gateway_phase(home, "bogus")
