@@ -1071,9 +1071,21 @@ function _positionModelDropdown(){
   dd.style.left=`${left}px`;
 }
 
-function renderModelDropdown(){
-  const dd=$('composerModelDropdown');
-  const sel=$('modelSelect');
+// renderModelDropdown(opts?) — composer's rich model picker. With no opts it
+// targets the chat composer (#composerModelDropdown + #modelSelect) and writes
+// through to selectModelFromDropdown(); with opts it can be reused by other
+// surfaces (e.g. the profile screen's Default-model tile). The renderer reads
+// options out of `opts.select` (a hidden <select> mirror), paints rows into
+// `opts.dropdown`, and on click invokes `opts.onSelect(value)` instead of
+// selectModelFromDropdown. `opts.scopeNote` overrides the advisory line.
+function renderModelDropdown(opts){
+  const dd = (opts && opts.dropdown) || $('composerModelDropdown');
+  const sel = (opts && opts.select) || $('modelSelect');
+  const onSelect = (opts && typeof opts.onSelect === 'function') ? opts.onSelect : selectModelFromDropdown;
+  const onClose = (opts && typeof opts.onClose === 'function') ? opts.onClose : closeModelDropdown;
+  const scopeNoteText = (opts && typeof opts.scopeNote === 'string')
+    ? opts.scopeNote
+    : (t('model_scope_advisory') || 'Applies to this conversation from your next message.');
   if(!dd||!sel) return;
   // Store model data for filtering
   const _modelData=[];
@@ -1104,7 +1116,7 @@ function renderModelDropdown(){
   // Create search input FIRST before filterModels definition
   const _scopeNote=document.createElement('div');
   _scopeNote.className='model-scope-note';
-  _scopeNote.textContent=t('model_scope_advisory')||'Applies to this conversation from your next message.';
+  _scopeNote.textContent=scopeNoteText;
   const _searchRow=document.createElement('div');
   _searchRow.className='model-search-row';
   _searchRow.innerHTML=`<input class="model-search-input" type="text" placeholder="${esc(t('model_search_placeholder')||'Search models…')}" spellcheck="false" autocomplete="off"><button class="model-search-clear" title="Clear search">${li('x',10)}</button>`;
@@ -1172,7 +1184,7 @@ function renderModelDropdown(){
         }
         const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(badgeLabel)}</span>`:'';
         row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${m.name}</span>${badgeHtml}</div><span class="model-opt-id">${m.id}</span>`;
-        row.onclick=()=>selectModelFromDropdown(m.value);
+        row.onclick=()=>onSelect(m.value);
         dd.appendChild(row);
       }
     }
@@ -1200,7 +1212,7 @@ function renderModelDropdown(){
       // Inline provider chip on every row that has a group (#1425)
       const providerChip=m.group?`<span class="model-opt-provider">${esc(m.group)}</span>`:'';
       row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${m.name}</span>${badgeHtml}${providerChip}</div><span class="model-opt-id">${m.id}</span>`;
-      row.onclick=()=>selectModelFromDropdown(m.value);
+      row.onclick=()=>onSelect(m.value);
       dd.appendChild(row);
     }
     // Show "No results" if filtered and nothing matched
@@ -1218,15 +1230,15 @@ function renderModelDropdown(){
   };
   // Event handlers for search input
   _si.addEventListener('input',()=>_filterModels(_si.value));
-  _si.addEventListener('keydown',e=>{if(e.key==='Enter') {e.preventDefault();}if(e.key==='Escape') {closeModelDropdown();}});
+  _si.addEventListener('keydown',e=>{if(e.key==='Enter') {e.preventDefault();}if(e.key==='Escape') {onClose();}});
   _si.addEventListener('click',e=>e.stopPropagation());
   // Event handlers for clear button
   _sc.onclick=()=>{ _si.value=''; _filterModels(''); _si.focus(); };
   _sc.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){ _si.value=''; _filterModels(''); _si.focus(); e.preventDefault(); }});
   // Event handlers for custom input
-  const _applyCustom=()=>{const v=_ci.value.trim();if(!v)return;selectModelFromDropdown(v);_ci.value='';};
+  const _applyCustom=()=>{const v=_ci.value.trim();if(!v)return;onSelect(v);_ci.value='';};
   _cb.onclick=_applyCustom;
-  _ci.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();_applyCustom();}if(e.key==='Escape'){closeModelDropdown();}});
+  _ci.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();_applyCustom();}if(e.key==='Escape'){onClose();}});
   _ci.addEventListener('click',e=>e.stopPropagation());
   // Add search and custom elements to dropdown (initial render)
   dd.appendChild(_scopeNote);

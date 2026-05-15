@@ -4380,167 +4380,12 @@ function _profileProviderForModel(modelValue, groups){
   return '';
 }
 
-function _profileSetInlineStatus(message, tone){
-  const node=$('profileInlineStatus');
-  if(node){
-    node.textContent=message||'';
-    node.dataset.tone=tone||'muted';
-  }
-  // Reflect into the Ops Console runtime tile status pill so the visible
-  // status badge tracks save/load state without duplicating wiring.
-  const dot=$('opsRuntimeDot');
-  const state=$('opsRuntimeState');
-  if(dot){
-    dot.classList.remove('ok','warn','off');
-    if(tone==='error') dot.classList.add('warn');
-    else if(tone==='saving'||tone==='warning') dot.classList.add('warn');
-    else dot.classList.add('ok');
-  }
-  if(state){
-    if(tone==='saving') state.textContent='Saving…';
-    else if(tone==='warning') state.textContent='Unsaved';
-    else if(tone==='error') state.textContent='Save failed';
-    else state.textContent='Saved';
-  }
-}
-
-function _profileMarkModelDirty(){
-  const btn=$('profileModelSave');
-  if(btn) btn.disabled=false;
-  _profileSetInlineStatus('Unsaved changes','warning');
-}
-
-async function _hydrateProfileIdentityControls(profile){
-  const providerSel=$('profileInlineProvider');
-  const modelSel=$('profileInlineModel');
-  const reasoningSel=$('profileInlineReasoning');
-  const saveBtn=$('profileModelSave');
-  if(!providerSel||!modelSel) return;
-  // Reasoning value is profile-scoped. Fetch named-profile settings and apply.
-  if(reasoningSel){
-    try{
-      const qs=new URLSearchParams({name:profile.name});
-      const settings=await api('/api/profile/settings?'+qs.toString());
-      const current=(settings&&typeof settings.reasoning_effort==='string')?settings.reasoning_effort:'';
-      const allowed=Array.from(reasoningSel.options).map(o=>o.value);
-      reasoningSel.value=allowed.includes(current)?current:'';
-      reasoningSel.dataset.savedValue=reasoningSel.value;
-      reasoningSel.onchange=_profileMarkModelDirty;
-    }catch(_){
-      reasoningSel.value='';
-      reasoningSel.dataset.savedValue='';
-    }
-  }
-  const ready=window._modelDropdownReady;
-  if(ready&&typeof ready.then==='function'){
-    try{await ready;}catch(_){}
-  }
-  if(!_profileModelGroupsFromComposer().length&&typeof populateModelDropdown==='function'){
-    try{await populateModelDropdown();}catch(_){}
-  }
-  const groups=_profileModelGroupsFromComposer();
-  const providerEntries=[];
-  const seenProviders=new Set();
-  for(const g of groups){
-    const provider=g.provider||'';
-    if(!provider||seenProviders.has(provider)) continue;
-    seenProviders.add(provider);
-    providerEntries.push({provider,label:g.label||provider});
-  }
-  const currentProvider=profile.provider||_profileProviderForModel(profile.model,groups)||'';
-  providerSel.innerHTML=`<option value="">${esc('Auto / default provider')}</option>`+providerEntries.map(g=>`<option value="${esc(g.provider)}">${esc(g.label)}</option>`).join('');
-  if(currentProvider&&!seenProviders.has(currentProvider)) providerSel.insertAdjacentHTML('beforeend',`<option value="${esc(currentProvider)}">${esc(currentProvider)}</option>`);
-  providerSel.value=currentProvider||'';
-
-  const renderModels=(preferredModel)=>{
-    const selectedProvider=providerSel.value||'';
-    const visibleGroups=selectedProvider?groups.filter(g=>g.provider===selectedProvider):groups;
-    modelSel.innerHTML='';
-    for(const g of (visibleGroups.length?visibleGroups:groups)){
-      const og=document.createElement('optgroup');
-      og.label=g.label||g.provider||'Models';
-      if(g.provider) og.dataset.provider=g.provider;
-      for(const m of g.models||[]){
-        const opt=document.createElement('option');
-        opt.value=m.value;
-        opt.textContent=m.label||getModelLabel(m.value);
-        og.appendChild(opt);
-      }
-      modelSel.appendChild(og);
-    }
-    const target=preferredModel||profile.model||'';
-    const resolved=(typeof _applyModelToDropdown==='function')?_applyModelToDropdown(target,modelSel,selectedProvider||profile.provider||null):null;
-    if(target&&!resolved){
-      const opt=document.createElement('option');
-      opt.value=target;
-      opt.textContent=getModelLabel(target);
-      opt.dataset.custom='1';
-      modelSel.appendChild(opt);
-      modelSel.value=target;
-    }else if(!modelSel.value&&modelSel.options.length){
-      modelSel.value=modelSel.options[0].value;
-    }
-  };
-  renderModels(profile.model||'');
-  providerSel.onchange=()=>{renderModels(modelSel.value||profile.model||'');_profileMarkModelDirty();};
-  modelSel.onchange=()=>{
-    const state=(typeof _modelStateForSelect==='function')?_modelStateForSelect(modelSel,modelSel.value):{model_provider:null};
-    if(state.model_provider&&Array.from(providerSel.options).some(o=>o.value===state.model_provider)) providerSel.value=state.model_provider;
-    _profileMarkModelDirty();
-  };
-  if(saveBtn){
-    saveBtn.disabled=true;
-    saveBtn.onclick=()=>_saveProfileModelSettings(profile.name);
-  }
-  // Avatar bindings are owned by _bindProfileOpsConsole — keep this hydrator
-  // focused on the inline runtime controls.
-  _profileSetInlineStatus('Saved','ok');
-}
-
-async function _saveProfileModelSettings(profileName){
-  const providerSel=$('profileInlineProvider');
-  const modelSel=$('profileInlineModel');
-  const reasoningSel=$('profileInlineReasoning');
-  const btn=$('profileModelSave');
-  if(!providerSel||!modelSel) return;
-  const modelState=(typeof _modelStateForSelect==='function')?_modelStateForSelect(modelSel,modelSel.value):{model:modelSel.value,model_provider:null};
-  const payload={
-    name:profileName,
-    provider:providerSel.value||null,
-    model:modelState.model||modelSel.value,
-  };
-  if(reasoningSel){
-    payload.reasoning_effort=reasoningSel.value||'';
-  }
-  if(btn){btn.disabled=true;btn.style.opacity='0.55';}
-  _profileSetInlineStatus('Saving…','saving');
-  try{
-    const updated=await api('/api/profile/settings',{method:'POST',body:JSON.stringify(payload)});
-    const p=_profilesCache&&Array.isArray(_profilesCache.profiles)?_profilesCache.profiles.find(x=>x.name===profileName):null;
-    if(p) Object.assign(p, updated);
-    const isActive=(S.activeProfile||(_profilesCache&&_profilesCache.active)||'default')===profileName;
-    if(isActive){
-      const sel=$('modelSelect');
-      if(sel&&updated.model&&typeof _applyModelToDropdown==='function'){
-        const resolved=_applyModelToDropdown(updated.model,sel,updated.provider||null)||updated.model;
-        if(S.session&&!(S.messages&&S.messages.length)){
-          S.session.model=resolved;
-          S.session.model_provider=updated.provider||modelState.model_provider||null;
-        }
-        if(typeof syncModelChip==='function') syncModelChip();
-        if(typeof syncTopbar==='function') syncTopbar();
-      }
-    }
-    await loadProfilesPanel();
-    showToast('Profile model saved');
-  }catch(e){
-    if(btn) btn.disabled=false;
-    _profileSetInlineStatus('Save failed','error');
-    showToast('Profile model save failed: '+e.message);
-  }finally{
-    if(btn) btn.style.opacity='';
-  }
-}
+// Legacy v2 identity-controls hydrator + its save path (_hydrateProfileIdentityControls,
+// _saveProfileModelSettings, _profileMarkModelDirty, _profileSetInlineStatus) were removed
+// on 2026-05-15 as part of the Default-model tile rework. The v3 layout never
+// renders #profileInlineProvider/#profileInlineModel/#profileInlineReasoning, so the
+// helpers had no live callers; the new _hydrateProfileDefaultModel + _persistProfileDefaultModel
+// pair (further below) covers the same /api/profile/settings POST contract with auto-save.
 
 let _profileAvatarUploadDataUrl='';
 const PROFILE_AVATAR_UPLOAD_MAX_BYTES=3*1024*1024;
@@ -4797,7 +4642,7 @@ function _renderProfileDetail(p, activeName){
   _setProfileHeaderButtons('read', p, activeName);
   _hydrateProfileDescription(p).catch(e=>console.warn('profile description failed',e));
   _hydrateProfileActivity(p).catch(e=>console.warn('profile activity failed',e));
-  _hydrateProfileRuntimeChips(p).catch(e=>console.warn('profile runtime chips failed',e));
+  _hydrateProfileDefaultModel(p).catch(e=>console.warn('profile default model failed',e));
   _loadProfileSkillsTile(p).catch(e=>console.warn('profile skills tile failed',e));
   _bindProfileOpsConsole(p, isActive, isDefault);
 }
@@ -5028,50 +4873,43 @@ async function _hydrateProfileActivity(profile){
   }
 }
 function _profileRuntimePanel(p, isActive){
-  // Three composer-style chips stacked vertically. Provider, Model, and
-  // Reasoning all share .composer-model-chip + .model-dropdown chrome with
-  // the chat composer's picker — same component, just bound to a different
-  // save path. The dropdown bodies are populated by
-  // _hydrateProfileRuntimeChips at render time from #modelSelect's optgroups
-  // (the chat composer's canonical model catalog).
+  // Default-model tile (rework 2026-05-15):
+  //   - Title "Default model" with explanatory subtitle.
+  //   - Two chips: Model + Reasoning. Both share the chat composer's chrome
+  //     (.composer-model-chip + .model-dropdown) AND the same renderer
+  //     (renderModelDropdown from ui.js, parameterised). Provider is inferred
+  //     from the chosen model — there is no separate provider chip.
+  //   - Auto-save on selection. No Apply button. No status pill. No
+  //     Diagnostics button. No "Saved" diode — this tile is always saved.
+  //   - A hidden <select id="profileDefaultModelSelect"> mirrors the chat
+  //     composer's #modelSelect so the parameterised renderer can read
+  //     optgroups out of it. _hydrateProfileDefaultModel populates it.
   return `
-    <article class="profile-ops-tile" aria-labelledby="opsRuntimeTitle">
-      <div class="profile-ops-tile-head">
-        <span class="profile-ops-tile-label" id="opsRuntimeTitle">Runtime</span>
-        <span class="profile-ops-status-pill" id="profileRuntimeStatusPill" data-tone="muted" aria-live="polite">
-          <span id="opsRuntimeDot" class="profile-status-dot ok" aria-hidden="true"></span>
-          <span id="opsRuntimeState">Saved</span>
-        </span>
-      </div>
-      <div class="profile-runtime-chiprow v3" aria-label="Runtime controls for ${esc(p.name)}">
-        <div class="composer-model-wrap profile-runtime-chip-wrap">
-          <button class="composer-model-chip" id="profileRuntimeProviderChip" type="button" title="Provider scope for this profile">
-            <span class="composer-model-icon" aria-hidden="true">${li('globe',14)}</span>
-            <span class="composer-model-label" id="profileRuntimeProviderLabel">Auto · default</span>
-            <span class="composer-model-chevron" aria-hidden="true">${li('chevron-down',10)}</span>
-          </button>
-          <div class="model-dropdown profile-runtime-dropdown" id="profileRuntimeProviderDropdown"></div>
+    <article class="profile-ops-tile profile-default-model-tile" aria-labelledby="opsDefaultModelTitle">
+      <div class="profile-ops-tile-head profile-default-model-head">
+        <div class="profile-default-model-titles">
+          <span class="profile-ops-tile-label" id="opsDefaultModelTitle">Default model</span>
+          <span class="profile-default-model-subtitle">Used for new sessions in this profile — won't affect active conversations</span>
         </div>
-        <div class="composer-model-wrap profile-runtime-chip-wrap">
-          <button class="composer-model-chip" id="profileRuntimeModelChip" type="button" title="Model used when this profile's gateway starts">
+      </div>
+      <div class="profile-default-model-chiprow" aria-label="Default model controls for ${esc(p.name)}">
+        <div class="composer-model-wrap profile-default-model-wrap">
+          <button class="composer-model-chip" id="profileDefaultModelChip" type="button" title="Default model for new sessions in this profile">
             <span class="composer-model-icon" aria-hidden="true">${li('cpu',14)}</span>
-            <span class="composer-model-label" id="profileRuntimeModelLabel">Loading…</span>
+            <span class="composer-model-label" id="profileDefaultModelLabel">Loading…</span>
             <span class="composer-model-chevron" aria-hidden="true">${li('chevron-down',10)}</span>
           </button>
-          <div class="model-dropdown profile-runtime-dropdown" id="profileRuntimeModelDropdown"></div>
+          <div class="model-dropdown profile-default-model-dropdown" id="profileDefaultModelDropdown"></div>
+          <select id="profileDefaultModelSelect" aria-hidden="true" tabindex="-1" style="position:absolute;width:1px;height:1px;clip:rect(0 0 0 0);overflow:hidden;"></select>
         </div>
-        <div class="composer-model-wrap profile-runtime-chip-wrap">
-          <button class="composer-model-chip" id="profileRuntimeReasoningChip" type="button" title="Reasoning effort applied when this profile runs">
+        <div class="composer-model-wrap profile-default-model-wrap">
+          <button class="composer-model-chip composer-reasoning-chip" id="profileDefaultReasoningChip" type="button" title="Reasoning effort for new sessions in this profile">
             <span class="composer-model-icon" aria-hidden="true">${li('brain',14)}</span>
-            <span class="composer-model-label" id="profileRuntimeReasoningLabel">Default</span>
+            <span class="composer-model-label" id="profileDefaultReasoningLabel">Default</span>
             <span class="composer-model-chevron" aria-hidden="true">${li('chevron-down',10)}</span>
           </button>
-          <div class="model-dropdown profile-runtime-dropdown" id="profileRuntimeReasoningDropdown"></div>
+          <div class="composer-reasoning-dropdown profile-default-reasoning-dropdown" id="profileDefaultReasoningDropdown"></div>
         </div>
-      </div>
-      <div class="profile-ops-control-row">
-        <button id="opsRuntimeApply" class="profile-ops-button primary" type="button" style="flex:1">Apply</button>
-        <button class="profile-ops-button" type="button" data-ops-action="diagnostics">Diagnostics</button>
       </div>
     </article>`;
 }
@@ -5137,31 +4975,31 @@ function _profileSkillsTile(p, isActive){
 }
 // _hydrateProfileDescription / _hydrateProfileActivity — bodies above.
 
-// ── Runtime chips (provider · model · reasoning) ───────────────────────
+// ── Default-model tile (rework 2026-05-15) ─────────────────────────────
 //
-// All three chips share the chat composer's .composer-model-chip +
-// .model-dropdown chrome. Their dropdown bodies are populated from
-// #modelSelect's optgroups (the canonical model catalog already loaded by
-// the composer). Selecting a chip writes through to
-// /api/profile/settings without touching the active-profile chat session.
+// The default-model tile shares the chat composer's picker — same chrome
+// (.composer-model-chip + .model-dropdown), same renderer
+// (renderModelDropdown from ui.js, called with opts pointing at the tile's
+// own select + dropdown), same row layout, search, badges, custom-ID
+// input. Selecting a row auto-saves to /api/profile/settings. Reasoning
+// chip mirrors the chat composer's reasoning options exactly (none ·
+// minimal · low · medium · high · xhigh); the chip label reads "Default"
+// when no override is set (matches the composer's empty-state label).
 
-const _PROFILE_REASONING_OPTS_V3 = [
-  ['',        'Default'],
-  ['none',    'None (disabled)'],
+const _PROFILE_DEFAULT_REASONING_OPTS = [
+  ['none',    'None'],
   ['minimal', 'Minimal'],
   ['low',     'Low'],
   ['medium',  'Medium'],
   ['high',    'High'],
-  ['xhigh',   'Extra high'],
+  ['xhigh',   'Extra High'],
 ];
 
-let _profileRuntimeCtxV3 = null;
-
-async function _hydrateProfileRuntimeChips(profile){
+async function _hydrateProfileDefaultModel(profile){
   if (!profile || !profile.name) return;
-  _profileRuntimeCtxV3 = { name: profile.name };
-  // Wait for the composer's model catalog so the dropdowns aren't empty
-  // on first paint after a profile switch.
+  // Wait for the composer's model catalog before mirroring it into the
+  // profile's hidden select. Without this, the picker can paint empty
+  // immediately after a profile switch.
   const ready = window._modelDropdownReady;
   if (ready && typeof ready.then === 'function') {
     try { await ready; } catch (_) {}
@@ -5169,214 +5007,238 @@ async function _hydrateProfileRuntimeChips(profile){
   if (!_profileModelGroupsFromComposer().length && typeof populateModelDropdown === 'function') {
     try { await populateModelDropdown(); } catch (_) {}
   }
-  // Fetch the per-profile reasoning_effort (the rest of the settings live on
-  // the profile row already from /api/profiles).
+
+  // Fetch the per-profile reasoning_effort (the rest of the settings live
+  // on the profile row already from /api/profiles).
   let reasoning = '';
   try {
     const settings = await api('/api/profile/settings?name=' + encodeURIComponent(profile.name));
     if (settings && typeof settings.reasoning_effort === 'string') reasoning = settings.reasoning_effort;
   } catch (_) { /* keep default empty */ }
-  _applyProfileRuntimeProviderChipV3(profile.provider || '');
-  _applyProfileRuntimeModelChipV3(profile.model || '', profile.provider || '');
-  _applyProfileRuntimeReasoningChipV3(reasoning);
-  _wireProfileRuntimeChipHandlersV3(profile.name);
-  _setProfileRuntimeStatusV3('muted', 'Saved');
+
+  _populateProfileDefaultModelSelect(profile);
+  _applyProfileDefaultModelChip(profile.model || '');
+  _applyProfileDefaultReasoningChip(reasoning);
+  _wireProfileDefaultModelHandlers(profile.name);
 }
 
-// _profileModelGroupsFromComposer is defined earlier in this file
-// (~line 4356) and used by both v2 callers and the v3 chips below.
-// Validator F#17 caught a redundant v3 duplicate here that silently
-// shadowed the more-capable v2 implementation; removed.
-
-function _applyProfileRuntimeProviderChipV3(providerValue){
-  const label = $('profileRuntimeProviderLabel');
-  const chip = $('profileRuntimeProviderChip');
-  const human = providerValue || 'Auto · default';
-  if (label) label.textContent = human;
-  if (chip) {
-    chip.dataset.provider = providerValue || '';
-    chip.title = 'Provider scope: ' + human;
+function _populateProfileDefaultModelSelect(profile){
+  // Mirror #modelSelect's optgroups into the profile's hidden select so the
+  // composer's renderer (renderModelDropdown) sees the same catalog when
+  // called with opts pointing at this select.
+  const sel = $('profileDefaultModelSelect');
+  const composerSel = $('modelSelect');
+  if (!sel || !composerSel) return;
+  sel.innerHTML = '';
+  for (const child of Array.from(composerSel.children)) {
+    if (child.tagName === 'OPTGROUP') {
+      const og = document.createElement('optgroup');
+      og.label = child.label || '';
+      if (child.dataset && child.dataset.provider) og.dataset.provider = child.dataset.provider;
+      for (const opt of Array.from(child.children)) {
+        const o = document.createElement('option');
+        o.value = opt.value;
+        o.textContent = opt.textContent;
+        og.appendChild(o);
+      }
+      sel.appendChild(og);
+    } else if (child.tagName === 'OPTION') {
+      const o = document.createElement('option');
+      o.value = child.value;
+      o.textContent = child.textContent;
+      sel.appendChild(o);
+    }
+  }
+  // Seed the value to the profile's current model so renderModelDropdown's
+  // .active row highlight lands on the right row.
+  const current = profile.model || '';
+  if (current && typeof _applyModelToDropdown === 'function') {
+    _applyModelToDropdown(current, sel, profile.provider || null);
+  } else if (current) {
+    sel.value = current;
   }
 }
 
-function _applyProfileRuntimeModelChipV3(modelValue, providerHint){
-  const label = $('profileRuntimeModelLabel');
-  const chip = $('profileRuntimeModelChip');
-  const text = modelValue ? (typeof getModelLabel === 'function' ? getModelLabel(modelValue) : modelValue) : 'Select model…';
+function _applyProfileDefaultModelChip(modelValue){
+  const label = $('profileDefaultModelLabel');
+  const chip = $('profileDefaultModelChip');
+  const text = modelValue
+    ? (typeof getModelLabel === 'function' ? getModelLabel(modelValue) : modelValue)
+    : 'Select model…';
   if (label) label.textContent = text;
   if (chip) {
     chip.dataset.modelValue = modelValue || '';
-    chip.dataset.modelProvider = providerHint || '';
-    chip.title = 'Profile default model: ' + text;
+    chip.title = 'Default model: ' + text;
   }
 }
 
-function _applyProfileRuntimeReasoningChipV3(effort){
+function _applyProfileDefaultReasoningChip(effort){
   const norm = String(effort || '').trim().toLowerCase();
-  const label = $('profileRuntimeReasoningLabel');
-  const chip = $('profileRuntimeReasoningChip');
-  const display = (_PROFILE_REASONING_OPTS_V3.find(([v]) => v === norm) || ['', 'Default'])[1];
-  if (label) label.textContent = display;
-  if (chip) chip.dataset.effort = norm;
-}
-
-function _setProfileRuntimeStatusV3(tone, msg){
-  const pill = $('profileRuntimeStatusPill');
-  const dot = $('opsRuntimeDot');
-  const state = $('opsRuntimeState');
-  if (pill) pill.dataset.tone = tone || 'muted';
-  if (dot) {
-    dot.classList.remove('ok', 'warn', 'off');
-    dot.classList.add(tone === 'warn' ? 'warn' : tone === 'off' ? 'off' : 'ok');
+  const label = $('profileDefaultReasoningLabel');
+  const chip = $('profileDefaultReasoningChip');
+  if (!label || !chip) return;
+  // Composer parity: chip shows "Default" when no override is set, else the
+  // effort label. Same as _formatReasoningEffortLabel() in ui.js.
+  let display = 'Default';
+  if (norm) {
+    const entry = _PROFILE_DEFAULT_REASONING_OPTS.find(([v]) => v === norm);
+    display = entry ? entry[1] : norm;
   }
-  if (state) state.textContent = msg || 'Saved';
+  label.textContent = display;
+  chip.dataset.effort = norm;
+  const inactive = !norm || norm === 'none';
+  chip.classList.toggle('inactive', inactive);
 }
 
-function _wireProfileRuntimeChipHandlersV3(profileName){
-  const providerChip = $('profileRuntimeProviderChip');
-  const modelChip = $('profileRuntimeModelChip');
-  const reasoningChip = $('profileRuntimeReasoningChip');
-  if (providerChip) providerChip.onclick = (ev) => { ev.stopPropagation(); _toggleProfileRuntimeDropdownV3('provider', profileName); };
-  if (modelChip)    modelChip.onclick    = (ev) => { ev.stopPropagation(); _toggleProfileRuntimeDropdownV3('model', profileName); };
-  if (reasoningChip)reasoningChip.onclick= (ev) => { ev.stopPropagation(); _toggleProfileRuntimeDropdownV3('reasoning', profileName); };
-  const apply = $('opsRuntimeApply');
-  if (apply) apply.onclick = () => _persistProfileRuntimeV3(profileName);
+function _wireProfileDefaultModelHandlers(profileName){
+  const modelChip = $('profileDefaultModelChip');
+  const reasoningChip = $('profileDefaultReasoningChip');
+  if (modelChip) {
+    modelChip.onclick = (ev) => { ev.stopPropagation(); _toggleProfileDefaultModelDropdown(profileName); };
+  }
+  if (reasoningChip) {
+    reasoningChip.onclick = (ev) => { ev.stopPropagation(); _toggleProfileDefaultReasoningDropdown(profileName); };
+  }
 }
 
-function _closeAllProfileRuntimeDropdownsV3(){
-  ['profileRuntimeProviderDropdown', 'profileRuntimeModelDropdown', 'profileRuntimeReasoningDropdown']
-    .forEach(id => { const el = $(id); if (el) el.classList.remove('open'); });
-  ['profileRuntimeProviderChip', 'profileRuntimeModelChip', 'profileRuntimeReasoningChip']
-    .forEach(id => { const el = $(id); if (el) el.classList.remove('active'); });
+function _closeProfileDefaultDropdowns(){
+  ['profileDefaultModelDropdown', 'profileDefaultReasoningDropdown'].forEach(id => {
+    const el = $(id); if (el) el.classList.remove('open');
+  });
+  ['profileDefaultModelChip', 'profileDefaultReasoningChip'].forEach(id => {
+    const el = $(id); if (el) el.classList.remove('active');
+  });
 }
 
-function _toggleProfileRuntimeDropdownV3(kind, profileName){
-  const map = {
-    provider:  ['profileRuntimeProviderDropdown',  'profileRuntimeProviderChip',  _renderProfileRuntimeProviderDropdownV3],
-    model:     ['profileRuntimeModelDropdown',     'profileRuntimeModelChip',     _renderProfileRuntimeModelDropdownV3],
-    reasoning: ['profileRuntimeReasoningDropdown', 'profileRuntimeReasoningChip', _renderProfileRuntimeReasoningDropdownV3],
-  };
-  const [ddId, chipId, render] = map[kind] || [];
-  const dd = $(ddId), chip = $(chipId);
-  if (!dd || !chip) return;
-  if (dd.classList.contains('open')) { _closeAllProfileRuntimeDropdownsV3(); return; }
+function _toggleProfileDefaultModelDropdown(profileName){
+  const dd = $('profileDefaultModelDropdown');
+  const chip = $('profileDefaultModelChip');
+  const sel = $('profileDefaultModelSelect');
+  if (!dd || !chip || !sel) return;
+  if (dd.classList.contains('open')) { _closeProfileDefaultDropdowns(); return; }
+  // Close any other dropdowns in the page first so two pickers can't be
+  // open simultaneously.
   if (typeof closeModelDropdown === 'function') closeModelDropdown();
   if (typeof closeReasoningDropdown === 'function') closeReasoningDropdown();
-  _closeAllProfileRuntimeDropdownsV3();
-  render(profileName);
+  _closeProfileDefaultDropdowns();
+  // Use the composer's parameterised picker — same search input, configured
+  // badges, group headings with counts, custom-ID row. (The hidden select
+  // is the canonical source of truth for the renderer.)
+  renderModelDropdown({
+    select: sel,
+    dropdown: dd,
+    onSelect: (value) => _onProfileDefaultModelPicked(profileName, value),
+    onClose: () => _closeProfileDefaultDropdowns(),
+    scopeNote: "Used for new sessions in this profile — won't affect active conversations.",
+  });
   dd.classList.add('open');
   chip.classList.add('active');
 }
 
-function _renderProfileRuntimeProviderDropdownV3(profileName){
-  const dd = $('profileRuntimeProviderDropdown');
-  if (!dd) return;
-  const groups = _profileModelGroupsFromComposer();
-  const rows = [`<div class="model-row" data-value=""><span class="model-name">Auto · default</span></div>`];
-  for (const g of groups) {
-    const label = esc(g.label || g.provider || 'Models');
-    const count = g.models.length;
-    rows.push(`<div class="model-row" data-value="${esc(g.provider)}"><span class="model-name">${label}</span><span class="model-id" style="opacity:.55">${count} model${count === 1 ? '' : 's'}</span></div>`);
+async function _onProfileDefaultModelPicked(profileName, value){
+  const sel = $('profileDefaultModelSelect');
+  if (!sel) { _closeProfileDefaultDropdowns(); return; }
+  // Mirror selectModelFromDropdown's custom-model handling: if the value
+  // isn't an existing option (custom ID typed into the picker's input),
+  // append a temporary option so sel.value sticks.
+  if (!Array.from(sel.options).some(o => o.value === value)) {
+    const opt = document.createElement('option');
+    opt.value = value;
+    opt.textContent = getModelLabel(value);
+    opt.dataset.custom = '1';
+    sel.querySelectorAll('option[data-custom]').forEach(o => o.remove());
+    sel.appendChild(opt);
   }
-  dd.innerHTML = `<div class="model-list">${rows.join('')}</div>`;
-  dd.querySelectorAll('[data-value]').forEach(row => {
-    row.onclick = () => {
-      const v = row.dataset.value || '';
-      _closeAllProfileRuntimeDropdownsV3();
-      _selectProfileRuntimeProviderV3(profileName, v);
-    };
-  });
+  sel.value = value;
+  _applyProfileDefaultModelChip(value);
+  _closeProfileDefaultDropdowns();
+  await _persistProfileDefaultModel(profileName);
 }
 
-function _selectProfileRuntimeProviderV3(profileName, providerValue){
-  _applyProfileRuntimeProviderChipV3(providerValue);
-  // Clear the model chip if its current model isn't in the new provider's group.
-  const modelChip = $('profileRuntimeModelChip');
-  if (modelChip && providerValue) {
-    const currentProvider = modelChip.dataset.modelProvider || '';
-    if (currentProvider && currentProvider !== providerValue) {
-      _applyProfileRuntimeModelChipV3('', providerValue);
-    }
-  }
-  _setProfileRuntimeStatusV3('warn', 'Unsaved');
-}
-
-function _renderProfileRuntimeModelDropdownV3(profileName){
-  const dd = $('profileRuntimeModelDropdown');
-  if (!dd) return;
-  const providerChip = $('profileRuntimeProviderChip');
-  const providerFilter = providerChip ? (providerChip.dataset.provider || '') : '';
-  const groups = _profileModelGroupsFromComposer();
-  const html = [];
-  for (const g of groups) {
-    if (providerFilter && g.provider !== providerFilter) continue;
-    html.push(`<div class="model-group-label">${esc(g.label || g.provider || 'Models')}</div>`);
-    for (const m of g.models) {
-      html.push(`<div class="model-row" data-value="${esc(m.value)}" data-provider="${esc(m.provider || '')}"><span class="model-name">${esc(m.label)}</span><span class="model-id" style="opacity:.55">${esc(m.value)}</span></div>`);
-    }
-  }
-  dd.innerHTML = `<div class="model-list">${html.join('') || '<div class="model-row"><span class="model-name" style="color:var(--muted)">No models for this provider.</span></div>'}</div>`;
-  dd.querySelectorAll('[data-value]').forEach(row => {
-    row.onclick = () => {
-      const value = row.dataset.value || '';
-      const provider = row.dataset.provider || '';
-      _closeAllProfileRuntimeDropdownsV3();
-      _applyProfileRuntimeModelChipV3(value, provider);
-      // If no provider chip was set yet, adopt the chosen model's provider so
-      // the saved profile retains its origin (matches composer behaviour).
-      if (!providerFilter && provider) _applyProfileRuntimeProviderChipV3(provider);
-      _setProfileRuntimeStatusV3('warn', 'Unsaved');
-    };
-  });
-}
-
-function _renderProfileRuntimeReasoningDropdownV3(profileName){
-  const dd = $('profileRuntimeReasoningDropdown');
-  if (!dd) return;
-  const chip = $('profileRuntimeReasoningChip');
-  const current = chip ? (chip.dataset.effort || '') : '';
-  const rows = _PROFILE_REASONING_OPTS_V3.map(([value, label]) =>
-    `<div class="model-row${value === current ? ' selected' : ''}" data-value="${esc(value)}"><span class="model-name">${esc(label)}</span></div>`
+function _toggleProfileDefaultReasoningDropdown(profileName){
+  const dd = $('profileDefaultReasoningDropdown');
+  const chip = $('profileDefaultReasoningChip');
+  if (!dd || !chip) return;
+  if (dd.classList.contains('open')) { _closeProfileDefaultDropdowns(); return; }
+  if (typeof closeModelDropdown === 'function') closeModelDropdown();
+  if (typeof closeReasoningDropdown === 'function') closeReasoningDropdown();
+  _closeProfileDefaultDropdowns();
+  // Build the dropdown body — identical option set to the chat composer's
+  // #composerReasoningDropdown (.reasoning-option rows by data-effort).
+  const current = chip.dataset.effort || '';
+  const rows = _PROFILE_DEFAULT_REASONING_OPTS.map(([value, label]) =>
+    `<div class="reasoning-option${value === current ? ' selected' : ''}" data-effort="${esc(value)}">${esc(label)}</div>`
   );
-  dd.innerHTML = `<div class="model-list">${rows.join('')}</div>`;
-  dd.querySelectorAll('[data-value]').forEach(row => {
-    row.onclick = () => {
-      const v = row.dataset.value || '';
-      _closeAllProfileRuntimeDropdownsV3();
-      _applyProfileRuntimeReasoningChipV3(v);
-      _setProfileRuntimeStatusV3('warn', 'Unsaved');
+  dd.innerHTML = rows.join('');
+  dd.querySelectorAll('.reasoning-option').forEach(row => {
+    row.onclick = (ev) => {
+      ev.stopPropagation();
+      const v = row.dataset.effort || '';
+      _applyProfileDefaultReasoningChip(v);
+      _closeProfileDefaultDropdowns();
+      _persistProfileDefaultModel(profileName);
     };
   });
+  dd.classList.add('open');
+  chip.classList.add('active');
 }
 
-async function _persistProfileRuntimeV3(profileName){
-  const providerChip = $('profileRuntimeProviderChip');
-  const modelChip = $('profileRuntimeModelChip');
-  const reasoningChip = $('profileRuntimeReasoningChip');
+async function _persistProfileDefaultModel(profileName){
+  const modelChip = $('profileDefaultModelChip');
+  const reasoningChip = $('profileDefaultReasoningChip');
+  const sel = $('profileDefaultModelSelect');
+  const modelValue = modelChip ? (modelChip.dataset.modelValue || '') : '';
+  // Derive the provider from the chosen model (its option's optgroup) the
+  // same way the chat composer does — _modelStateForSelect handles both
+  // explicit @provider:model values and optgroup-tagged options.
+  const modelState = (sel && typeof _modelStateForSelect === 'function')
+    ? _modelStateForSelect(sel, modelValue)
+    : { model: modelValue, model_provider: null };
   const body = {
     name: profileName,
-    provider: providerChip ? (providerChip.dataset.provider || '') : '',
-    model: modelChip ? (modelChip.dataset.modelValue || '') : '',
+    model: modelState.model || modelValue,
+    provider: modelState.model_provider || null,
     reasoning_effort: reasoningChip ? (reasoningChip.dataset.effort || '') : '',
   };
-  _setProfileRuntimeStatusV3('muted', 'Saving…');
   try {
-    await api('/api/profile/settings', { method: 'POST', body: JSON.stringify(body) });
-    _setProfileRuntimeStatusV3('ok', 'Saved');
-    // Refresh list so the profile row reflects new model/provider on the card.
+    const updated = await api('/api/profile/settings', { method: 'POST', body: JSON.stringify(body) });
+    // Update the profiles cache so the profile card reflects the new
+    // model/provider without an extra fetch.
+    const p = (_profilesCache && Array.isArray(_profilesCache.profiles))
+      ? _profilesCache.profiles.find(x => x.name === profileName) : null;
+    if (p) Object.assign(p, updated);
+    if (_currentProfileDetail && _currentProfileDetail.name === profileName) {
+      Object.assign(_currentProfileDetail, updated);
+    }
+    // If we're editing the active profile and no chat session has been
+    // started yet, mirror onto the chat composer's #modelSelect so the
+    // composer chip updates without a reload — matches the legacy
+    // _saveProfileModelSettings behaviour.
+    const isActive = (S.activeProfile || (_profilesCache && _profilesCache.active) || 'default') === profileName;
+    if (isActive) {
+      const composerSel = $('modelSelect');
+      if (composerSel && updated.model && typeof _applyModelToDropdown === 'function') {
+        const resolved = _applyModelToDropdown(updated.model, composerSel, updated.provider || null) || updated.model;
+        if (S.session && !(S.messages && S.messages.length)) {
+          S.session.model = resolved;
+          S.session.model_provider = updated.provider || modelState.model_provider || null;
+        }
+        if (typeof syncModelChip === 'function') syncModelChip();
+        if (typeof syncTopbar === 'function') syncTopbar();
+      }
+    }
     if (typeof loadProfilesPanel === 'function') await loadProfilesPanel();
   } catch (e) {
-    _setProfileRuntimeStatusV3('warn', 'Save failed');
-    showToast('Runtime save failed: ' + (e.message || e));
+    showToast('Default model save failed: ' + (e.message || e));
   }
 }
 
-// Click-outside / Escape closes runtime dropdowns.
+// Click-outside / Escape closes the default-model dropdowns.
 document.addEventListener('click', (ev) => {
-  if (!ev.target.closest('.profile-runtime-chip-wrap')) _closeAllProfileRuntimeDropdownsV3();
+  if (!ev.target.closest('.profile-default-model-wrap')) _closeProfileDefaultDropdowns();
 });
 document.addEventListener('keydown', (ev) => {
-  if (ev.key === 'Escape') _closeAllProfileRuntimeDropdownsV3();
+  if (ev.key === 'Escape') _closeProfileDefaultDropdowns();
 });
 
 // ── Skills tile — top-3 enabled chips ──────────────────────────────────

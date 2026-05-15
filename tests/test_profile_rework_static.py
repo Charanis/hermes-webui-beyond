@@ -82,7 +82,7 @@ def test_v3_helpers_defined():
         "_profileFilesSection",
         "_hydrateProfileDescription",
         "_hydrateProfileActivity",
-        "_hydrateProfileRuntimeChips",
+        "_hydrateProfileDefaultModel",
         "_loadProfileSkillsTile",
     ):
         assert f"function {helper}" in PANELS_JS, f"missing helper {helper}"
@@ -191,24 +191,109 @@ def test_activity_hydrator_writes_into_hero_slot():
     assert "open-activity" not in fn
 
 
-# ── Runtime panel ─────────────────────────────────────────────────────────
+# ── Default-model tile (rework 2026-05-15) ────────────────────────────────
 
 
-def test_runtime_panel_has_three_composer_chips():
+def test_default_model_tile_title_and_subtitle():
     fn = _extract_function(PANELS_JS, "_profileRuntimePanel")
-    assert "profileRuntimeProviderChip" in fn, "Provider chip missing"
-    assert "profileRuntimeModelChip" in fn, "Model chip missing"
-    assert "profileRuntimeReasoningChip" in fn, "Reasoning chip missing"
-    # All three use the chat composer's chip class.
-    chip_class_count = fn.count("composer-model-chip")
-    assert chip_class_count >= 3, \
-        f"expected at least 3 .composer-model-chip uses in runtime panel, got {chip_class_count}"
+    # New tile title is "Default model" (descriptive), subtitle explains scope.
+    assert ">Default model<" in fn, "tile title must be 'Default model'"
+    assert "Used for new sessions in this profile" in fn, \
+        "tile must surface the 'won't affect active conversations' subtitle"
+    assert "profile-default-model-subtitle" in fn, \
+        "subtitle must use the dedicated CSS class for muted styling"
 
 
-def test_provider_chip_reuses_composer_dropdown_styling():
+def test_default_model_tile_has_two_composer_chips_only():
+    """Drop from 3 chips (provider/model/reasoning) to 2 (model/reasoning).
+    Provider is inferred from the chosen model — no separate provider chip."""
     fn = _extract_function(PANELS_JS, "_profileRuntimePanel")
-    assert "model-dropdown profile-runtime-dropdown" in fn, \
-        "Runtime dropdown must reuse .model-dropdown chrome from the chat composer"
+    assert "profileDefaultModelChip" in fn, "Model chip missing"
+    assert "profileDefaultReasoningChip" in fn, "Reasoning chip missing"
+    # No provider chip — was profileRuntimeProviderChip in v3.
+    assert "profileRuntimeProviderChip" not in fn, \
+        "Provider chip must be removed — provider is inferred from the chosen model"
+    assert "profileDefaultProviderChip" not in fn, \
+        "Provider chip must be removed entirely"
+    # Both chips share the chat composer's chrome.
+    assert "composer-model-chip" in fn
+    # The model dropdown reuses the composer's .model-dropdown chrome (same renderer).
+    assert "model-dropdown profile-default-model-dropdown" in fn, \
+        "Model dropdown must reuse .model-dropdown chrome from the chat composer"
+    # Reasoning dropdown reuses the composer's .composer-reasoning-dropdown chrome.
+    assert "composer-reasoning-dropdown profile-default-reasoning-dropdown" in fn, \
+        "Reasoning dropdown must reuse the chat composer's .composer-reasoning-dropdown"
+
+
+def test_default_model_tile_drops_apply_diagnostics_and_status_pill():
+    """Auto-save flow — no Apply button, no Diagnostics, no status pill, no
+    'Saved' diode. The tile is always saved by construction."""
+    fn = _extract_function(PANELS_JS, "_profileRuntimePanel")
+    # No Apply button (was id="opsRuntimeApply").
+    assert "opsRuntimeApply" not in fn
+    assert ">Apply<" not in fn
+    # No Diagnostics button.
+    assert 'data-ops-action="diagnostics"' not in fn
+    assert ">Diagnostics<" not in fn
+    # No status pill ids.
+    assert "profileRuntimeStatusPill" not in fn
+    assert "opsRuntimeDot" not in fn
+    assert "opsRuntimeState" not in fn
+    # No "Saved" diode label.
+    assert ">Saved<" not in fn
+
+
+def test_default_model_tile_includes_hidden_select_mirror():
+    """The parameterised composer picker reads optgroups from a <select>
+    mirror. The tile must include #profileDefaultModelSelect so
+    renderModelDropdown({select: …}) has a catalog to walk."""
+    fn = _extract_function(PANELS_JS, "_profileRuntimePanel")
+    assert 'id="profileDefaultModelSelect"' in fn
+
+
+def test_default_model_dropdown_uses_parameterised_composer_renderer():
+    """The model picker should call the chat composer's actual renderer
+    (renderModelDropdown) with opts pointing at the tile's own select +
+    dropdown, NOT a stripped-down knockoff."""
+    fn = _extract_function(PANELS_JS, "_toggleProfileDefaultModelDropdown")
+    # Must invoke renderModelDropdown with an opts object.
+    assert "renderModelDropdown({" in fn, \
+        "_toggleProfileDefaultModelDropdown must call renderModelDropdown with opts"
+    assert "select: sel" in fn or "select:sel" in fn, \
+        "renderModelDropdown opts must pass the tile's select"
+    assert "dropdown: dd" in fn or "dropdown:dd" in fn, \
+        "renderModelDropdown opts must pass the tile's dropdown"
+    assert "onSelect" in fn, "renderModelDropdown opts must wire onSelect to the auto-save path"
+
+
+def test_render_model_dropdown_is_parameterised():
+    """renderModelDropdown() in ui.js must accept an opts object so other
+    surfaces can reuse it without it hard-coding the chat composer's
+    DOM ids."""
+    ui_js = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+    fn = _extract_function(ui_js, "renderModelDropdown")
+    # The signature accepts opts (back-compat: with no args, behaviour is
+    # identical to the legacy call).
+    assert re.search(r"function renderModelDropdown\(\s*opts\s*\)", fn), \
+        "renderModelDropdown must accept an optional opts argument"
+    # When opts.dropdown / opts.select are passed, they override the
+    # composer globals.
+    assert "opts && opts.dropdown" in fn
+    assert "opts && opts.select" in fn
+    assert "opts.onSelect" in fn or "typeof opts.onSelect" in fn
+
+
+def test_persist_profile_default_model_posts_to_settings():
+    """Auto-save path POSTs to /api/profile/settings with name/model/
+    provider/reasoning_effort."""
+    fn = _extract_function(PANELS_JS, "_persistProfileDefaultModel")
+    assert "/api/profile/settings" in fn
+    assert "reasoning_effort" in fn
+    # Provider is derived via _modelStateForSelect from the chosen model.
+    assert "_modelStateForSelect" in fn
+    # No status pill writes (the tile has no pill).
+    assert "opsRuntimeDot" not in fn
+    assert "Saving" not in fn  # no "Saving…" indicator
 
 
 # ── Gateway tile ──────────────────────────────────────────────────────────
