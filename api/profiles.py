@@ -2373,12 +2373,7 @@ def _default_gateway_control(name: str, action: str) -> dict:
             if action == 'stop':
                 _gw.stop_profile_gateway()
                 return {'ok': True, 'running': False}
-            if action in ('start', 'restart'):
-                if action == 'restart':
-                    try:
-                        _gw.stop_profile_gateway()
-                    except Exception:  # noqa: BLE001 — best-effort stop
-                        logger.debug("stop during restart raised — continuing", exc_info=True)
+            if action == 'start':
                 _spawn_gateway()
                 return {'ok': True, 'running': True}
             raise ValueError(f"unknown gateway action: {action!r}")
@@ -2545,17 +2540,21 @@ def _status_payload(
 
 
 def profile_gateway_control_api(name: str, action: str) -> dict:
-    """Start, restart, or stop the gateway for a named profile.
+    """Start or stop the gateway for a named profile.
 
-    Degrades honestly: returns ``{ok: False, ...}`` when no safe backend
-    wrapper is available, instead of pretending success.
+    Writes phase ('starting' or 'stopping') to .gateway-state.json BEFORE
+    invoking the runner so a concurrent status poll sees the transient
+    phase even if the runner blocks. On failure the phase becomes
+    'failed' and the sanitized exception is stored as last_error.
+
+    The 'restart' action is no longer accepted — clients should issue
+    stop then start (the toggle UX does this implicitly).
     """
     _validate_profile_settings_name(name)
     action = (action or '').strip().lower()
-    if action not in ('start', 'restart', 'stop'):
-        raise ValueError("action must be one of: start, restart, stop")
+    if action not in ('start', 'stop'):
+        raise ValueError("action must be one of: start, stop")
 
-    # Confirm the profile actually exists (FileNotFoundError -> 404 from caller).
     if _is_root_profile(name):
         profile_home = _DEFAULT_HERMES_HOME
     else:
@@ -2563,46 +2562,52 @@ def profile_gateway_control_api(name: str, action: str) -> dict:
     if not profile_home.is_dir():
         raise FileNotFoundError(f"Profile '{name}' not found.")
 
+    # Stamp the transient phase BEFORE invoking the runner so a racing
+    # status poll observes the in-flight transition.
+    transient_phase = 'starting' if action == 'start' else 'stopping'
+    _write_gateway_phase(profile_home, transient_phase)
+
+    def _record_failure(exc: Exception) -> dict:
+        message = _sanitize_gateway_message(str(exc))
+        _write_gateway_phase(profile_home, 'failed', last_error=message)
+        return {
+            'ok': False,
+            'profile': name,
+            'action': action,
+            'phase': 'failed',
+            'running': False,
+            'configured': False,
+            'message': message,
+        }
+
     if _gateway_control_hook is not None:
         try:
             hook_result = _gateway_control_hook(name, action)
         except Exception as exc:  # noqa: BLE001 — surface any test-injected failure
-            return {
-                'ok': False,
-                'profile': name,
-                'action': action,
-                'running': False,
-                'configured': False,
-                'message': _sanitize_gateway_message(str(exc)),
-            }
+            return _record_failure(exc)
         if not isinstance(hook_result, dict):
             hook_result = {'ok': True, 'running': action != 'stop'}
         hook_result.setdefault('ok', True)
         hook_result.setdefault('profile', name)
         hook_result.setdefault('action', action)
         hook_result.setdefault('configured', True)
-        if hook_result.get('ok') and action in ('start', 'restart'):
+        hook_result.setdefault('phase', transient_phase)
+        if hook_result.get('ok') and action == 'start':
             _write_gateway_last_run(profile_home)
         return hook_result
 
     try:
         result = _default_gateway_control(name, action)
     except Exception as exc:  # noqa: BLE001 — keep error surface narrow + safe
-        return {
-            'ok': False,
-            'profile': name,
-            'action': action,
-            'running': False,
-            'configured': False,
-            'message': _sanitize_gateway_message(str(exc)),
-        }
+        return _record_failure(exc)
     if not isinstance(result, dict):
         result = {'ok': True, 'running': action != 'stop'}
     result.setdefault('ok', True)
     result.setdefault('profile', name)
     result.setdefault('action', action)
     result.setdefault('configured', True)
-    if result.get('ok') and action in ('start', 'restart'):
+    result.setdefault('phase', transient_phase)
+    if result.get('ok') and action == 'start':
         _write_gateway_last_run(profile_home)
     return result
 

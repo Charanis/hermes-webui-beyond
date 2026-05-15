@@ -195,8 +195,13 @@ def test_gateway_stop_does_not_overwrite_last_run_at():
         assert state["last_run_at"] == "2026-05-01T12:00:00Z"
 
 
-def test_gateway_failed_start_does_not_write_state():
-    """If the hook raises, the start "failed" — no state write."""
+def test_gateway_failed_start_does_not_write_last_run_at():
+    """If the hook raises, the start "failed" — last_run_at must NOT be
+    written. The state file itself now exists (phase='failed' is recorded
+    by the pre-action phase write + failure handler in Task 3), but the
+    successful-run timestamp must remain absent so the activity line
+    doesn't mislead readers into thinking the gateway started."""
+    import json as _json
     with tempfile.TemporaryDirectory() as td:
         base = Path(td) / ".hermes"
         (base / "profiles").mkdir(parents=True)
@@ -213,7 +218,12 @@ def test_gateway_failed_start_does_not_write_state():
             profiles._set_gateway_control_hook(None)
 
         assert result["ok"] is False
-        assert not (profile_dir / ".gateway-state.json").exists()
+        # State file exists (phase='failed') but last_run_at must be absent.
+        state_path = profile_dir / ".gateway-state.json"
+        assert state_path.exists()
+        state = _json.loads(state_path.read_text(encoding="utf-8"))
+        assert state.get("phase") == "failed"
+        assert "last_run_at" not in state
 
 
 # ── T5: default backend dispatch (replaces import-based fallback) ─────────────
@@ -355,7 +365,10 @@ def test_default_backend_start_spawns_subprocess(monkeypatch):
             assert kwargs.get("start_new_session") is True
 
 
-def test_default_backend_restart_stops_then_spawns(monkeypatch):
+def test_default_backend_rejects_restart_action(monkeypatch):
+    """Task 3 dropped 'restart' from the default backend. The dispatch must
+    raise ValueError without invoking stop or spawn — clients should issue
+    stop-then-start instead (toggle off+on at the UI layer)."""
     with tempfile.TemporaryDirectory() as td:
         base = Path(td) / ".hermes"
         (base / "profiles").mkdir(parents=True)
@@ -381,8 +394,10 @@ def test_default_backend_restart_stops_then_spawns(monkeypatch):
         )
         monkeypatch.setattr('subprocess.Popen', FakePopen)
 
-        profiles._default_gateway_control("coder", "restart")
-        assert events == ["stop", "spawn"]
+        with pytest.raises(ValueError):
+            profiles._default_gateway_control("coder", "restart")
+        # Neither stop nor spawn should have been invoked.
+        assert events == []
 
 
 def test_default_backend_shields_systemexit(monkeypatch):
@@ -464,3 +479,82 @@ def test_default_backend_start_uses_resolvable_hermes_binary(monkeypatch):
         )
         # The trailing args remain unchanged.
         assert args[-2:] == ['gateway', 'run']
+
+
+def test_control_rejects_restart_action():
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        _seed_named_profile(base, "coder")
+        profiles = _reload_profiles_module(base)
+        with pytest.raises(ValueError):
+            profiles.profile_gateway_control_api("coder", "restart")
+
+
+def test_start_action_writes_starting_phase_before_returning():
+    import json
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        profile = _seed_named_profile(base, "coder")
+        profiles = _reload_profiles_module(base)
+
+        def fake_hook(name, action):
+            # By the time the hook is called, phase must already be 'starting'.
+            data = json.loads((profile / ".gateway-state.json").read_text())
+            assert data["phase"] == "starting"
+            assert isinstance(data["phase_started_at"], str)
+            return {"ok": True, "running": True}
+
+        profiles._set_gateway_control_hook(fake_hook)
+        try:
+            result = profiles.profile_gateway_control_api("coder", "start")
+            assert result["ok"] is True
+            assert result.get("phase") == "starting"
+        finally:
+            profiles._set_gateway_control_hook(None)
+
+
+def test_stop_action_writes_stopping_phase_before_returning():
+    import json
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        profile = _seed_named_profile(base, "coder")
+        profiles = _reload_profiles_module(base)
+
+        def fake_hook(name, action):
+            data = json.loads((profile / ".gateway-state.json").read_text())
+            assert data["phase"] == "stopping"
+            return {"ok": True, "running": False}
+
+        profiles._set_gateway_control_hook(fake_hook)
+        try:
+            result = profiles.profile_gateway_control_api("coder", "stop")
+            assert result["ok"] is True
+            assert result.get("phase") == "stopping"
+        finally:
+            profiles._set_gateway_control_hook(None)
+
+
+def test_start_failure_writes_failed_phase_with_error():
+    import json
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        profile = _seed_named_profile(base, "coder")
+        profiles = _reload_profiles_module(base)
+
+        def fake_hook(name, action):
+            raise RuntimeError("simulated spawn failure: token=secretvalue")
+
+        profiles._set_gateway_control_hook(fake_hook)
+        try:
+            result = profiles.profile_gateway_control_api("coder", "start")
+            assert result["ok"] is False
+            assert result.get("phase") == "failed"
+            assert "secretvalue" not in (result.get("message") or "")
+            data = json.loads((profile / ".gateway-state.json").read_text())
+            assert data["phase"] == "failed"
+        finally:
+            profiles._set_gateway_control_hook(None)
