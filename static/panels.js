@@ -4629,6 +4629,11 @@ async function loadProfilesPanel() {
 }
 
 function _renderProfileDetail(p, activeName){
+  // Tear down any active gateway poller from a previous render before
+  // re-wiring this one. _renderProfileDetail is called from three paths
+  // (openProfileDetail, loadProfilesPanel periodic refresh, cancelProfileForm
+  // restore) — every path must pass through cleanup to avoid leaked pollers.
+  _stopAllGatewayPollers();
   _currentProfileDetail = p;
   const title = $('profileDetailTitle');
   const body = $('profileDetailBody');
@@ -6082,7 +6087,7 @@ function _bindProfileOpsConsole(p, isActive, isDefault){
     if (st && (st.phase === 'starting' || st.phase === 'stopping')) {
       _startGatewayPoller(profileName);
     }
-  });
+  }).catch(() => {});
 
   // Profile file widgets — scoped to the detail body (review F2).
   if (body) body.querySelectorAll('[data-profile-file]').forEach(btn => {
@@ -6306,7 +6311,7 @@ async function _onGatewayToggle(profileName){
       if (st && (st.phase === 'starting' || st.phase === 'stopping')) {
         _startGatewayPoller(profileName);
       }
-    }), 250);
+    }).catch(() => {}), 250);
   } catch (e) {
     _gatewayStateByProfile.set(profileName, {
       phase: 'failed',
@@ -6450,10 +6455,6 @@ function openProfileDetail(name, el){
   if (!_profilesCache || !_profilesCache.profiles) return;
   const p = _profilesCache.profiles.find(x => x.name === name);
   if (!p) return;
-  // Tear down any active gateway poller from a previous profile-detail view
-  // before we begin rendering the new one (prevents the old profile's poller
-  // from continuing to update state for a tile that no longer exists).
-  _stopAllGatewayPollers();
   document.querySelectorAll('.profile-card').forEach(e => e.classList.remove('active'));
   const target = el || document.querySelector(`.profile-card[data-name="${CSS.escape(name)}"]`);
   if (target) target.classList.add('active');
