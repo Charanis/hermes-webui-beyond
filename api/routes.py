@@ -3850,6 +3850,19 @@ def handle_get(handler, parsed) -> bool:
         with cron_profile_context():
             return _handle_cron_status(handler, parsed)
 
+    if parsed.path == "/api/profile/skills":
+        qs = parse_qs(parsed.query)
+        name = qs.get("name", [""])[0]
+        if not name:
+            return bad(handler, "name required")
+        from api.profiles import profile_skills_api
+        try:
+            return j(handler, profile_skills_api(name))
+        except FileNotFoundError:
+            return bad(handler, "profile not found", status=404)
+        except ValueError as exc:
+            return bad(handler, str(exc), status=400)
+
     # ── Skills API (GET) ──
     if parsed.path == "/api/skills":
         qs = parse_qs(parsed.query)

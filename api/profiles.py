@@ -1742,6 +1742,45 @@ def duplicate_profile_api(name: str, new_name: str, *, clone_all: bool = False) 
     }
 
 
+def profile_skills_api(name: str) -> dict:
+    """Return the list of skills the agent has installed, annotated with
+    whether each is enabled for the named profile.
+
+    Raises FileNotFoundError if the profile does not exist.
+    """
+    _validate_profile_settings_name(name)
+    if _is_root_profile(name):
+        profile_home = _DEFAULT_HERMES_HOME
+    else:
+        profile_home = _resolve_named_profile_home(name)
+    if not profile_home.is_dir():
+        raise FileNotFoundError(f"Profile '{name}' not found.")
+
+    skills_root = _DEFAULT_HERMES_HOME / "skills"
+    enabled_path = profile_home / "skills.enabled.json"
+    enabled_set: set[str] = set()
+    if enabled_path.is_file():
+        try:
+            data = json.loads(enabled_path.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                enabled_set = {str(x) for x in data if isinstance(x, str)}
+        except (ValueError, OSError):
+            enabled_set = set()
+
+    skills: list[dict] = []
+    if skills_root.is_dir():
+        for entry in sorted(skills_root.iterdir(), key=lambda p: p.name.lower()):
+            if not entry.is_dir():
+                continue
+            skill_name = entry.name
+            skills.append({
+                "name": skill_name,
+                "label": skill_name,
+                "enabled": skill_name in enabled_set,
+            })
+    return {"profile": name, "skills": skills}
+
+
 # Gateway control helper override hook — tests monkeypatch this with a fake
 # runner. When set, ``profile_gateway_control_api`` calls it instead of
 # importing ``hermes_cli.gateway``. The hook must return a dict shaped like the
