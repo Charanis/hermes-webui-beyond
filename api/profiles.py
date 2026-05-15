@@ -2381,6 +2381,161 @@ def _default_gateway_control(name: str, action: str) -> dict:
         raise RuntimeError(f"gateway subsystem aborted: {exc}") from exc
 
 
+def _is_pid_alive(pid: int) -> bool:
+    """True if a process with `pid` exists and is signal-able.
+
+    Module-level binding so tests can monkey-patch.
+    """
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # EPERM means the process exists; we just can't signal it.
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _read_gateway_pid(profile_home: Path) -> int | None:
+    """Return the PID from gateway.pid or None if missing/malformed."""
+    pid_path = profile_home / 'gateway.pid'
+    if not pid_path.exists():
+        return None
+    try:
+        raw = pid_path.read_text(encoding='utf-8').strip()
+        pid = int(raw)
+        return pid if pid > 0 else None
+    except (ValueError, OSError):
+        return None
+
+
+def _read_stderr_tail(profile_home: Path, *, max_bytes: int = 5120) -> str:
+    """Return the last `max_bytes` of the gateway stderr log, sanitized."""
+    log_path = profile_home / '.gateway-stderr.log'
+    if not log_path.exists():
+        return ''
+    try:
+        size = log_path.stat().st_size
+        with log_path.open('rb') as fh:
+            if size > max_bytes:
+                fh.seek(size - max_bytes)
+            chunk = fh.read()
+        text = chunk.decode('utf-8', errors='replace')
+    except OSError:
+        return ''
+    return _sanitize_gateway_message(text)
+
+
+def _phase_age_seconds(phase_started_at: str | None) -> float:
+    """Seconds elapsed since phase_started_at; inf when missing/malformed."""
+    if not isinstance(phase_started_at, str):
+        return float('inf')
+    import datetime as _dt
+    try:
+        # Accept trailing 'Z' or explicit offsets.
+        normalized = phase_started_at.replace('Z', '+00:00')
+        started = _dt.datetime.fromisoformat(normalized)
+    except ValueError:
+        return float('inf')
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=_dt.timezone.utc)
+    now = _dt.datetime.now(_dt.timezone.utc)
+    return (now - started).total_seconds()
+
+
+def profile_gateway_status_api(name: str) -> dict:
+    """Return the current gateway phase for `name`, promoting transient
+    phases when the world has caught up to them.
+
+    Promotion rules (first match wins):
+      * phase 'starting' + pid alive  -> 'running'
+      * phase 'starting' + age >= grace + pid dead/missing -> 'failed'
+      * phase 'stopping' + pid gone   -> 'stopped'
+      * phase 'running'  + pid dead   -> 'stopped'  (post-running crash)
+      * phase 'failed' or 'stopped'   -> as-is (sticky)
+
+    Raises:
+        ValueError: invalid profile name.
+        FileNotFoundError: profile directory missing.
+    """
+    _validate_profile_settings_name(name)
+    if _is_root_profile(name):
+        profile_home = _DEFAULT_HERMES_HOME
+    else:
+        profile_home = _resolve_named_profile_home(name)
+    if not profile_home.is_dir():
+        raise FileNotFoundError(f"Profile '{name}' not found.")
+
+    state = _read_gateway_state(profile_home)
+    phase = state.get('phase')
+    phase_started_at = state.get('phase_started_at')
+    pid = _read_gateway_pid(profile_home)
+    pid_alive = _is_pid_alive(pid) if pid else False
+
+    # No phase recorded -> infer from PID liveness only.
+    if not phase:
+        if pid_alive:
+            # PID file with live process but no phase — treat as running.
+            # Synthesize a 'running' state so future polls are consistent.
+            _write_gateway_phase(profile_home, 'running')
+            return _status_payload(name, 'running', pid, None, phase_started_at)
+        return _status_payload(name, 'stopped', None, None, None)
+
+    if phase == 'starting':
+        if pid_alive:
+            _write_gateway_phase(profile_home, 'running')
+            return _status_payload(name, 'running', pid, None, phase_started_at)
+        if _phase_age_seconds(phase_started_at) >= GATEWAY_START_GRACE_SECONDS:
+            tail = _read_stderr_tail(profile_home)
+            err = tail[-500:] if tail else 'gateway failed to start within grace window'
+            _write_gateway_phase(profile_home, 'failed', last_error=err)
+            return _status_payload(name, 'failed', pid, err, phase_started_at)
+        return _status_payload(name, 'starting', pid, None, phase_started_at)
+
+    if phase == 'stopping':
+        if not pid_alive:
+            _write_gateway_phase(profile_home, 'stopped')
+            return _status_payload(name, 'stopped', None, None, None)
+        return _status_payload(name, 'stopping', pid, None, phase_started_at)
+
+    if phase == 'running':
+        if pid_alive:
+            return _status_payload(name, 'running', pid, None, phase_started_at)
+        # Post-running crash — drop to stopped, not failed.
+        _write_gateway_phase(profile_home, 'stopped')
+        return _status_payload(name, 'stopped', None, None, None)
+
+    if phase == 'failed':
+        return _status_payload(
+            name, 'failed', pid, state.get('last_error'), phase_started_at
+        )
+
+    # Unknown phase string -> treat as stopped (defensive).
+    _write_gateway_phase(profile_home, 'stopped')
+    return _status_payload(name, 'stopped', None, None, None)
+
+
+def _status_payload(
+    name: str,
+    phase: str,
+    pid: int | None,
+    last_error: str | None,
+    phase_started_at: str | None,
+) -> dict:
+    return {
+        'ok': True,
+        'profile': name,
+        'phase': phase,
+        'pid': pid,
+        'last_error': last_error,
+        'phase_started_at': phase_started_at,
+    }
+
+
 def profile_gateway_control_api(name: str, action: str) -> dict:
     """Start, restart, or stop the gateway for a named profile.
 
