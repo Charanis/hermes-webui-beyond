@@ -189,6 +189,11 @@ function _consumeSettingsTargetPanel(fallback = 'chat') {
 async function switchPanel(name, opts = {}) {
   const nextPanel = name || 'chat';
   const prevPanel = _currentPanel;
+  // If leaving the skills panel, clear any per-profile scope so a fresh
+  // open via the rail (not via the Manage button) shows the global view.
+  if (prevPanel === 'skills' && nextPanel !== 'skills') {
+    _skillsScope = { profile: null, enabledSet: null };
+  }
   // ── Desktop sidebar collapse toggle (rail-click only) ──
   // If the click came from a rail icon AND we're on desktop, the rail icon
   // does double duty: clicking the already-active panel collapses the sidebar;
@@ -3235,7 +3240,8 @@ function renderSkills(skills) {
         const toggleLabel = document.createElement('label');
         toggleLabel.className = 'skill-row-toggle';
         toggleLabel.innerHTML = '<input type="checkbox" data-skill-toggle="' + esc(skill.name) + '" ' + (isEnabled ? 'checked' : '') + ' aria-label="Enable ' + esc(skill.name) + ' for ' + esc(_skillsScope.profile) + '"><span class="skill-row-toggle__track"></span>';
-        // Stop click on the label/checkbox from triggering the row's openSkill handler.
+        // Label onclick stops the bubble so neither the track span nor the
+        // input's keyboard activation re-fires the row's openSkill handler.
         toggleLabel.onclick = (ev) => ev.stopPropagation();
         el.appendChild(toggleLabel);
       }
@@ -3256,11 +3262,13 @@ function renderSkills(skills) {
   // Attach event listeners after DOM is built.
   // Banner clear button.
   box.querySelectorAll('[data-skills-action="clear-scope"]').forEach(btn => {
-    btn.onclick = () => { _skillsScope = { profile: null, enabledSet: null }; _skillsData = null; loadSkills(); };
+    btn.onclick = () => { _skillsScope = { profile: null, enabledSet: null }; loadSkills(); };
   });
   // Per-skill toggle checkboxes.
   if (scoped) {
     box.querySelectorAll('[data-skill-toggle]').forEach(input => {
+      // TODO: guard with `input.disabled = true` during in-flight request to
+      // prevent rapid-toggle desync between local enabledSet and server state.
       input.onchange = async () => {
         if (!_skillsScope.profile) return;
         const skillName = input.dataset.skillToggle;
