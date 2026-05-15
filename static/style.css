@@ -4011,19 +4011,6 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
   .profile-wifi[data-state="stopping"]{
     animation:profile-gateway-pulse 1.4s ease-in-out infinite;
   }
-  /* Legacy one-shot pulse — preserved for backwards-compat. */
-  .profile-wifi.on.just-started{animation:profile-wifi-pulse 1.2s ease-out 1;}
-}
-/* Legacy 'on' class — kept so any non-v3 site that adds it still works. */
-.profile-wifi.on{
-  color:var(--success);
-  background:color-mix(in srgb,var(--success) 12%,transparent);
-  border-color:color-mix(in srgb,var(--success) 45%,transparent);
-  box-shadow:0 0 0 3px color-mix(in srgb,var(--success) 14%,transparent);
-}
-@keyframes profile-wifi-pulse{
-  0%  {box-shadow:0 0 0 0 color-mix(in srgb,var(--success) 50%,transparent);}
-  100%{box-shadow:0 0 0 12px color-mix(in srgb,var(--success) 0%,transparent);}
 }
 @keyframes profile-gateway-pulse{
   0%,100%{opacity:1;}
