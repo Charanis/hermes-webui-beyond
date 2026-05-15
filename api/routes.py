@@ -3895,11 +3895,13 @@ def handle_get(handler, parsed) -> bool:
             return bad(handler, "name is required")
         try:
             from api.profiles import profile_gateway_status_api
-            return j(handler, profile_gateway_status_api(name))
+            data = profile_gateway_status_api(name)
         except FileNotFoundError as e:
-            return bad(handler, str(e), 404)
+            return bad(handler, _sanitize_error(e), 404)
         except ValueError as e:
-            return bad(handler, str(e), 400)
+            return bad(handler, _sanitize_error(e), 400)
+        # NOTE: promotes transient phases as a side effect; GET is not idempotent here.
+        return j(handler, data)
 
     # ── Skills API (GET) ──
     if parsed.path == "/api/skills":
