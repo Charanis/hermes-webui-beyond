@@ -255,3 +255,30 @@ def test_skill_cache_is_shared_across_profile_calls(profile_home_with_skills, mo
     assert read_calls == [], (
         f"Expected zero SKILL.md reads on cache hit, got {len(read_calls)}: {read_calls}"
     )
+
+
+def test_list_rejects_invalid_profile_name(tmp_path, monkeypatch):
+    home = tmp_path / "hermes_home"
+    (home / "skills").mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_BASE_HOME", str(home))
+    import importlib
+    import api.profiles as profiles_mod
+    importlib.reload(profiles_mod)
+    with pytest.raises(ValueError):
+        profiles_mod.list_profile_skills_api("../escape")
+    with pytest.raises(ValueError):
+        profiles_mod.list_profile_skills_api("")
+
+
+def test_list_raises_for_unknown_named_profile(tmp_path, monkeypatch):
+    home = tmp_path / "hermes_home"
+    (home / "profiles").mkdir(parents=True)
+    (home / "skills").mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_BASE_HOME", str(home))
+    import importlib
+    import api.profiles as profiles_mod
+    importlib.reload(profiles_mod)
+    with pytest.raises(FileNotFoundError):
+        profiles_mod.list_profile_skills_api("ghost-profile")

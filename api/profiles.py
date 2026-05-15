@@ -1805,11 +1805,14 @@ def list_profile_skills_api(name: str) -> dict:
     """
     import yaml as _yaml
 
+    _validate_profile_settings_name(name)
     if _is_root_profile(name):
         profile_home = _DEFAULT_HERMES_HOME
     else:
         profile_home = _resolve_named_profile_home(name)
 
+    if not profile_home.is_dir():
+        raise FileNotFoundError(f"Profile '{name}' not found.")
     skills_dir = profile_home / "skills"
     if not skills_dir.exists():
         return {
