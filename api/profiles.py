@@ -1288,6 +1288,7 @@ def _write_gateway_phase(
     phase: str,
     *,
     last_error: str | None = None,
+    started_at: str | None = None,
 ) -> None:
     """Stamp the gateway phase in .gateway-state.json without clobbering
     sibling fields (e.g. last_run_at).
@@ -1298,6 +1299,12 @@ def _write_gateway_phase(
       'running'   — set phase + phase_started_at + clear last_error
       'failed'    — set phase + phase_started_at + record last_error
       'stopped'   — clear phase, phase_started_at, last_error
+
+    If ``started_at`` is supplied, it is used verbatim for
+    ``phase_started_at`` on the non-stopped phases (preserves the original
+    transition timestamp during promotion). Otherwise a fresh "now" is
+    stamped. The 'stopped' phase always clears ``phase_started_at``
+    regardless of ``started_at``.
     """
     import datetime as _dt
     state_path = profile_home / '.gateway-state.json'
@@ -1311,6 +1318,7 @@ def _write_gateway_phase(
             payload = {}
 
     now_iso = _dt.datetime.now(_dt.timezone.utc).isoformat().replace('+00:00', 'Z')
+    timestamp = started_at if started_at else now_iso
 
     if phase == 'stopped':
         payload['phase'] = None
@@ -1318,11 +1326,11 @@ def _write_gateway_phase(
         payload['last_error'] = None
     elif phase == 'failed':
         payload['phase'] = 'failed'
-        payload['phase_started_at'] = now_iso
+        payload['phase_started_at'] = timestamp
         payload['last_error'] = last_error
     elif phase in ('starting', 'stopping', 'running'):
         payload['phase'] = phase
-        payload['phase_started_at'] = now_iso
+        payload['phase_started_at'] = timestamp
         payload['last_error'] = None
     else:
         raise ValueError(f"unknown gateway phase: {phase!r}")
@@ -2481,17 +2489,17 @@ def profile_gateway_status_api(name: str) -> dict:
         if pid_alive:
             # PID file with live process but no phase — treat as running.
             # Synthesize a 'running' state so future polls are consistent.
-            _write_gateway_phase(profile_home, 'running')
+            _write_gateway_phase(profile_home, 'running', started_at=phase_started_at)
             return _status_payload(name, 'running', pid, None, phase_started_at)
         return _status_payload(name, 'stopped', None, None, None)
 
     if phase == 'starting':
         if pid_alive:
-            _write_gateway_phase(profile_home, 'running')
+            _write_gateway_phase(profile_home, 'running', started_at=phase_started_at)
             return _status_payload(name, 'running', pid, None, phase_started_at)
         if _phase_age_seconds(phase_started_at) >= GATEWAY_START_GRACE_SECONDS:
             tail = _read_stderr_tail(profile_home)
-            err = tail[-500:] if tail else 'gateway failed to start within grace window'
+            err = tail if tail else 'gateway failed to start within grace window'
             _write_gateway_phase(profile_home, 'failed', last_error=err)
             return _status_payload(name, 'failed', pid, err, phase_started_at)
         return _status_payload(name, 'starting', pid, None, phase_started_at)

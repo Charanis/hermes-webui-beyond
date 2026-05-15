@@ -9,7 +9,6 @@ import json
 import os
 import sys
 import tempfile
-import time
 from pathlib import Path
 
 import pytest
@@ -168,7 +167,7 @@ def test_status_running_drops_to_stopped_when_pid_dies():
         result = profiles.profile_gateway_status_api("coder")
         assert result["phase"] == "stopped"
         persisted = json.loads((profile / ".gateway-state.json").read_text())
-        assert persisted.get("phase") in (None, "stopped")
+        assert persisted.get("phase") is None
 
 
 def test_status_stopping_while_pid_alive():
@@ -229,3 +228,47 @@ def test_status_redacts_secrets_in_last_error():
         assert result["phase"] == "failed"
         assert "abc123secret" not in (result["last_error"] or "")
         assert "[redacted]" in (result["last_error"] or "").lower() or "redacted" in (result["last_error"] or "")
+
+
+def test_status_synthesizes_running_when_no_phase_but_pid_alive():
+    """Orphaned-process recovery: PID file exists, process alive, but state
+    file is empty. The status API should synthesize a 'running' state."""
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        profile = _seed_named_profile(base, "coder")
+        profiles = _reload_profiles_module(base)
+        _install_fake_pid_alive(profiles, alive_pids={4242})
+        (profile / "gateway.pid").write_text("4242", encoding="utf-8")
+        # No .gateway-state.json — clean recovery scenario.
+        result = profiles.profile_gateway_status_api("coder")
+        assert result["phase"] == "running"
+        assert result["pid"] == 4242
+        # Synthesized phase is persisted.
+        persisted = json.loads((profile / ".gateway-state.json").read_text())
+        assert persisted["phase"] == "running"
+        assert isinstance(persisted["phase_started_at"], str)
+
+
+def test_status_promotion_preserves_phase_started_at_across_polls():
+    """After 'starting' -> 'running' promotion, the original start
+    timestamp must survive a second poll (regression: do not stamp a
+    fresh timestamp on every read)."""
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        profile = _seed_named_profile(base, "coder")
+        profiles = _reload_profiles_module(base)
+        _install_fake_pid_alive(profiles, alive_pids={5555})
+        (profile / "gateway.pid").write_text("5555", encoding="utf-8")
+        original_started = _past_iso(3)
+        _write_state(profile, phase="starting", phase_started_at=original_started)
+
+        first = profiles.profile_gateway_status_api("coder")
+        assert first["phase"] == "running"
+        assert first["phase_started_at"] == original_started
+
+        # Second poll must read the same (preserved) timestamp.
+        second = profiles.profile_gateway_status_api("coder")
+        assert second["phase"] == "running"
+        assert second["phase_started_at"] == original_started
