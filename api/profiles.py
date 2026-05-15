@@ -2140,6 +2140,34 @@ def _set_gateway_control_hook(fn) -> None:
     _gateway_control_hook = fn
 
 
+def _resolve_hermes_bin() -> str:
+    """Resolve the path to the ``hermes`` CLI entry script.
+
+    The container's PATH does not include the venv's bin dir, so a bare
+    ``'hermes'`` argv[0] fails with FileNotFoundError (swallowed by
+    stderr=DEVNULL — silent failure). The hermes script is always
+    co-located with the running Python interpreter (venvs put entry
+    points next to the interpreter), so derive from ``sys.executable``.
+    Falls back to ``shutil.which`` for unusual layouts.
+    """
+    import shutil as _shutil
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    # 1. Venv-relative lookup — the canonical case inside the container.
+    venv_bin = _Path(_sys.executable).parent
+    for candidate in (venv_bin / 'hermes', venv_bin / 'hermes.exe'):
+        if candidate.is_file():
+            return str(candidate)
+    # 2. shutil.which on the standard PATH.
+    found = _shutil.which('hermes')
+    if found:
+        return found
+    # 3. Last resort — return the bare name and let subprocess raise a
+    #    visible FileNotFoundError instead of silently DEVNULLing.
+    return 'hermes'
+
+
 def _default_gateway_control(name: str, action: str) -> dict:
     """In-process default gateway control backend.
 
@@ -2166,10 +2194,11 @@ def _default_gateway_control(name: str, action: str) -> dict:
         profile_home = _resolve_named_profile_home(name)
 
     def _spawn_gateway() -> None:
-        # Detached background process. Stdout/stderr inherit from parent;
-        # the gateway daemon manages its own logging once running.
+        # Detached background process. Resolve the hermes binary to an
+        # absolute path so it works regardless of the container's PATH.
         # On POSIX: start_new_session=True severs the controlling terminal.
         # On Windows: DETACHED_PROCESS via creationflags.
+        hermes_bin = _resolve_hermes_bin()
         kwargs: dict = {"close_fds": True}
         if _sys.platform == "win32":
             DETACHED_PROCESS = 0x00000008
@@ -2177,13 +2206,31 @@ def _default_gateway_control(name: str, action: str) -> dict:
             kwargs["creationflags"] = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
         else:
             kwargs["start_new_session"] = True
-        _subprocess.Popen(
-            ["hermes", "gateway", "run"],
-            stdin=_subprocess.DEVNULL,
-            stdout=_subprocess.DEVNULL,
-            stderr=_subprocess.DEVNULL,
-            **kwargs,
-        )
+        # Surface gateway-spawn errors to a per-profile log instead of
+        # DEVNULL — silent failure here was what hid the wrong-PATH bug.
+        log_path = profile_home / ".gateway-stderr.log"
+        log_fh = None
+        try:
+            log_fh = open(log_path, "a", encoding="utf-8", buffering=1)  # noqa: WPS515
+        except OSError:
+            pass  # Best-effort logging only.
+        try:
+            _subprocess.Popen(
+                [hermes_bin, "gateway", "run"],
+                stdin=_subprocess.DEVNULL,
+                stdout=log_fh if log_fh else _subprocess.DEVNULL,
+                stderr=log_fh if log_fh else _subprocess.DEVNULL,
+                **kwargs,
+            )
+        finally:
+            # Close the parent's end of the log file handle after Popen
+            # inherits (duplicates) it into the child. Keeps the file
+            # unlocked in the parent process on Windows.
+            if log_fh is not None:
+                try:
+                    log_fh.close()
+                except OSError:
+                    pass
 
     try:
         with cron_profile_context_for_home(profile_home):

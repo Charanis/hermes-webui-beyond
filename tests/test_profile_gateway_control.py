@@ -342,7 +342,12 @@ def test_default_backend_start_spawns_subprocess(monkeypatch):
         assert result == {'ok': True, 'running': True}
         assert len(spawned) == 1
         args, kwargs = spawned[0]
-        assert args == ("hermes", "gateway", "run")
+        # argv[0] must be a resolved binary (absolute path or shutil.which result
+        # ending with 'hermes'/'hermes.exe'), NOT the bare string 'hermes'.
+        # The exact value depends on the runtime env; assert the tail is right
+        # and that the subcommands are unchanged.
+        assert args[-2:] == ("gateway", "run")
+        assert 'hermes' in args[0].lower()
         # Detached on at least one of the two flavors.
         if __import__('sys').platform == "win32":
             assert "creationflags" in kwargs
@@ -408,3 +413,54 @@ def test_default_backend_shields_systemexit(monkeypatch):
 
         with pytest.raises(RuntimeError, match="gateway subsystem aborted"):
             profiles._default_gateway_control("coder", "stop")
+
+
+def test_default_backend_start_uses_resolvable_hermes_binary(monkeypatch):
+    """The subprocess argv[0] must come from _resolve_hermes_bin(), not the
+    bare string 'hermes'. The container PATH does not include /app/venv/bin
+    where the entry script lives, so a bare 'hermes' argv[0] would fail
+    silently (FileNotFoundError swallowed by stderr=DEVNULL).
+
+    This test monkeypatches _resolve_hermes_bin to return a deterministic
+    absolute path, then verifies that _spawn_gateway uses that path as
+    argv[0] — confirming the integration between the resolver and the spawner."""
+    import os as _os
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        _seed_named_profile(base, "coder")
+        profiles = _reload_profiles_module(base)
+        profiles._set_gateway_control_hook(None)
+
+        captured_args: list = []
+
+        class FakePopen:
+            def __init__(self, args, **kwargs):
+                captured_args.append(list(args))
+
+        import types as _types
+        fake_gw = _types.SimpleNamespace(
+            stop_profile_gateway=lambda: False,
+            gateway_command=lambda *a, **k: (_ for _ in ()).throw(AssertionError()),
+        )
+        monkeypatch.setitem(sys.modules, 'hermes_cli', _types.SimpleNamespace(gateway=fake_gw))
+        monkeypatch.setitem(sys.modules, 'hermes_cli.gateway', fake_gw)
+        monkeypatch.setattr('subprocess.Popen', FakePopen)
+
+        # Inject a fake absolute path so the test is env-independent.
+        fake_abs_hermes = _os.path.join(_os.path.dirname(sys.executable), 'hermes-fake')
+        monkeypatch.setattr(profiles, '_resolve_hermes_bin', lambda: fake_abs_hermes)
+
+        profiles._default_gateway_control("coder", "start")
+        assert len(captured_args) == 1
+        args = captured_args[0]
+        # Must use the resolved path returned by _resolve_hermes_bin.
+        assert args[0] == fake_abs_hermes, (
+            f"argv[0] should be the resolved binary path, got: {args[0]!r}"
+        )
+        # Must be absolute (confirming _resolve_hermes_bin returned an abs path).
+        assert _os.path.isabs(args[0]), (
+            f"argv[0] should be an absolute path, got: {args[0]!r}"
+        )
+        # The trailing args remain unchanged.
+        assert args[-2:] == ['gateway', 'run']
