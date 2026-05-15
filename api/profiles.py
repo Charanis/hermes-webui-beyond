@@ -1897,6 +1897,238 @@ def list_profile_skills_api(name: str) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# Skill name validation helper
+# ---------------------------------------------------------------------------
+
+def _validate_skill_name(skill: str) -> None:
+    """Raise ``ValueError`` for empty or path-traversal skill names."""
+    if not isinstance(skill, str) or not skill.strip():
+        raise ValueError("skill name must be a non-empty string")
+    if ".." in skill or "/" in skill or "\\" in skill:
+        raise ValueError(f"skill name contains invalid characters: {skill!r}")
+
+
+# ---------------------------------------------------------------------------
+# toggle_profile_skill_api
+# ---------------------------------------------------------------------------
+
+def toggle_profile_skill_api(name: str, skill: str, enabled: bool) -> dict:
+    """Enable or disable a single skill for the given profile.
+
+    Reads ``<profile-home>/config.yaml``, updates the ``skills.disabled`` list,
+    and writes back only when the state actually changes.  The response mirrors
+    ``list_profile_skills_api`` plus a ``changed`` boolean so callers can tell
+    whether a write occurred.
+
+    Args:
+        name:    Profile name (validated via ``_validate_profile_settings_name``).
+        skill:   Skill name to toggle (must be non-empty, no path traversal).
+        enabled: ``True`` → remove from disabled list; ``False`` → add to it.
+
+    Returns:
+        ``{ok, changed, profile, skills, total_count, enabled_count}``
+
+    Raises:
+        FileNotFoundError: profile home directory does not exist.
+        ValueError: *name* or *skill* fails validation.
+    """
+    import yaml as _yaml
+
+    _validate_profile_settings_name(name)
+    _validate_skill_name(skill)
+
+    if _is_root_profile(name):
+        profile_home = _DEFAULT_HERMES_HOME
+    else:
+        profile_home = _resolve_named_profile_home(name)
+
+    if not profile_home.is_dir():
+        raise FileNotFoundError(f"Profile '{name}' not found.")
+
+    config_path = profile_home / "config.yaml"
+
+    # --- Read existing config ---
+    cfg: dict = {}
+    if config_path.is_file():
+        try:
+            loaded = _yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                cfg = loaded
+        except Exception:
+            cfg = {}
+
+    # --- Derive existing disabled set ---
+    raw_disabled = cfg.get("skills", {}).get("disabled", [])
+    if not isinstance(raw_disabled, list):
+        raw_disabled = []
+    old_set: set[str] = {str(x) for x in raw_disabled if isinstance(x, str)}
+
+    # --- Compute new disabled set ---
+    new_set: set[str] = set(old_set)
+    if enabled:
+        new_set.discard(skill)
+    else:
+        new_set.add(skill)
+
+    changed = new_set != old_set
+
+    if changed:
+        if new_set:
+            cfg.setdefault("skills", {})["disabled"] = sorted(new_set)
+        else:
+            # Empty list — remove the key entirely to keep config tidy.
+            if "skills" in cfg:
+                cfg["skills"].pop("disabled", None)
+                if not cfg["skills"]:
+                    del cfg["skills"]
+        config_path.write_text(
+            _yaml.safe_dump(cfg, default_flow_style=False),
+            encoding="utf-8",
+        )
+
+    result = list_profile_skills_api(name)
+    result["changed"] = changed
+    return result
+
+
+# ---------------------------------------------------------------------------
+# set_profile_disabled_skills_api
+# ---------------------------------------------------------------------------
+
+def set_profile_disabled_skills_api(name: str, disabled_list: list) -> dict:
+    """Replace the full disabled-skills list for the given profile in one write.
+
+    Unlike ``toggle_profile_skill_api`` this overwrites the entire set, which
+    is what the bulk "Save" action in the Skills manager modal needs.
+
+    Args:
+        name:          Profile name.
+        disabled_list: A ``list`` of skill-name strings (may be empty to
+                       clear all disabled skills).  Passing a non-list (e.g.
+                       a bare string) raises ``ValueError``.
+
+    Returns:
+        ``{ok, changed, profile, skills, total_count, enabled_count}``
+
+    Raises:
+        FileNotFoundError: profile home directory does not exist.
+        ValueError: *name* or any element in *disabled_list* fails validation,
+                    or *disabled_list* is not a ``list``.
+    """
+    import yaml as _yaml
+
+    _validate_profile_settings_name(name)
+
+    if not isinstance(disabled_list, list):
+        raise ValueError("disabled_list must be a list of skill-name strings")
+
+    for item in disabled_list:
+        _validate_skill_name(item)
+
+    if _is_root_profile(name):
+        profile_home = _DEFAULT_HERMES_HOME
+    else:
+        profile_home = _resolve_named_profile_home(name)
+
+    if not profile_home.is_dir():
+        raise FileNotFoundError(f"Profile '{name}' not found.")
+
+    config_path = profile_home / "config.yaml"
+
+    # --- Read existing config ---
+    cfg: dict = {}
+    if config_path.is_file():
+        try:
+            loaded = _yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                cfg = loaded
+        except Exception:
+            cfg = {}
+
+    # --- Derive existing disabled set ---
+    raw_disabled = cfg.get("skills", {}).get("disabled", [])
+    if not isinstance(raw_disabled, list):
+        raw_disabled = []
+    old_set: set[str] = {str(x) for x in raw_disabled if isinstance(x, str)}
+
+    new_set: set[str] = set(disabled_list)
+    changed = new_set != old_set
+
+    if changed:
+        if new_set:
+            cfg.setdefault("skills", {})["disabled"] = sorted(new_set)
+        else:
+            if "skills" in cfg:
+                cfg["skills"].pop("disabled", None)
+                if not cfg["skills"]:
+                    del cfg["skills"]
+        config_path.write_text(
+            _yaml.safe_dump(cfg, default_flow_style=False),
+            encoding="utf-8",
+        )
+
+    result = list_profile_skills_api(name)
+    result["changed"] = changed
+    return result
+
+
+# ---------------------------------------------------------------------------
+# resolve_profile_skill_file
+# ---------------------------------------------------------------------------
+
+def resolve_profile_skill_file(name: str, skill: str):
+    """Return the ``Path`` to the SKILL.md for *skill* in *name*'s profile.
+
+    Searches ``<profile-home>/skills/**/SKILL.md``.  A match is found when the
+    containing directory name equals *skill*, OR when the frontmatter ``name:``
+    field equals *skill*.
+
+    Args:
+        name:  Profile name.
+        skill: Skill name to locate.
+
+    Returns:
+        :class:`pathlib.Path` pointing to the matching ``SKILL.md``.
+
+    Raises:
+        FileNotFoundError: profile home directory does not exist, or no
+                           matching skill was found.
+        ValueError: *name* or *skill* fails validation.
+    """
+    import yaml as _yaml
+
+    _validate_profile_settings_name(name)
+    _validate_skill_name(skill)
+
+    if _is_root_profile(name):
+        profile_home = _DEFAULT_HERMES_HOME
+    else:
+        profile_home = _resolve_named_profile_home(name)
+
+    if not profile_home.is_dir():
+        raise FileNotFoundError(f"Profile '{name}' not found.")
+
+    skills_dir = profile_home / "skills"
+    if not skills_dir.exists():
+        raise FileNotFoundError(f"Skill '{skill}' not found in profile '{name}'.")
+
+    for skill_md in skills_dir.rglob("SKILL.md"):
+        # Check directory name first (fast path, no file read needed).
+        if skill_md.parent.name == skill:
+            return skill_md
+        # Fall back to frontmatter name field.
+        try:
+            content = skill_md.read_text(encoding="utf-8")[:4000]
+        except (OSError, UnicodeDecodeError):
+            continue
+        fm, _ = _parse_skill_frontmatter(content)
+        if str(fm.get("name", "")) == skill:
+            return skill_md
+
+    raise FileNotFoundError(f"Skill '{skill}' not found in profile '{name}'.")
+
+
 # Gateway control helper override hook — tests monkeypatch this with a fake
 # runner. When set, ``profile_gateway_control_api`` calls it instead of
 # importing ``hermes_cli.gateway``. The hook must return a dict shaped like the

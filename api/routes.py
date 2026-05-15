@@ -4883,6 +4883,36 @@ def handle_post(handler, parsed) -> bool:
         except RuntimeError as e:
             return bad(handler, _sanitize_error(e), 500)
 
+    # ── Profile Skills (POST) ──
+    if parsed.path == "/api/profile/skills/toggle":
+        name = (body or {}).get("name")
+        skill = (body or {}).get("skill")
+        enabled = bool((body or {}).get("enabled"))
+        if not isinstance(name, str) or not name:
+            return bad(handler, "name required")
+        if not isinstance(skill, str) or not skill:
+            return bad(handler, "skill required")
+        try:
+            from api.profiles import toggle_profile_skill_api
+            return j(handler, toggle_profile_skill_api(name, skill, enabled))
+        except FileNotFoundError:
+            return bad(handler, "profile not found", status=404)
+        except ValueError as exc:
+            return bad(handler, str(exc), status=400)
+
+    if parsed.path == "/api/profile/skills/set-disabled":
+        name = (body or {}).get("name")
+        disabled = (body or {}).get("disabled")
+        if not isinstance(name, str) or not name:
+            return bad(handler, "name required")
+        try:
+            from api.profiles import set_profile_disabled_skills_api
+            return j(handler, set_profile_disabled_skills_api(name, disabled))
+        except FileNotFoundError:
+            return bad(handler, "profile not found", status=404)
+        except ValueError as exc:
+            return bad(handler, str(exc), status=400)
+
     # ── Skills (POST) ──
     if parsed.path == "/api/skills/save":
         return _handle_skill_save(handler, body)
