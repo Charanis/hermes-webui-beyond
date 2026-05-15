@@ -4648,7 +4648,7 @@ function _renderProfileDetail(p, activeName){
       ${_profileHeroDossier(p, isActive, isDefault)}
       <div class="profile-ops-grid" aria-label="${esc(p.name)} operations controls">
         ${_profileRuntimePanel(p, isActive)}
-        ${_profileGatewayTile(p, isActive)}
+        ${_profileGatewayTile(p)}
         ${_profileSkillsTile(p, isActive)}
       </div>
       ${_profileFilesSection(p)}
@@ -4988,33 +4988,38 @@ function _repaintGatewayTile(profileName){
   if (toggleLabel) toggleLabel.textContent = _gatewayToggleLabelForPhase(phase);
 }
 
-function _profileGatewayTile(p, isActive){
+function _profileGatewayTile(p){
   const name = esc(p.name);
-  // Seed phase from gateway_running flag — the first /status poll will
-  // overwrite this with the authoritative server-side phase.
+  // Provisional phase from the gateway_running flag; the live state
+  // map (if present) wins. The poller is the authoritative updater.
   const seedPhase = p.gateway_running ? 'running' : 'stopped';
-  _gatewayStateByProfile.set(p.name, {
-    phase: seedPhase, last_error: null, phase_started_at: null, pid: null,
-  });
-  const labelText = _gatewayLabelForPhase(seedPhase);
-  const toggleLabel = _gatewayToggleLabelForPhase(seedPhase);
-  const ariaChecked = seedPhase === 'running' ? 'true' : 'false';
+  if (!_gatewayStateByProfile.has(p.name)) {
+    _gatewayStateByProfile.set(p.name, {
+      phase: seedPhase, last_error: null, phase_started_at: null, pid: null,
+    });
+  }
+  const state = _gatewayStateByProfile.get(p.name);
+  const phase = state.phase || 'stopped';
+  const lastError = state.last_error || '';
+  const labelText = _gatewayLabelForPhase(phase);
+  const toggleLabel = _gatewayToggleLabelForPhase(phase);
+  const ariaChecked = phase === 'running' ? 'true' : 'false';
   return `
     <article class="profile-ops-tile profile-gateway-tile" aria-labelledby="opsGatewayTitle" data-profile-name="${name}">
       <div class="profile-ops-tile-head">
         <span class="profile-ops-tile-label profile-gateway-label" id="opsGatewayTitle">
-          <span class="profile-wifi profile-wifi-lg" id="profileGatewayWifi" data-state="${seedPhase}" aria-hidden="true">${li('wifi',26)}</span>
+          <span class="profile-wifi profile-wifi-lg" id="profileGatewayWifi" data-state="${phase}" aria-hidden="true">${li('wifi',26)}</span>
           <span class="profile-gateway-title">Agent Gateway</span>
         </span>
-        <span class="profile-ops-status-pill profile-gateway-pill" id="opsGatewayPill" data-state="${seedPhase}" data-error="">
-          <span id="opsGatewayDot" class="profile-status-dot profile-gateway-dot" data-state="${seedPhase}" aria-hidden="true"><span class="dot-info" aria-hidden="true">ⓘ</span></span>
+        <span class="profile-ops-status-pill profile-gateway-pill" id="opsGatewayPill" data-state="${phase}" data-error="${esc(lastError)}">
+          <span id="opsGatewayDot" class="profile-status-dot profile-gateway-dot" data-state="${phase}" aria-hidden="true"><span class="dot-info" aria-hidden="true">ⓘ</span></span>
           <span id="opsGatewayState">${esc(labelText)}</span>
         </span>
       </div>
       <div class="profile-gateway-control">
         <button id="opsGatewayToggle" class="profile-gateway-toggle" type="button"
                 role="switch" aria-checked="${ariaChecked}"
-                data-profile-name="${name}" data-gateway-toggle data-state="${seedPhase}">
+                data-profile-name="${name}" data-gateway-toggle data-state="${phase}">
           <span class="profile-gateway-toggle-track" aria-hidden="true">
             <span class="profile-gateway-toggle-thumb"></span>
           </span>
@@ -6266,6 +6271,7 @@ async function _opsDuplicateProfile(profileName){
   }
 }
 
+// Task 7 replaces this: v3 tile uses data-gateway-toggle, not data-gateway-action. Element IDs and class-based mutations below are stale.
 async function _opsGatewayControl(profileName, action){
   if (!profileName || !action) return;
   const states = {
