@@ -1,8 +1,9 @@
-"""Tests for read_profile_persona — voice excerpt from SOUL.md.
+"""Tests for read_profile_persona — user-authored description from config.yaml.
 
-Profile screen rework (2026-05-14): the persona endpoint exposes the first
-non-blank paragraph of a profile's SOUL.md without leaking the full body, so
-the hero dossier can render a voice quote.
+Profile screen rework v3.1 (2026-05-15): the persona endpoint exposes the
+profile's short user-authored description, stored at ``webui.description``
+inside ``config.yaml``. The description is intentionally separate from
+SOUL.md (which carries the agent's persona / voice consumed by the model).
 """
 
 import importlib
@@ -37,8 +38,11 @@ def _seed_profile(base: Path, name: str) -> Path:
     return pdir
 
 
-def _write_soul(profile_dir: Path, body: str) -> None:
-    (profile_dir / "SOUL.md").write_text(body, encoding="utf-8")
+def _write_config(profile_dir: Path, body: str) -> None:
+    (profile_dir / "config.yaml").write_text(body, encoding="utf-8")
+
+
+# ── read_profile_persona_api ───────────────────────────────────────────────
 
 
 def test_persona_missing_profile_raises_file_not_found():
@@ -68,83 +72,77 @@ def test_persona_empty_name_raises_value_error():
             profiles.read_profile_persona_api("")
 
 
-def test_persona_soul_missing_returns_empty_voice():
+def test_persona_returns_empty_description_when_config_missing():
     with tempfile.TemporaryDirectory() as td:
         base = Path(td) / ".hermes"
         (base / "profiles").mkdir(parents=True)
         _seed_profile(base, "coder")
         profiles = _reload_profiles_module(base)
         result = profiles.read_profile_persona_api("coder")
-        assert result["name"] == "coder"
-        assert result["soul_present"] is False
-        assert result["soul_chars"] == 0
-        assert result["voice"] == ""
+        assert result == {"name": "coder", "description": ""}
 
 
-def test_persona_soul_empty_file():
+def test_persona_returns_empty_description_when_config_lacks_webui_section():
     with tempfile.TemporaryDirectory() as td:
         base = Path(td) / ".hermes"
         (base / "profiles").mkdir(parents=True)
         pdir = _seed_profile(base, "coder")
-        _write_soul(pdir, "")
+        _write_config(pdir, "model:\n  default: claude-opus-4-7\n")
         profiles = _reload_profiles_module(base)
         result = profiles.read_profile_persona_api("coder")
-        assert result["soul_present"] is True
-        assert result["soul_chars"] == 0
-        assert result["voice"] == ""
+        assert result["description"] == ""
 
 
-def test_persona_returns_first_non_blank_paragraph():
+def test_persona_returns_user_description_from_config():
     with tempfile.TemporaryDirectory() as td:
         base = Path(td) / ".hermes"
         (base / "profiles").mkdir(parents=True)
         pdir = _seed_profile(base, "coder")
-        _write_soul(
+        _write_config(
             pdir,
-            "\n\n  \n# Heading\n\nA calm, terse engineering pair.\n\nSecond paragraph never shown.\n",
+            "webui:\n  description: \"Pair programmer for the data ingestion service.\"\n",
         )
         profiles = _reload_profiles_module(base)
         result = profiles.read_profile_persona_api("coder")
-        assert result["voice"] == "A calm, terse engineering pair."
+        assert result["description"] == "Pair programmer for the data ingestion service."
 
 
-def test_persona_skips_heading_only_paragraphs_and_returns_body():
+def test_persona_strips_whitespace_in_description():
     with tempfile.TemporaryDirectory() as td:
         base = Path(td) / ".hermes"
         (base / "profiles").mkdir(parents=True)
         pdir = _seed_profile(base, "coder")
-        _write_soul(pdir, "# Heading\n\n## Subheading\n\nThe real voice line.")
+        _write_config(pdir, "webui:\n  description: \"   Trimmed.   \"\n")
         profiles = _reload_profiles_module(base)
         result = profiles.read_profile_persona_api("coder")
-        assert result["voice"] == "The real voice line."
+        assert result["description"] == "Trimmed."
 
 
-def test_persona_voice_truncated_to_240_chars_with_ellipsis():
+def test_persona_ignores_non_string_description_value():
     with tempfile.TemporaryDirectory() as td:
         base = Path(td) / ".hermes"
         (base / "profiles").mkdir(parents=True)
         pdir = _seed_profile(base, "coder")
-        long_para = "x" * 500
-        _write_soul(pdir, long_para)
+        _write_config(pdir, "webui:\n  description: 12345\n")
         profiles = _reload_profiles_module(base)
         result = profiles.read_profile_persona_api("coder")
-        # 240 chars of body + a single ellipsis character
-        assert len(result["voice"]) == 241
-        assert result["voice"].endswith("…")
-        assert result["voice"][:240] == "x" * 240
+        assert result["description"] == ""
 
 
-def test_persona_does_not_leak_full_soul_body():
+def test_persona_does_not_read_soul_md():
+    """SOUL.md content must NOT leak into the persona endpoint anymore —
+    the description is now a separate, user-edited field."""
     with tempfile.TemporaryDirectory() as td:
         base = Path(td) / ".hermes"
         (base / "profiles").mkdir(parents=True)
         pdir = _seed_profile(base, "coder")
-        _write_soul(pdir, "first para\n\nsecret-second-paragraph-with-credentials")
+        (pdir / "SOUL.md").write_text(
+            "secret-soul-paragraph-must-not-leak", encoding="utf-8"
+        )
         profiles = _reload_profiles_module(base)
         result = profiles.read_profile_persona_api("coder")
-        assert "secret-second-paragraph" not in result["voice"]
-        # But soul_chars reports the full size so the UI can show edit affordances.
-        assert result["soul_chars"] > len("first para")
+        assert "secret-soul-paragraph" not in result["description"]
+        assert result["description"] == ""
 
 
 def test_persona_supports_default_profile():
@@ -153,10 +151,87 @@ def test_persona_supports_default_profile():
         base = Path(td) / ".hermes"
         base.mkdir(parents=True)
         (base / "profiles").mkdir(exist_ok=True)
-        # Write SOUL.md at the root (where the default profile lives).
-        (base / "SOUL.md").write_text("Default agent voice.", encoding="utf-8")
+        (base / "config.yaml").write_text(
+            "webui:\n  description: \"Default agent.\"\n", encoding="utf-8"
+        )
         profiles = _reload_profiles_module(base)
         result = profiles.read_profile_persona_api("default")
         assert result["name"] == "default"
-        assert result["soul_present"] is True
-        assert result["voice"] == "Default agent voice."
+        assert result["description"] == "Default agent."
+
+
+# ── update_profile_settings_api: description path ──────────────────────────
+
+
+def test_update_settings_persists_description_to_config_yaml():
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        pdir = _seed_profile(base, "coder")
+        profiles = _reload_profiles_module(base)
+        result = profiles.update_profile_settings_api(
+            "coder", description="A focused Python reviewer."
+        )
+        assert result["description"] == "A focused Python reviewer."
+        # Re-read via persona endpoint to confirm round-trip.
+        again = profiles.read_profile_persona_api("coder")
+        assert again["description"] == "A focused Python reviewer."
+        # Verify on-disk shape.
+        text = (pdir / "config.yaml").read_text(encoding="utf-8")
+        assert "webui:" in text
+        assert "description:" in text
+
+
+def test_update_settings_empty_description_removes_field_and_collapses_webui():
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        pdir = _seed_profile(base, "coder")
+        profiles = _reload_profiles_module(base)
+        profiles.update_profile_settings_api("coder", description="placeholder")
+        # Now clear it.
+        result = profiles.update_profile_settings_api("coder", description="")
+        assert result["description"] == ""
+        text = (pdir / "config.yaml").read_text(encoding="utf-8")
+        # webui: section should be gone (only contained description).
+        assert "webui:" not in text
+
+
+def test_update_settings_rejects_non_string_description():
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        _seed_profile(base, "coder")
+        profiles = _reload_profiles_module(base)
+        with pytest.raises(ValueError):
+            profiles.update_profile_settings_api("coder", description=123)
+
+
+def test_update_settings_rejects_description_over_280_chars():
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        _seed_profile(base, "coder")
+        profiles = _reload_profiles_module(base)
+        with pytest.raises(ValueError):
+            profiles.update_profile_settings_api("coder", description="x" * 281)
+
+
+def test_update_settings_description_does_not_disturb_other_keys():
+    """Setting description must not clobber agent.reasoning_effort or model.*"""
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        pdir = _seed_profile(base, "coder")
+        _write_config(
+            pdir,
+            "model:\n  default: claude-opus-4-7\n  provider: anthropic\n"
+            "agent:\n  reasoning_effort: high\n",
+        )
+        profiles = _reload_profiles_module(base)
+        profiles.update_profile_settings_api("coder", description="Adds a new key.")
+        text = (pdir / "config.yaml").read_text(encoding="utf-8")
+        assert "claude-opus-4-7" in text
+        assert "anthropic" in text
+        assert "reasoning_effort: high" in text
+        assert "description: Adds a new key." in text

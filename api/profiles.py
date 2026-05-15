@@ -1102,19 +1102,80 @@ def get_profile_settings_api(name: str) -> dict:
         'model': model,
         'avatar': _read_profile_avatar_for_home(profile_home),
         'reasoning_effort': _extract_profile_reasoning_effort(config_data),
+        'description': _extract_profile_description(config_data),
     }
 
 
-# ── Persona excerpt (profile screen rework 2026-05-14) ─────────────────────
+# ── Profile description (profile screen rework v3.1 — 2026-05-15) ─────────
 #
-# The hero dossier on the profile detail screen needs a short, italic "voice"
-# line that conveys what makes this agent distinct. We pull it from the first
-# non-blank, non-heading-only paragraph of SOUL.md, truncated to a hard cap so
-# the rest of the file body never reaches the browser through this endpoint.
+# The hero dossier on the profile detail screen shows a short user-authored
+# description distinct from SOUL.md (which carries the agent's persona /
+# voice for the model). Persisted at `webui.description` inside the profile's
+# config.yaml, capped at _PROFILE_DESCRIPTION_MAX chars to keep the dossier
+# from turning into an essay. The persona endpoint returns it; the existing
+# /api/profile/settings POST writes it.
 
-_PERSONA_VOICE_MAX = 240
+_PROFILE_DESCRIPTION_MAX = 280
 
 
+def _extract_profile_description(config_data: dict) -> str:
+    """Return the user-set description string from a loaded config blob.
+
+    Reads ``webui.description``. Missing/non-string values become ``''``.
+    """
+    if not isinstance(config_data, dict):
+        return ''
+    webui_cfg = config_data.get('webui')
+    if not isinstance(webui_cfg, dict):
+        return ''
+    raw = webui_cfg.get('description')
+    return str(raw).strip() if isinstance(raw, str) else ''
+
+
+def _merge_profile_description(config_data: dict, description) -> bool:
+    """Apply *description* into ``webui.description`` on *config_data*.
+
+    Empty / None removes the override and collapses the ``webui`` section if
+    it becomes empty. Returns True when the config changed. Raises
+    ValueError on non-string inputs or strings longer than the hard cap.
+    """
+    if description is None:
+        description = ''
+    if not isinstance(description, str):
+        raise ValueError('description must be a string')
+    new_value = description.strip()
+    if len(new_value) > _PROFILE_DESCRIPTION_MAX:
+        raise ValueError(
+            f"description must be <= {_PROFILE_DESCRIPTION_MAX} characters"
+        )
+    webui_cfg = config_data.get('webui')
+    if not isinstance(webui_cfg, dict):
+        webui_cfg = {}
+        had_webui = False
+    else:
+        webui_cfg = dict(webui_cfg)
+        had_webui = True
+    before = webui_cfg.get('description')
+    if not new_value:
+        if 'description' in webui_cfg:
+            webui_cfg.pop('description', None)
+            changed = True
+        else:
+            changed = False
+    else:
+        webui_cfg['description'] = new_value
+        changed = before != new_value
+    if not changed and had_webui:
+        return False
+    if webui_cfg:
+        config_data['webui'] = webui_cfg
+    elif had_webui:
+        config_data.pop('webui', None)
+    return changed
+
+
+# Legacy helper retained for the file-read flow / tests that exercise SOUL
+# parsing; the persona endpoint no longer routes through it.
 def _first_non_blank_paragraph(text: str) -> str:
     """Return the first non-blank, non-heading-only paragraph from a markdown blob.
 
@@ -1260,50 +1321,43 @@ def read_profile_activity_api(name: str) -> dict:
 
 
 def read_profile_persona_api(name: str) -> dict:
-    """Return the SOUL.md voice excerpt for *name* without leaking the body.
+    """Return the user-authored description for *name*.
 
-    The response shape is deliberately small: a single voice line plus
-    presence/size signals the UI uses to pick between a quote and a "no
-    persona set yet" placeholder. Full SOUL.md content is never returned by
-    this endpoint — the file editor route owns that.
+    The hero dossier renders this line. It is stored at
+    ``webui.description`` in the profile's config.yaml and is intentionally
+    separate from SOUL.md, which carries the agent's persona / voice for
+    the model itself. Empty when no description has been set yet — the UI
+    surfaces an "Add a description" placeholder in that case.
 
     Raises:
         ValueError: invalid profile name.
         FileNotFoundError: profile directory does not exist.
     """
     name, profile_home = _require_profile_home_for_settings(name)
-    soul = profile_home / 'SOUL.md'
-    if not soul.exists():
-        return {
-            'name': name,
-            'soul_present': False,
-            'soul_chars': 0,
-            'voice': '',
-        }
-    try:
-        text = soul.read_text(encoding='utf-8', errors='replace')
-    except OSError:
-        text = ''
-    voice = _first_non_blank_paragraph(text)
-    if len(voice) > _PERSONA_VOICE_MAX:
-        voice = voice[:_PERSONA_VOICE_MAX] + '…'
+    config_data = _load_profile_config_for_settings(profile_home)
+    description = _extract_profile_description(config_data)
     return {
         'name': name,
-        'soul_present': True,
-        'soul_chars': len(text),
-        'voice': voice,
+        'description': description,
     }
 
 
 def update_profile_settings_api(name: str, *, provider=_MISSING, model=_MISSING,
-                                avatar=_MISSING, reasoning_effort=_MISSING) -> dict:
-    """Update model/provider, reasoning effort and/or WebUI avatar metadata."""
+                                avatar=_MISSING, reasoning_effort=_MISSING,
+                                description=_MISSING) -> dict:
+    """Update model/provider, reasoning effort, description and/or WebUI avatar metadata."""
     if (provider is _MISSING and model is _MISSING
-            and avatar is _MISSING and reasoning_effort is _MISSING):
-        raise ValueError('At least one of provider, model, avatar, or reasoning_effort is required')
+            and avatar is _MISSING and reasoning_effort is _MISSING
+            and description is _MISSING):
+        raise ValueError(
+            'At least one of provider, model, avatar, reasoning_effort, or description is required'
+        )
     name, profile_home = _require_profile_home_for_settings(name)
 
-    needs_yaml_write = provider is not _MISSING or model is not _MISSING or reasoning_effort is not _MISSING
+    needs_yaml_write = (
+        provider is not _MISSING or model is not _MISSING
+        or reasoning_effort is not _MISSING or description is not _MISSING
+    )
     invalidate_models = False
     if needs_yaml_write:
         config_data = _load_profile_config_for_settings(profile_home)
@@ -1314,6 +1368,9 @@ def update_profile_settings_api(name: str, *, provider=_MISSING, model=_MISSING,
                 invalidate_models = True
         if reasoning_effort is not _MISSING:
             if _merge_profile_reasoning_effort(config_data, reasoning_effort):
+                config_changed = True
+        if description is not _MISSING:
+            if _merge_profile_description(config_data, description):
                 config_changed = True
         if config_changed:
             _save_profile_config_for_settings(profile_home, config_data)

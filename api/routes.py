@@ -5021,7 +5021,7 @@ def handle_post(handler, parsed) -> bool:
         if not name:
             return bad(handler, "name is required")
         updates = {}
-        for key in ("provider", "model", "avatar", "reasoning_effort"):
+        for key in ("provider", "model", "avatar", "reasoning_effort", "description"):
             if key in body:
                 updates[key] = body.get(key)
         try:
