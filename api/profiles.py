@@ -2134,11 +2134,13 @@ def set_profile_disabled_skills_api(name: str, disabled_list: list) -> dict:
 # ---------------------------------------------------------------------------
 
 def resolve_profile_skill_file(name: str, skill: str):
-    """Return the ``Path`` to the SKILL.md for *skill* in *name*'s profile.
+    """Return the ``Path`` to the SKILL.md for *skill* visible to *name*.
 
-    Searches ``<profile-home>/skills/**/SKILL.md``.  A match is found when the
-    containing directory name equals *skill*, OR when the frontmatter ``name:``
-    field equals *skill*.
+    Searches the same ordered set of skill roots that ``list_profile_skills_api``
+    uses: the profile-local ``skills/`` directory first, then external dirs
+    from ``_get_external_skills_dirs()``.  A match is found when the containing
+    directory name equals *skill*, OR when the frontmatter ``name:`` field
+    equals *skill*.
 
     Args:
         name:  Profile name.
@@ -2163,22 +2165,37 @@ def resolve_profile_skill_file(name: str, skill: str):
     if not profile_home.is_dir():
         raise FileNotFoundError(f"Profile '{name}' not found.")
 
-    skills_dir = profile_home / "skills"
-    if not skills_dir.exists():
+    # Build the same ordered search-root list as list_profile_skills_api.
+    search_dirs: list[Path] = []
+    profile_skills_dir = profile_home / "skills"
+    if profile_skills_dir.is_dir():
+        search_dirs.append(profile_skills_dir)
+    for ext in _get_external_skills_dirs():
+        try:
+            ext_path = Path(ext)
+        except Exception:
+            continue
+        if ext_path.is_dir() and ext_path not in search_dirs:
+            search_dirs.append(ext_path)
+
+    if not search_dirs:
         raise FileNotFoundError(f"Skill '{skill}' not found in profile '{name}'.")
 
-    for skill_md in skills_dir.rglob("SKILL.md"):
-        # Check directory name first (fast path, no file read needed).
-        if skill_md.parent.name == skill:
-            return skill_md
-        # Fall back to frontmatter name field.
-        try:
-            content = skill_md.read_text(encoding="utf-8")[:4000]
-        except (OSError, UnicodeDecodeError):
-            continue
-        fm, _ = _parse_skill_frontmatter(content)
-        if str(fm.get("name", "")) == skill:
-            return skill_md
+    for skills_root in search_dirs:
+        for skill_md in sorted(skills_root.rglob("SKILL.md")):
+            if not skill_md.is_file():
+                continue
+            # Check directory name first (fast path, no file read needed).
+            if skill_md.parent.name == skill:
+                return skill_md
+            # Fall back to frontmatter name field.
+            try:
+                content = skill_md.read_text(encoding="utf-8")[:4000]
+            except (OSError, UnicodeDecodeError):
+                continue
+            fm, _ = _parse_skill_frontmatter(content)
+            if str(fm.get("name", "")) == skill:
+                return skill_md
 
     raise FileNotFoundError(f"Skill '{skill}' not found in profile '{name}'.")
 
