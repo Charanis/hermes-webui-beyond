@@ -3870,14 +3870,6 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
 .profile-hero-description-edit:hover{background:var(--accent-bg);color:var(--accent-text);border-color:var(--accent-bg-strong);}
 
 .profile-hero-actions{margin-top:14px;display:flex;gap:6px;flex-wrap:wrap;}
-.profile-hero-active-pill{
-  display:inline-flex;align-items:center;gap:6px;
-  font-size:11px;font-weight:700;letter-spacing:.02em;
-  padding:3px 9px;border-radius:999px;
-  border:1px solid color-mix(in srgb,var(--success) 45%,transparent);
-  background:color-mix(in srgb,var(--success) 12%,transparent);
-  color:color-mix(in srgb,var(--success) 80%,var(--text));
-}
 
 /* Hero overflow menu — "⋯" button top-right + dropdown */
 .profile-hero-menu-host{position:absolute;top:10px;right:10px;z-index:5;}
