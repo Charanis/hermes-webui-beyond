@@ -4932,37 +4932,94 @@ function _profileRuntimePanel(p, isActive){
     </article>`;
 }
 
+// ── Gateway tile state (v3 — 5-phase, toggle UX) ──────────────────────
+//
+// Per-profile state cache, keyed by profile name. The tile DOM holds at
+// most one profile's tile at a time (the detail view), but the map
+// persists across detail-open/close so a re-open shows the last known
+// phase before the first status poll lands.
+const _gatewayStateByProfile = new Map();
+// Active pollers keyed by profile name → setInterval handle.
+const _gatewayPollers = new Map();
+
+function _gatewayLabelForPhase(phase){
+  switch(phase){
+    case 'starting': return 'Starting';
+    case 'running': return 'Running';
+    case 'stopping': return 'Stopping';
+    case 'failed': return 'Starting Failed';
+    default: return 'Stopped';
+  }
+}
+
+function _gatewayToggleLabelForPhase(phase){
+  switch(phase){
+    case 'starting': return 'Gateway: Starting…';
+    case 'running': return 'Gateway: On';
+    case 'stopping': return 'Gateway: Stopping…';
+    case 'failed': return 'Gateway: Failed — click to retry';
+    default: return 'Gateway: Off';
+  }
+}
+
+function _repaintGatewayTile(profileName){
+  const state = _gatewayStateByProfile.get(profileName);
+  if (!state) return;
+  const tile = document.querySelector(`.profile-gateway-tile[data-profile-name="${CSS.escape(profileName)}"]`);
+  if (!tile) return;  // tile not currently rendered for this profile
+  const phase = state.phase || 'stopped';
+  const wifi = tile.querySelector('#profileGatewayWifi');
+  const pill = tile.querySelector('#opsGatewayPill');
+  const dot = tile.querySelector('#opsGatewayDot');
+  const stateLabel = tile.querySelector('#opsGatewayState');
+  const toggle = tile.querySelector('#opsGatewayToggle');
+  const toggleLabel = tile.querySelector('#opsGatewayToggleLabel');
+  if (wifi) wifi.setAttribute('data-state', phase);
+  if (pill) {
+    pill.setAttribute('data-state', phase);
+    pill.setAttribute('data-error', phase === 'failed' ? (state.last_error || 'Gateway failed to start.') : '');
+  }
+  if (dot) dot.setAttribute('data-state', phase);
+  if (stateLabel) stateLabel.textContent = _gatewayLabelForPhase(phase);
+  if (toggle) {
+    toggle.setAttribute('data-state', phase);
+    toggle.setAttribute('aria-checked', phase === 'running' ? 'true' : 'false');
+  }
+  if (toggleLabel) toggleLabel.textContent = _gatewayToggleLabelForPhase(phase);
+}
+
 function _profileGatewayTile(p, isActive){
-  const running = !!p.gateway_running;
   const name = esc(p.name);
-  const dot = running ? 'ok' : 'off';
-  const state = running ? 'Running' : 'Stopped';
-  const value = running ? `Running for ${name}` : 'Not running';
-  const note = running
-    ? 'Restart or stop the profile-scoped gateway.'
-    : `Starts a gateway scoped to <strong>${name}</strong>.`;
-  const startAttrs = running ? 'disabled aria-disabled="true"' : '';
-  const restartAttrs = running ? '' : 'disabled aria-disabled="true" title="Start gateway first"';
-  const stopAttrs = running ? '' : 'disabled aria-disabled="true" title="Start gateway first"';
-  const startLabel = running ? 'Running' : 'Start';
-  const startClass = running ? 'profile-ops-button' : 'profile-ops-button primary';
+  // Seed phase from gateway_running flag — the first /status poll will
+  // overwrite this with the authoritative server-side phase.
+  const seedPhase = p.gateway_running ? 'running' : 'stopped';
+  _gatewayStateByProfile.set(p.name, {
+    phase: seedPhase, last_error: null, phase_started_at: null, pid: null,
+  });
+  const labelText = _gatewayLabelForPhase(seedPhase);
+  const toggleLabel = _gatewayToggleLabelForPhase(seedPhase);
+  const ariaChecked = seedPhase === 'running' ? 'true' : 'false';
   return `
-    <article class="profile-ops-tile" aria-labelledby="opsGatewayTitle">
+    <article class="profile-ops-tile profile-gateway-tile" aria-labelledby="opsGatewayTitle" data-profile-name="${name}">
       <div class="profile-ops-tile-head">
-        <span class="profile-ops-tile-label" id="opsGatewayTitle" style="display:inline-flex;align-items:center;gap:8px;">
-          <span class="profile-wifi ${running ? 'on' : ''}" id="profileGatewayWifi" title="${running ? 'Gateway online' : 'Gateway offline'}" aria-hidden="true">${li('wifi',18)}</span>
-          Gateway
+        <span class="profile-ops-tile-label profile-gateway-label" id="opsGatewayTitle">
+          <span class="profile-wifi profile-wifi-lg" id="profileGatewayWifi" data-state="${seedPhase}" aria-hidden="true">${li('wifi',26)}</span>
+          <span class="profile-gateway-title">Agent Gateway</span>
         </span>
-        <span class="profile-ops-status-pill"><span id="opsGatewayDot" class="profile-status-dot ${dot}" aria-hidden="true"></span><span id="opsGatewayState">${esc(state)}</span></span>
+        <span class="profile-ops-status-pill profile-gateway-pill" id="opsGatewayPill" data-state="${seedPhase}" data-error="">
+          <span id="opsGatewayDot" class="profile-status-dot profile-gateway-dot" data-state="${seedPhase}" aria-hidden="true"><span class="dot-info" aria-hidden="true">ⓘ</span></span>
+          <span id="opsGatewayState">${esc(labelText)}</span>
+        </span>
       </div>
-      <div>
-        <span class="profile-ops-tile-value">${esc(value)}</span>
-        <span class="profile-ops-tile-note" id="opsGatewayNote">${note}</span>
-      </div>
-      <div class="profile-ops-control-row" aria-label="Gateway controls for ${name}">
-        <button id="opsGatewayStart" class="${startClass}" type="button" data-gateway-action="start" ${startAttrs}>${esc(startLabel)}</button>
-        <button id="opsGatewayRestart" class="profile-ops-button" type="button" data-gateway-action="restart" ${restartAttrs}>Restart</button>
-        <button id="opsGatewayStop" class="profile-ops-button" type="button" data-gateway-action="stop" ${stopAttrs}>Stop</button>
+      <div class="profile-gateway-control">
+        <button id="opsGatewayToggle" class="profile-gateway-toggle" type="button"
+                role="switch" aria-checked="${ariaChecked}"
+                data-profile-name="${name}" data-gateway-toggle data-state="${seedPhase}">
+          <span class="profile-gateway-toggle-track" aria-hidden="true">
+            <span class="profile-gateway-toggle-thumb"></span>
+          </span>
+          <span class="profile-gateway-toggle-label" id="opsGatewayToggleLabel">${esc(toggleLabel)}</span>
+        </button>
       </div>
     </article>`;
 }
