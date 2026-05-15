@@ -293,3 +293,80 @@ def test_bindings_wire_description_edit():
         "binding for description pencil is missing"
     assert "_enterProfileDescriptionEdit" in fn, \
         "binding must invoke the inline editor"
+
+
+# ── Hero overflow menu (rework v3.1, 2026-05-15) ─────────────────────────
+
+
+def test_hero_overflow_menu_present_with_expected_items():
+    fn = _extract_function(PANELS_JS, "_profileHeroDossier")
+    assert 'id="profileHeroMenuButton"' in fn, "missing ⋯ menu button"
+    assert 'id="profileHeroMenu"' in fn, "missing menu container"
+    assert 'aria-haspopup="menu"' in fn, "menu button must declare popup role"
+    for action in ("rename", "edit-description", "duplicate", "remove"):
+        assert f'data-ops-action="{action}"' in fn, \
+            f"hero menu must contain action={action!r}"
+
+
+def test_inline_action_row_no_longer_holds_destructive_actions():
+    fn = _extract_function(PANELS_JS, "_profileHeroDossier")
+    # Locate the substring of the inline-actions row.
+    marker = 'class="profile-hero-actions"'
+    idx = fn.find(marker)
+    assert idx >= 0, "hero must still render the .profile-hero-actions row"
+    # The row should end at the next </div> after the marker; pull a generous
+    # slice and confirm none of the moved actions appear there.
+    slice_ = fn[idx:idx + 600]
+    for moved in ("rename", "duplicate", "remove"):
+        assert f'data-ops-action="{moved}"' not in slice_, \
+            f"action={moved!r} should live in the ⋯ menu, not the inline row"
+
+
+def test_bindings_wire_hero_overflow_menu():
+    fn = _extract_function(PANELS_JS, "_bindProfileOpsConsole")
+    assert "profileHeroMenuButton" in fn, "binding for the menu button is missing"
+    assert "profileHeroMenu" in fn, "binding for the menu container is missing"
+    assert 'data-ops-action="edit-description"' in fn, \
+        "binding must handle the new edit-description menu item"
+
+
+# ── In-app input dialog (replaces window.prompt) ─────────────────────────
+
+
+def test_show_input_dialog_defined():
+    assert "function showInputDialog" in PANELS_JS, \
+        "showInputDialog must be defined globally (replaces window.prompt)"
+
+
+def test_rename_does_not_call_window_prompt():
+    fn = _extract_function(PANELS_JS, "_opsRenameProfile")
+    assert "window.prompt" not in fn, \
+        "rename must use the in-app input dialog, not window.prompt"
+    assert "showInputDialog" in fn
+    assert "maxlength" in fn, "rename dialog must enforce the 32-char cap"
+
+
+def test_duplicate_does_not_call_window_prompt():
+    fn = _extract_function(PANELS_JS, "_opsDuplicateProfile")
+    assert "window.prompt" not in fn
+    assert "showInputDialog" in fn
+    assert "maxlength" in fn
+
+
+def test_no_remaining_window_prompt_calls_in_panels_js():
+    # Defense in depth — any prompt() left in panels.js is a regression.
+    assert "window.prompt(" not in PANELS_JS, \
+        "window.prompt is forbidden in panels.js (use showInputDialog)"
+
+
+def test_input_dialog_css_defined():
+    for selector in (".input-dialog", ".input-dialog-card",
+                     ".input-dialog-error", ".input-dialog-counter"):
+        assert selector in STYLE_CSS, f"missing CSS selector {selector}"
+
+
+def test_hero_menu_css_defined():
+    for selector in (".profile-hero-menu",
+                     ".profile-hero-menu-button",
+                     ".profile-hero-menu-item"):
+        assert selector in STYLE_CSS, f"missing CSS selector {selector}"

@@ -1445,6 +1445,21 @@ def _validate_profile_name(name: str):
         )
 
 
+# Newly-created or renamed profiles are capped at a tighter limit than the
+# regex's 64-char back-compat ceiling — long names overflow the hero card
+# layout. Keep the regex permissive on read (so existing 33-64 char profiles
+# still load) but reject anything longer on write.
+_PROFILE_NAME_NEW_MAX_LEN = 32
+
+
+def _enforce_new_profile_name_cap(name: str) -> None:
+    if len(name) > _PROFILE_NAME_NEW_MAX_LEN:
+        raise ValueError(
+            f"Profile name must be {_PROFILE_NAME_NEW_MAX_LEN} characters or fewer "
+            f"(got {len(name)})."
+        )
+
+
 def _profiles_root() -> Path:
     """Return the canonical root that contains named profiles."""
     return (_DEFAULT_HERMES_HOME / 'profiles').resolve()
@@ -1524,6 +1539,7 @@ def create_profile_api(name: str, clone_from: str = None,
                        api_key: str = None) -> dict:
     """Create a new profile. Returns the new profile info dict."""
     _validate_profile_name(name)
+    _enforce_new_profile_name_cap(name)
     # Defense-in-depth: validate clone_from here too, even though routes.py
     # also validates it. Any caller that bypasses the HTTP layer gets protection.
     if clone_from is not None and not _is_root_profile(clone_from):
@@ -1599,6 +1615,7 @@ def rename_profile_api(name: str, new_name: str) -> dict:
     if new_name == name:
         raise ValueError("new_name must differ from current name.")
     _validate_profile_name(new_name)
+    _enforce_new_profile_name_cap(new_name)
 
     profiles_root = _profiles_root()
     src_dir = _resolve_named_profile_home(name)
@@ -1653,6 +1670,7 @@ def duplicate_profile_api(name: str, new_name: str, *, clone_all: bool = False) 
     if name == new_name:
         raise ValueError("new_name must differ from source name.")
     _validate_profile_name(new_name)
+    _enforce_new_profile_name_cap(new_name)
 
     profiles_root = _profiles_root()
     dst_dir = (profiles_root / new_name).resolve()

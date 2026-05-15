@@ -130,3 +130,51 @@ def test_duplicate_fallback_copies_config():
         assert copied_dir.is_dir()
         assert (copied_dir / "config.yaml").exists()
         assert "gpt-5" in (copied_dir / "config.yaml").read_text(encoding="utf-8")
+
+
+# ── 32-char cap on new profile names (rework v3.1) ──────────────────────────
+
+
+def test_create_refuses_name_over_32_chars():
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        profiles = _reload_profiles_module(base)
+        too_long = "a" * 33  # one past the cap
+        with pytest.raises(ValueError, match="32 characters"):
+            profiles.create_profile_api(too_long)
+
+
+def test_create_accepts_name_exactly_32_chars():
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        profiles = _reload_profiles_module(base)
+        # The regex permits this; the cap permits this; both should agree.
+        exactly_32 = "a" * 32
+        # hermes_cli is not available in tests, so the fallback runs and
+        # creates the directory directly — no exception means success.
+        profiles.create_profile_api(exactly_32)
+        assert (base / "profiles" / exactly_32).is_dir()
+
+
+def test_rename_refuses_name_over_32_chars():
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        _seed_named_profile(base, "coder")
+        profiles = _reload_profiles_module(base)
+        too_long = "a" * 33
+        with pytest.raises(ValueError, match="32 characters"):
+            profiles.rename_profile_api("coder", too_long)
+
+
+def test_duplicate_refuses_name_over_32_chars():
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        _seed_named_profile(base, "coder")
+        profiles = _reload_profiles_module(base)
+        too_long = "a" * 33
+        with pytest.raises(ValueError, match="32 characters"):
+            profiles.duplicate_profile_api("coder", too_long)

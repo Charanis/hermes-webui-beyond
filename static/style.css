@@ -3780,6 +3780,7 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
 
 /* Hero dossier */
 .profile-hero{
+  position:relative;
   display:grid;grid-template-columns:256px 1fr;gap:24px;align-items:start;
   padding:18px;border:1px solid var(--border);border-radius:12px;
   background:linear-gradient(135deg,var(--accent-bg),transparent 60%),color-mix(in srgb,var(--surface) 72%,var(--bg));
@@ -3808,6 +3809,8 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
 .profile-hero-name{
   font-size:32px;font-weight:830;letter-spacing:-.02em;line-height:1.05;
   display:flex;align-items:center;gap:10px;flex-wrap:wrap;color:var(--text);
+  min-width:0;overflow-wrap:anywhere;word-break:break-word;
+  padding-right:44px;  /* keep clear of the absolute-positioned ⋯ menu */
 }
 /* Activity stats — sits in the hero body where the old handle used to be. */
 .profile-hero-activity{
@@ -3863,6 +3866,58 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
   background:color-mix(in srgb,var(--success) 12%,transparent);
   color:color-mix(in srgb,var(--success) 80%,var(--text));
 }
+
+/* Hero overflow menu — "⋯" button top-right + dropdown */
+.profile-hero-menu-host{position:absolute;top:10px;right:10px;z-index:5;}
+.profile-hero-menu-button{
+  width:34px;height:34px;display:grid;place-items:center;
+  border:1px solid var(--border);border-radius:8px;
+  background:color-mix(in srgb,var(--sidebar) 70%,transparent);
+  color:var(--text);cursor:pointer;font:inherit;font-size:18px;font-weight:800;line-height:1;
+}
+.profile-hero-menu-button:hover{background:var(--accent-bg);color:var(--accent-text);border-color:var(--accent-bg-strong);}
+.profile-hero-menu-button:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
+.profile-hero-menu{
+  position:absolute;top:38px;right:0;min-width:200px;
+  background:var(--surface);border:1px solid var(--border2);border-radius:10px;
+  box-shadow:0 10px 30px rgba(0,0,0,.35);padding:5px;
+  display:flex;flex-direction:column;gap:2px;
+}
+.profile-hero-menu[hidden]{display:none;}
+.profile-hero-menu-item{
+  text-align:left;padding:7px 10px;border-radius:6px;
+  background:transparent;border:0;color:var(--text);
+  font:inherit;font-size:13px;cursor:pointer;
+}
+.profile-hero-menu-item:hover:not([disabled]){background:var(--accent-bg);color:var(--accent-text);}
+.profile-hero-menu-item:focus-visible{outline:2px solid var(--accent);outline-offset:-2px;}
+.profile-hero-menu-item[disabled]{opacity:.45;cursor:not-allowed;}
+.profile-hero-menu-item.danger{color:var(--danger,#E76F51);}
+.profile-hero-menu-item.danger:hover:not([disabled]){background:color-mix(in srgb,var(--danger,#E76F51) 15%,transparent);color:var(--danger,#E76F51);}
+.profile-hero-menu-divider{height:1px;background:var(--border);margin:4px 0;}
+
+/* In-app input dialog (replaces window.prompt) */
+.input-dialog{position:fixed;z-index:1100;inset:0;display:flex;align-items:center;justify-content:center;padding:24px;background:rgba(3,7,18,.52);backdrop-filter:blur(2px);}
+.input-dialog-card{width:min(460px,100%);background:var(--surface);border:1px solid var(--border2);border-radius:12px;padding:16px;box-shadow:0 18px 50px rgba(0,0,0,.45);display:flex;flex-direction:column;gap:10px;}
+.input-dialog-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;}
+.input-dialog-title{font-size:14px;font-weight:700;color:var(--text);}
+.input-dialog-message{font-size:12.5px;color:var(--muted);line-height:1.45;margin-top:3px;}
+.input-dialog-close{border:0;background:transparent;color:var(--muted);font-size:20px;line-height:1;cursor:pointer;}
+.input-dialog-card input[type="text"]{
+  width:100%;box-sizing:border-box;font:inherit;font-size:14px;
+  background:var(--bg);color:var(--text);
+  border:1px solid var(--border);border-radius:8px;padding:9px 10px;
+}
+.input-dialog-card input[type="text"]:focus{outline:2px solid var(--accent);outline-offset:1px;}
+.input-dialog-counter{font-size:11px;align-self:flex-end;}
+.input-dialog-hint{font-size:11.5px;line-height:1.45;}
+.input-dialog-error{
+  font-size:12px;padding:6px 9px;border-radius:7px;
+  color:var(--danger,#E76F51);
+  background:color-mix(in srgb,var(--danger,#E76F51) 12%,transparent);
+  border:1px solid color-mix(in srgb,var(--danger,#E76F51) 35%,transparent);
+}
+.input-dialog-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:4px;}
 
 /* Gateway tile — wifi indicator */
 .profile-wifi{

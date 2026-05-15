@@ -4819,9 +4819,12 @@ function _profileHeroDossier(p, isActive, isDefault){
   const makeActiveBtn = isActive
     ? ''
     : `<button id="opsMakeActive" class="profile-ops-button primary" type="button">Make active</button>`;
-  const removeAttrs = isDefault
-    ? 'disabled aria-disabled="true" title="The default profile cannot be removed."'
-    : '';
+  // The destructive Remove item is gated for the default profile by both
+  // a `disabled` attribute on the menu item AND a guard in the click handler.
+  const removeDisabled = isDefault ? 'disabled aria-disabled="true"' : '';
+  const removeTitle = isDefault
+    ? 'The default profile cannot be removed.'
+    : 'Permanently delete this profile.';
   return `
     <section class="profile-hero" aria-labelledby="profileHeroName">
       <div class="profile-hero-avatar" id="profileHeroAvatar" tabindex="0" role="button" aria-label="Avatar for ${name}. Activate to change.">
@@ -4838,9 +4841,19 @@ function _profileHeroDossier(p, isActive, isDefault){
         <div class="profile-hero-actions" aria-label="Primary actions for ${name}">
           ${makeActiveBtn}
           ${startBtn}
-          <button class="profile-ops-button" type="button" data-ops-action="rename">Rename</button>
-          <button class="profile-ops-button" type="button" data-ops-action="duplicate">Duplicate</button>
-          <button class="profile-ops-button danger" type="button" data-ops-action="remove" ${removeAttrs}>Remove</button>
+        </div>
+      </div>
+      <div class="profile-hero-menu-host">
+        <button id="profileHeroMenuButton" type="button" class="profile-hero-menu-button"
+          aria-haspopup="menu" aria-expanded="false" aria-controls="profileHeroMenu"
+          aria-label="More profile actions" title="More actions">⋯</button>
+        <div id="profileHeroMenu" class="profile-hero-menu" role="menu" hidden>
+          <button class="profile-hero-menu-item" type="button" role="menuitem" data-ops-action="rename">Rename…</button>
+          <button class="profile-hero-menu-item" type="button" role="menuitem" data-ops-action="edit-description">Change description…</button>
+          <button class="profile-hero-menu-item" type="button" role="menuitem" data-ops-action="duplicate">Duplicate…</button>
+          <div class="profile-hero-menu-divider" role="separator"></div>
+          <button class="profile-hero-menu-item danger" type="button" role="menuitem" data-ops-action="remove"
+            ${removeDisabled} title="${removeTitle}">Remove…</button>
         </div>
       </div>
     </section>`;
@@ -5557,18 +5570,56 @@ function _bindProfileOpsConsole(p, isActive, isDefault){
     };
   }
 
-  // Inline actions in the hero — no more overflow menu in v3.
+  // Hero overflow menu (top-right "⋯") — owns Rename / Change description /
+  // Duplicate / Remove. The action buttons inline beneath the description
+  // are reserved for Make Active + Start Chat.
   const body = $('profileDetailBody');
+  const heroMenuBtn = $('profileHeroMenuButton');
+  const heroMenu = $('profileHeroMenu');
+  const closeHeroMenu = () => {
+    if (!heroMenu || heroMenu.hidden) return;
+    heroMenu.hidden = true;
+    if (heroMenuBtn) heroMenuBtn.setAttribute('aria-expanded', 'false');
+    document.removeEventListener('click', heroMenuOutside, true);
+    document.removeEventListener('keydown', heroMenuEsc, true);
+  };
+  const heroMenuOutside = (ev) => {
+    if (!heroMenu || heroMenu.contains(ev.target) || (heroMenuBtn && heroMenuBtn.contains(ev.target))) return;
+    closeHeroMenu();
+  };
+  const heroMenuEsc = (ev) => { if (ev.key === 'Escape') { ev.preventDefault(); closeHeroMenu(); if (heroMenuBtn) heroMenuBtn.focus(); } };
+  if (heroMenuBtn && heroMenu) {
+    heroMenuBtn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      if (heroMenu.hidden) {
+        heroMenu.hidden = false;
+        heroMenuBtn.setAttribute('aria-expanded', 'true');
+        // Defer registration so the opening click itself doesn't immediately close it.
+        setTimeout(() => {
+          document.addEventListener('click', heroMenuOutside, true);
+          document.addEventListener('keydown', heroMenuEsc, true);
+        }, 0);
+        const first = heroMenu.querySelector('.profile-hero-menu-item:not([disabled])');
+        if (first) first.focus();
+      } else {
+        closeHeroMenu();
+      }
+    });
+  }
+
   if (body) {
     body.querySelectorAll('[data-ops-action="rename"]').forEach(btn => {
-      btn.onclick = () => _opsRenameProfile(profileName);
+      btn.onclick = () => { closeHeroMenu(); _opsRenameProfile(profileName); };
     });
     body.querySelectorAll('[data-ops-action="duplicate"]').forEach(btn => {
-      btn.onclick = () => _opsDuplicateProfile(profileName);
+      btn.onclick = () => { closeHeroMenu(); _opsDuplicateProfile(profileName); };
+    });
+    body.querySelectorAll('[data-ops-action="edit-description"]').forEach(btn => {
+      btn.onclick = () => { closeHeroMenu(); _enterProfileDescriptionEdit(p); };
     });
     body.querySelectorAll('[data-ops-action="remove"]').forEach(btn => {
-      if (isDefault) return;  // default profile button stays disabled
-      btn.onclick = () => deleteCurrentProfile();
+      if (isDefault) return;  // default profile menu item stays disabled
+      btn.onclick = () => { closeHeroMenu(); deleteCurrentProfile(); };
     });
     body.querySelectorAll('[data-ops-action="diagnostics"]').forEach(btn => {
       btn.onclick = () => showToast('Diagnostics drawer not yet wired up.');
@@ -5633,11 +5684,110 @@ async function startChatWithProfile(profileName){
   }
 }
 
+// ── In-app input dialog (replaces window.prompt) ────────────────────────
+//
+// showInputDialog renders a styled modal and returns a Promise<string|null>
+// that resolves to the entered string on Save, or null on Cancel / Esc /
+// click-outside. It enforces an optional `maxlength` + `pattern` and
+// surfaces a validation message inline so the user never leaves the dialog
+// for a bad input.
+
+const _PROFILE_NAME_MAX_LEN = 32;
+const _PROFILE_NAME_PATTERN = /^[a-z0-9][a-z0-9_-]*$/;
+const _PROFILE_NAME_HINT = 'Lowercase letters, digits, dash and underscore. Must start with a letter or digit.';
+
+function showInputDialog({
+  title, message, defaultValue, confirmLabel,
+  maxlength, pattern, patternError, placeholder, hint,
+} = {}) {
+  return new Promise((resolve) => {
+    const existing = document.getElementById('inputDialogOverlay');
+    if (existing) existing.remove();
+    const overlay = document.createElement('div');
+    overlay.id = 'inputDialogOverlay';
+    overlay.className = 'input-dialog';
+    overlay.innerHTML = `
+      <div class="input-dialog-card" role="dialog" aria-modal="true" aria-labelledby="inputDialogTitle">
+        <div class="input-dialog-head">
+          <div>
+            <div id="inputDialogTitle" class="input-dialog-title">${esc(title || 'Enter value')}</div>
+            ${message ? `<div class="input-dialog-message">${esc(message)}</div>` : ''}
+          </div>
+          <button type="button" class="input-dialog-close" data-input-action="cancel" aria-label="Close">×</button>
+        </div>
+        <input id="inputDialogValue" type="text" autocomplete="off" spellcheck="false"
+          ${maxlength ? `maxlength="${maxlength}"` : ''}
+          ${placeholder ? `placeholder="${esc(placeholder)}"` : ''}
+          value="${esc(defaultValue || '')}">
+        <div id="inputDialogCounter" class="input-dialog-counter muted">${maxlength ? `${(defaultValue||'').length}/${maxlength}` : '&nbsp;'}</div>
+        <div id="inputDialogError" class="input-dialog-error" hidden></div>
+        ${hint ? `<div class="input-dialog-hint muted">${esc(hint)}</div>` : ''}
+        <div class="input-dialog-actions">
+          <button type="button" class="profile-ops-button" data-input-action="cancel">Cancel</button>
+          <button type="button" class="profile-ops-button primary" data-input-action="confirm">${esc(confirmLabel || 'OK')}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+
+    const input = overlay.querySelector('#inputDialogValue');
+    const counter = overlay.querySelector('#inputDialogCounter');
+    const errorEl = overlay.querySelector('#inputDialogError');
+
+    const cleanup = (value) => {
+      document.removeEventListener('keydown', onKey, true);
+      overlay.remove();
+      resolve(value);
+    };
+    const cancel = () => cleanup(null);
+    const confirm = () => {
+      const v = (input.value || '').trim();
+      if (!v) { showError('A value is required.'); input.focus(); return; }
+      if (maxlength && v.length > maxlength) { showError(`Must be ${maxlength} characters or fewer.`); input.focus(); return; }
+      if (pattern && !pattern.test(v)) { showError(patternError || 'Invalid value.'); input.focus(); return; }
+      cleanup(v);
+    };
+    const showError = (msg) => {
+      if (!errorEl) return;
+      errorEl.textContent = msg;
+      errorEl.hidden = false;
+    };
+
+    overlay.addEventListener('click', (ev) => { if (ev.target === overlay) cancel(); });
+    overlay.querySelectorAll('[data-input-action]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        if (btn.dataset.inputAction === 'confirm') confirm(); else cancel();
+      });
+    });
+    input.addEventListener('input', () => {
+      if (counter && maxlength) counter.textContent = `${input.value.length}/${maxlength}`;
+      if (errorEl && !errorEl.hidden) errorEl.hidden = true;
+    });
+    const onKey = (ev) => {
+      if (ev.key === 'Escape') { ev.preventDefault(); cancel(); }
+      else if (ev.key === 'Enter') { ev.preventDefault(); confirm(); }
+    };
+    document.addEventListener('keydown', onKey, true);
+
+    // Defer focus so the input doesn't capture the click that opened it.
+    setTimeout(() => {
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+    }, 0);
+  });
+}
+
 async function _opsRenameProfile(profileName){
   if (!profileName) return;
-  const newName = (typeof showInputDialog === 'function')
-    ? await showInputDialog({ title: 'Rename profile', message: `Choose a new name for "${profileName}".`, defaultValue: profileName, confirmLabel: 'Rename' })
-    : window.prompt(`Rename profile "${profileName}" to:`, profileName);
+  const newName = await showInputDialog({
+    title: 'Rename profile',
+    message: `Choose a new name for "${profileName}".`,
+    defaultValue: profileName,
+    confirmLabel: 'Rename',
+    maxlength: _PROFILE_NAME_MAX_LEN,
+    pattern: _PROFILE_NAME_PATTERN,
+    patternError: _PROFILE_NAME_HINT,
+    hint: _PROFILE_NAME_HINT,
+  });
   if (!newName || newName === profileName) return;
   try {
     const result = await api('/api/profile/rename', { method: 'POST', body: JSON.stringify({ name: profileName, new_name: newName }) });
@@ -5657,10 +5807,21 @@ async function _opsRenameProfile(profileName){
 
 async function _opsDuplicateProfile(profileName){
   if (!profileName) return;
-  const suggested = `${profileName}-copy`;
-  const newName = (typeof showInputDialog === 'function')
-    ? await showInputDialog({ title: 'Duplicate profile', message: `Create a copy of "${profileName}".`, defaultValue: suggested, confirmLabel: 'Duplicate' })
-    : window.prompt(`Duplicate "${profileName}" as:`, suggested);
+  // Suggested copy name, truncated so the suffix doesn't push us over the cap.
+  let suggested = `${profileName}-copy`;
+  if (suggested.length > _PROFILE_NAME_MAX_LEN) {
+    suggested = suggested.slice(0, _PROFILE_NAME_MAX_LEN);
+  }
+  const newName = await showInputDialog({
+    title: 'Duplicate profile',
+    message: `Create a copy of "${profileName}".`,
+    defaultValue: suggested,
+    confirmLabel: 'Duplicate',
+    maxlength: _PROFILE_NAME_MAX_LEN,
+    pattern: _PROFILE_NAME_PATTERN,
+    patternError: _PROFILE_NAME_HINT,
+    hint: _PROFILE_NAME_HINT,
+  });
   if (!newName) return;
   try {
     const result = await api('/api/profile/duplicate', { method: 'POST', body: JSON.stringify({ name: profileName, new_name: newName }) });
