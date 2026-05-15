@@ -29,6 +29,11 @@ let _workspacePreFormDetail = null;
 let _currentProfileDetail = null; // full profile object
 let _profileMode = 'empty'; // 'empty' | 'read' | 'create'
 let _profilePreFormDetail = null;
+// Profile scope for the global Skills panel. When `profile` is non-null,
+// the panel renders a banner naming the profile and shows per-skill toggles.
+// Set by the Manage button on a profile, cleared by the "Show all" link or
+// when the user navigates away.
+let _skillsScope = { profile: null, enabledSet: null };
 let _pendingSettingsTargetPanel = null; // destination selected while settings had unsaved changes
 let _logsAutoRefreshTimer = null;
 let _lastLogsLines = [];
@@ -3114,7 +3119,23 @@ async function clearConversation() {
 
 // ── Skills panel ──
 async function loadSkills() {
-  if (_skillsData) { renderSkills(_skillsData); return; }
+  if (_skillsData) {
+    // Even if global list is cached, we may need to (re-)fetch the profile-scoped
+    // enabled set when the scope changed since the last render.
+    if (_skillsScope.profile) {
+      try {
+        const profileData = await api('/api/profile/skills?name=' + encodeURIComponent(_skillsScope.profile));
+        const rows = Array.isArray(profileData && profileData.skills) ? profileData.skills : [];
+        _skillsScope.enabledSet = new Set(rows.filter(r => r.enabled).map(r => r.name));
+      } catch(e) {
+        _skillsScope.enabledSet = new Set();
+      }
+    } else {
+      _skillsScope.enabledSet = null;
+    }
+    renderSkills(_skillsData);
+    return;
+  }
   const box = $('skillsList');
   try {
     const data = await api('/api/skills');
@@ -3123,6 +3144,18 @@ async function loadSkills() {
     // avoiding stale keys when categories are renamed or removed server-side.
     const liveCats = new Set(_skillsData.map(s => s.category || '(general)'));
     for (const c of _collapsedCats) { if (!liveCats.has(c)) _collapsedCats.delete(c); }
+    // If a profile scope is active, fetch that profile's enabled set before rendering.
+    if (_skillsScope.profile) {
+      try {
+        const profileData = await api('/api/profile/skills?name=' + encodeURIComponent(_skillsScope.profile));
+        const rows = Array.isArray(profileData && profileData.skills) ? profileData.skills : [];
+        _skillsScope.enabledSet = new Set(rows.filter(r => r.enabled).map(r => r.name));
+      } catch(e) {
+        _skillsScope.enabledSet = new Set();
+      }
+    } else {
+      _skillsScope.enabledSet = null;
+    }
     renderSkills(_skillsData);
   } catch(e) { box.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">Error: ${esc(e.message)}</div>`; }
 }
@@ -3160,7 +3193,28 @@ function renderSkills(skills) {
   }
   const box = $('skillsList');
   box.innerHTML = '';
-  if (!filtered.length) { box.innerHTML = `<div style="padding:12px;color:var(--muted);font-size:12px">${esc(t('skills_no_match'))}</div>`; return; }
+
+  // Build scope banner when a profile is active.
+  const scoped = !!_skillsScope.profile;
+  if (scoped) {
+    const banner = document.createElement('div');
+    banner.className = 'skills-scope-banner';
+    banner.setAttribute('role', 'status');
+    banner.innerHTML = '<span class="skills-scope-banner__label">Skills · <strong>' + esc(_skillsScope.profile) + '</strong></span><button type="button" class="skills-scope-banner__clear" data-skills-action="clear-scope">Show all skills</button>';
+    box.appendChild(banner);
+  }
+
+  if (!filtered.length) {
+    const empty = document.createElement('div');
+    empty.style.cssText = 'padding:12px;color:var(--muted);font-size:12px';
+    empty.textContent = t('skills_no_match');
+    box.appendChild(empty);
+    // Still need to wire the clear button if it was rendered above.
+    box.querySelectorAll('[data-skills-action="clear-scope"]').forEach(btn => {
+      btn.onclick = () => { _skillsScope = { profile: null, enabledSet: null }; loadSkills(); };
+    });
+    return;
+  }
   for (const [cat, items] of Object.entries(cats).sort()) {
     const collapsed = _collapsedCats.has(cat);
     const sec = document.createElement('div');
@@ -3175,11 +3229,57 @@ function renderSkills(skills) {
       const el = document.createElement('div');
       el.className = 'skill-item';
       el.style.display = collapsed ? 'none' : '';
-      el.innerHTML = `<span class="skill-name">${esc(skill.name)}</span><span class="skill-desc">${esc(skill.description||'')}</span>`;
+      // When scoped, prepend a toggle checkbox before the skill label/description.
+      if (scoped) {
+        const isEnabled = _skillsScope.enabledSet && _skillsScope.enabledSet.has(skill.name);
+        const toggleLabel = document.createElement('label');
+        toggleLabel.className = 'skill-row-toggle';
+        toggleLabel.innerHTML = '<input type="checkbox" data-skill-toggle="' + esc(skill.name) + '" ' + (isEnabled ? 'checked' : '') + ' aria-label="Enable ' + esc(skill.name) + ' for ' + esc(_skillsScope.profile) + '"><span class="skill-row-toggle__track"></span>';
+        // Stop click on the label/checkbox from triggering the row's openSkill handler.
+        toggleLabel.onclick = (ev) => ev.stopPropagation();
+        el.appendChild(toggleLabel);
+      }
+      const nameSpan = document.createElement('span');
+      nameSpan.className = 'skill-name';
+      nameSpan.textContent = skill.name;
+      const descSpan = document.createElement('span');
+      descSpan.className = 'skill-desc';
+      descSpan.textContent = skill.description || '';
+      el.appendChild(nameSpan);
+      el.appendChild(descSpan);
       el.onclick = () => openSkill(skill.name, el);
       sec.appendChild(el);
     }
     box.appendChild(sec);
+  }
+
+  // Attach event listeners after DOM is built.
+  // Banner clear button.
+  box.querySelectorAll('[data-skills-action="clear-scope"]').forEach(btn => {
+    btn.onclick = () => { _skillsScope = { profile: null, enabledSet: null }; _skillsData = null; loadSkills(); };
+  });
+  // Per-skill toggle checkboxes.
+  if (scoped) {
+    box.querySelectorAll('[data-skill-toggle]').forEach(input => {
+      input.onchange = async () => {
+        if (!_skillsScope.profile) return;
+        const skillName = input.dataset.skillToggle;
+        const wantOn = input.checked;
+        try {
+          const res = await api('/api/profile/skills/toggle', { method: 'POST', body: JSON.stringify({ name: _skillsScope.profile, skill: skillName, enabled: wantOn }) });
+          if (res && typeof res === 'object' && res.ok !== false) {
+            if (wantOn) _skillsScope.enabledSet.add(skillName);
+            else _skillsScope.enabledSet.delete(skillName);
+          } else {
+            input.checked = !wantOn;
+            if (typeof showToast === 'function') showToast('Could not toggle skill', 4000, 'error');
+          }
+        } catch (e) {
+          input.checked = !wantOn;
+          if (typeof showToast === 'function') showToast('Could not toggle skill: ' + (e && e.message || 'unknown'), 4000, 'error');
+        }
+      };
+    });
   }
 }
 
@@ -5561,6 +5661,7 @@ function _bindProfileOpsConsole(p, isActive, isDefault){
     });
     body.querySelectorAll('[data-ops-action="skills"]').forEach(btn => {
       btn.onclick = () => {
+        _skillsScope = { profile: profileName, enabledSet: null };
         if (typeof switchPanel === 'function') switchPanel('skills');
       };
     });
