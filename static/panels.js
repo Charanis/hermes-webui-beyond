@@ -4657,7 +4657,7 @@ function _profileHeroDossier(p, isActive, isDefault){
   // Active is conveyed by the inline pill — there is intentionally no bare
   // status dot next to the profile name in v3 (the pill carries it).
   const activePill = isActive
-    ? `<span class="profile-hero-active-pill"><span class="profile-status-dot ok" aria-hidden="true"></span>Active</span>`
+    ? `<span class="profile-active-pill"><span class="profile-active-pill__dot" aria-hidden="true"></span>ACTIVE</span>`
     : '';
   // When inactive, "Make active" takes the primary slot; otherwise "Start chat" does.
   const startBtn = `<button id="opsStartChat" class="profile-ops-button ${isActive ? 'primary' : ''}" type="button">Start chat${isActive ? '' : ` with ${name}`}</button>`;
