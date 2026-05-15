@@ -4659,8 +4659,8 @@ function _profileHeroDossier(p, isActive, isDefault){
   const activePill = isActive
     ? `<span class="profile-active-pill"><span class="profile-active-pill__dot" aria-hidden="true"></span>Active</span>`
     : '';
-  // When inactive, "Make active" takes the primary slot; otherwise "Start chat" does.
-  const startBtn = `<button id="opsStartChat" class="profile-ops-button ${isActive ? 'primary' : ''}" type="button">Start chat${isActive ? '' : ` with ${name}`}</button>`;
+  // When inactive, "Make active" takes the primary slot.
+  // "Start chat" / "New Chat" has been relocated to the Default Model tile.
   const makeActiveBtn = isActive
     ? ''
     : `<button id="opsMakeActive" class="profile-ops-button primary" type="button">Make active</button>`;
@@ -4685,7 +4685,6 @@ function _profileHeroDossier(p, isActive, isDefault){
         </div>
         <div class="profile-hero-actions" aria-label="Primary actions for ${name}">
           ${makeActiveBtn}
-          ${startBtn}
         </div>
       </div>
       <div class="profile-hero-menu-host">
@@ -4884,6 +4883,7 @@ function _profileRuntimePanel(p, isActive){
   //   - A hidden <select id="profileDefaultModelSelect"> mirrors the chat
   //     composer's #modelSelect so the parameterised renderer can read
   //     optgroups out of it. _hydrateProfileDefaultModel populates it.
+  const newChatBtn = `<button type="button" id="opsStartChat" class="profile-new-chat-btn" data-ops-action="start-chat" aria-label="Start a new chat with this profile"><span class="profile-new-chat-btn__icon">${li('message-square', 16)}</span><span>New Chat</span></button>`;
   return `
     <article class="profile-ops-tile profile-default-model-tile" aria-labelledby="opsDefaultModelTitle">
       <div class="profile-ops-tile-head profile-default-model-head">
@@ -4910,6 +4910,7 @@ function _profileRuntimePanel(p, isActive){
           </button>
           <div class="composer-reasoning-dropdown profile-default-reasoning-dropdown" id="profileDefaultReasoningDropdown"></div>
         </div>
+        ${newChatBtn}
       </div>
     </article>`;
 }

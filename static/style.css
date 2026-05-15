@@ -4025,6 +4025,16 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
 .profile-default-reasoning-dropdown.composer-reasoning-dropdown.flipped{
   top:auto;bottom:calc(100% + 4px);
 }
+.profile-new-chat-btn{
+  display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 12px;
+  border-radius:9999px;border:1px solid var(--accent);background:var(--accent);
+  color:var(--bg);font-size:13px;font-weight:600;cursor:pointer;
+  transition:background .12s ease,transform .08s ease;
+  align-self:center;white-space:nowrap;flex-shrink:0;
+}
+.profile-new-chat-btn:hover{background:var(--accent-hover);}
+.profile-new-chat-btn:active{transform:translateY(1px);}
+.profile-new-chat-btn__icon{display:inline-flex;align-items:center;}
 
 /* Files grid — Lucide icon container */
 .profile-file-icon svg{color:var(--accent-text);}
