@@ -1788,8 +1788,34 @@ def _parse_skill_frontmatter(content: str) -> tuple[dict, str]:
     return fm, body
 
 
+def _get_external_skills_dirs() -> list:
+    """Return the list of external skill directories from hermes-agent.
+
+    These are the agent-bundled skill roots (typically
+    ``<HERMES_HOME>/hermes-agent/skills``) that are NOT under the per-profile
+    ``skills/`` directory.  The global ``/api/skills`` endpoint already walks
+    these via ``_active_skill_search_dirs``; this function lets the per-profile
+    skills list include them too.
+
+    Best-effort: returns an empty list if hermes-agent is not installed.
+    Tests may monkeypatch this function to inject synthetic external dirs.
+    """
+    try:
+        from agent.skill_utils import get_external_skills_dirs as _ext  # type: ignore
+        result = _ext()
+        return list(result) if result else []
+    except (ImportError, Exception):
+        return []
+
+
 def list_profile_skills_api(name: str) -> dict:
-    """Return the skills installed in *name*'s skills directory, with enabled status.
+    """Return the skills installed for *name*, including external skill dirs.
+
+    Scans both the per-profile ``skills/`` directory AND the external skill
+    roots returned by :func:`_get_external_skills_dirs` (typically the
+    hermes-agent's bundled skill dir).  Real deployments install most skills
+    in the agent's bundled dir, not the per-profile dir, so the old
+    profile-only scan returned 0 skills on almost every installation.
 
     The disabled set is read from ``<profile-home>/config.yaml`` (key
     ``skills.disabled``).  Disabled skills are INCLUDED in the response list
@@ -1813,15 +1839,6 @@ def list_profile_skills_api(name: str) -> dict:
 
     if not profile_home.is_dir():
         raise FileNotFoundError(f"Profile '{name}' not found.")
-    skills_dir = profile_home / "skills"
-    if not skills_dir.exists():
-        return {
-            "ok": True,
-            "profile": name,
-            "skills": [],
-            "total_count": 0,
-            "enabled_count": 0,
-        }
 
     # --- Read disabled set from config.yaml ---
     disabled_set: set[str] = set()
@@ -1836,52 +1853,87 @@ def list_profile_skills_api(name: str) -> dict:
         except Exception:
             disabled_set = set()
 
-    # --- Iterate SKILL.md files ---
-    skills: list[dict] = []
-    for skill_md in sorted(skills_dir.rglob("SKILL.md")):
-        # Derive category: first path segment after skills_dir
+    # --- Build ordered list of skill search roots ---
+    # Profile-local dir first (takes precedence for deduplication), then
+    # external dirs from the agent's bundled location.
+    search_dirs: list[Path] = []
+    profile_skills_dir = profile_home / "skills"
+    if profile_skills_dir.is_dir():
+        search_dirs.append(profile_skills_dir)
+    for ext in _get_external_skills_dirs():
         try:
-            rel = skill_md.relative_to(skills_dir)
-        except ValueError:
+            ext_path = Path(ext)
+        except Exception:
             continue
-        parts = rel.parts  # e.g. ("research", "deep-dive", "SKILL.md")
-        if len(parts) < 3:
-            # Must be <category>/<skill-name>/SKILL.md — skip malformed layouts
-            continue
-        category = parts[0]
-        skill_dir_name = parts[1]
+        if ext_path.is_dir() and ext_path not in search_dirs:
+            search_dirs.append(ext_path)
 
-        # Check cache by absolute path string (no resolve — consistent with invalidation)
-        path_str = str(skill_md)
-        cached = _skill_md_cache.get(path_str)
-        if cached is None:
-            try:
-                content = skill_md.read_text(encoding="utf-8")[:4000]
-            except (OSError, UnicodeDecodeError):
+    if not search_dirs:
+        return {
+            "ok": True,
+            "profile": name,
+            "skills": [],
+            "total_count": 0,
+            "enabled_count": 0,
+        }
+
+    # --- Iterate SKILL.md files across all search roots ---
+    skills: list[dict] = []
+    seen_names: set[str] = set()
+
+    for skills_root in search_dirs:
+        for skill_md in sorted(skills_root.rglob("SKILL.md")):
+            if not skill_md.is_file():
                 continue
-            fm, body = _parse_skill_frontmatter(content)
-            skill_name = str(fm.get("name", skill_dir_name))[:64]
-            description = fm.get("description", "")
-            if not description:
-                for line in body.strip().split("\n"):
-                    line = line.strip()
-                    if line and not line.startswith("#"):
-                        description = line
-                        break
-            cached = {
-                "name": skill_name,
-                "description": description,
-                "category": category,
-            }
-            _skill_md_cache[path_str] = cached
+            try:
+                rel = skill_md.relative_to(skills_root)
+            except ValueError:
+                continue
+            parts = rel.parts  # e.g. ("research", "deep-dive", "SKILL.md") or ("name", "SKILL.md")
+            if len(parts) < 2:
+                # SKILL.md must live inside at least one directory (the skill dir).
+                continue
+            # Skill dir name is the immediate parent of SKILL.md.
+            skill_dir_name = parts[-2]
+            # Category is the path segment above the skill dir (if present).
+            category: str | None = parts[-3] if len(parts) >= 3 else None
 
-        skills.append({
-            "name": cached["name"],
-            "category": cached["category"],
-            "description": cached["description"],
-            "enabled": cached["name"] not in disabled_set,
-            "path": path_str,
-        })
+            # Check cache by absolute path string (no resolve — consistent with invalidation)
+            path_str = str(skill_md)
+            cached = _skill_md_cache.get(path_str)
+            if cached is None:
+                try:
+                    content = skill_md.read_text(encoding="utf-8")[:4000]
+                except (OSError, UnicodeDecodeError):
+                    continue
+                fm, body = _parse_skill_frontmatter(content)
+                skill_name = str(fm.get("name", skill_dir_name))[:64]
+                description = fm.get("description", "")
+                if not description:
+                    for line in body.strip().split("\n"):
+                        line = line.strip()
+                        if line and not line.startswith("#"):
+                            description = line
+                            break
+                cached = {
+                    "name": skill_name,
+                    "description": description,
+                    "category": category,
+                }
+                _skill_md_cache[path_str] = cached
+
+            # Deduplicate by name: profile-local wins (added first).
+            if cached["name"] in seen_names:
+                continue
+            seen_names.add(cached["name"])
+
+            skills.append({
+                "name": cached["name"],
+                "category": cached["category"],
+                "description": cached["description"],
+                "enabled": cached["name"] not in disabled_set,
+                "path": path_str,
+            })
 
     # Sort alphabetically by name (case-insensitive)
     skills.sort(key=lambda s: s["name"].lower())

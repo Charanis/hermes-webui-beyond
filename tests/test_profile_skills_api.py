@@ -298,3 +298,49 @@ def test_toggle_validates_boolean_input_at_function_boundary(profile_home_with_s
     assert b["changed"] is False
     c = profiles_mod.toggle_profile_skill_api("default", "deep-dive", True)
     assert c["changed"] is True
+
+
+def test_list_includes_skills_from_external_dirs(tmp_path, monkeypatch):
+    """Real-world deployments install most skills under
+    get_external_skills_dirs() (e.g. <HERMES_HOME>/hermes-agent/skills),
+    NOT <profile-home>/skills/. The list must include both."""
+    home = tmp_path / "hermes_home"
+    profile_skills = home / "skills"
+    profile_skills.mkdir(parents=True)
+    # Profile-local skill (per-profile dir).
+    (profile_skills / "custom").mkdir()
+    (profile_skills / "custom" / "SKILL.md").write_text(
+        "---\nname: custom\ndescription: profile-local skill\n---\nbody",
+        encoding="utf-8",
+    )
+    # External skill (mimic the agent-bundled location).
+    external_dir = tmp_path / "external_skills"
+    (external_dir / "shared").mkdir(parents=True)
+    (external_dir / "shared" / "SKILL.md").write_text(
+        "---\nname: shared\ndescription: globally installed skill\n---\nbody",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_BASE_HOME", str(home))
+
+    import importlib
+    import api.profiles as profiles_mod
+    importlib.reload(profiles_mod)
+
+    # Patch get_external_skills_dirs to return our external_dir.
+    # We patch at the profiles_mod level so the module uses our stub
+    # regardless of whether agent.skill_utils is importable.
+    monkeypatch.setattr(
+        profiles_mod,
+        '_get_external_skills_dirs',
+        lambda: [str(external_dir)],
+        raising=False,
+    )
+
+    result = profiles_mod.list_profile_skills_api("default")
+    names = sorted(s["name"] for s in result["skills"])
+    # Profile-local must appear.
+    assert "custom" in names, f"profile-local skill missing; names={names}"
+    # External must appear.
+    assert "shared" in names, f"external skill missing; names={names}"
