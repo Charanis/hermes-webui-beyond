@@ -2591,7 +2591,7 @@ def profile_gateway_control_api(name: str, action: str) -> dict:
         hook_result.setdefault('profile', name)
         hook_result.setdefault('action', action)
         hook_result.setdefault('configured', True)
-        hook_result.setdefault('phase', transient_phase)
+        hook_result['phase'] = transient_phase
         if hook_result.get('ok') and action == 'start':
             _write_gateway_last_run(profile_home)
         return hook_result
@@ -2606,7 +2606,7 @@ def profile_gateway_control_api(name: str, action: str) -> dict:
     result.setdefault('profile', name)
     result.setdefault('action', action)
     result.setdefault('configured', True)
-    result.setdefault('phase', transient_phase)
+    result['phase'] = transient_phase
     if result.get('ok') and action == 'start':
         _write_gateway_last_run(profile_home)
     return result

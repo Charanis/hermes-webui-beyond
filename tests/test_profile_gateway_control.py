@@ -482,6 +482,8 @@ def test_default_backend_start_uses_resolvable_hermes_binary(monkeypatch):
 
 
 def test_control_rejects_restart_action():
+    """The 'restart' action is no longer accepted — clients should
+    issue stop then start (the toggle UX does this implicitly)."""
     with tempfile.TemporaryDirectory() as td:
         base = Path(td) / ".hermes"
         (base / "profiles").mkdir(parents=True)
@@ -556,5 +558,30 @@ def test_start_failure_writes_failed_phase_with_error():
             assert "secretvalue" not in (result.get("message") or "")
             data = json.loads((profile / ".gateway-state.json").read_text())
             assert data["phase"] == "failed"
+        finally:
+            profiles._set_gateway_control_hook(None)
+
+
+def test_stop_failure_writes_failed_phase_with_error():
+    """A stop action that raises must also write phase='failed' so the
+    next status poll surfaces the failure (symmetric with start failure)."""
+    import json
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        profile = _seed_named_profile(base, "coder")
+        profiles = _reload_profiles_module(base)
+
+        def fake_hook(name, action):
+            raise RuntimeError("simulated kill failure")
+
+        profiles._set_gateway_control_hook(fake_hook)
+        try:
+            result = profiles.profile_gateway_control_api("coder", "stop")
+            assert result["ok"] is False
+            assert result.get("phase") == "failed"
+            data = json.loads((profile / ".gateway-state.json").read_text())
+            assert data["phase"] == "failed"
+            assert data.get("last_error")
         finally:
             profiles._set_gateway_control_hook(None)
