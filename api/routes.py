@@ -3888,6 +3888,19 @@ def handle_get(handler, parsed) -> bool:
             "path": str(skill_md),
         })
 
+    if parsed.path == "/api/profile/gateway/status":
+        qs = parse_qs(parsed.query)
+        name = (qs.get("name", [""])[0] or "").strip()
+        if not name:
+            return bad(handler, "name is required")
+        try:
+            from api.profiles import profile_gateway_status_api
+            return j(handler, profile_gateway_status_api(name))
+        except FileNotFoundError as e:
+            return bad(handler, str(e), 404)
+        except ValueError as e:
+            return bad(handler, str(e), 400)
+
     # ── Skills API (GET) ──
     if parsed.path == "/api/skills":
         qs = parse_qs(parsed.query)
@@ -5116,8 +5129,8 @@ def handle_post(handler, parsed) -> bool:
         action = body.get("action", "").strip().lower() if isinstance(body.get("action"), str) else ""
         if not name:
             return bad(handler, "name is required")
-        if action not in ("start", "stop", "restart"):
-            return bad(handler, "action must be one of: start, restart, stop")
+        if action not in ("start", "stop"):
+            return bad(handler, "action must be 'start' or 'stop'")
         try:
             from api.profiles import profile_gateway_control_api
 
