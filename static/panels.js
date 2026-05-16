@@ -5105,6 +5105,12 @@ function _profileRuntimePanel(p, isActive){
 const _gatewayStateByProfile = new Map();
 // Active pollers keyed by profile name → setTimeout handle.
 const _gatewayPollers = new Map();
+// ── Per-profile messaging-platforms cache (spec 2026-05-16) ───────────
+// Map<name → {ok, platforms:[...], message?, fetchedAt}>. Shared between
+// the gateway tile's count badge and the modal's first render so we only
+// pay for one /api/profile/gateway/platforms fetch per 30s window.
+const _platformsByProfile = new Map();
+const _PLATFORMS_CACHE_TTL_MS = 30000;
 const _GATEWAY_TRANSIENT_PHASES = new Set(['starting', 'stopping']);
 const _GATEWAY_INFO_PHASES = new Set(['failed', 'unknown', 'unavailable']);
 const _GATEWAY_TRANSIENT_POLL_MS = 1500;
@@ -5185,6 +5191,371 @@ function _repaintGatewayTile(profileName){
     toggle.setAttribute('aria-disabled', toggle.disabled ? 'true' : 'false');
   }
   if (toggleLabel) toggleLabel.textContent = _gatewayToggleLabelForPhase(phase);
+  // Refresh the platforms button count from the cache. The button itself
+  // is part of .profile-gateway-control; we only touch its count span and
+  // its disabled/title state when the cache reports hermes-agent missing.
+  const platformsBtn = tile.querySelector('.profile-gateway-platforms-btn');
+  if (platformsBtn) {
+    const cached = _platformsByProfile.get(profileName);
+    const countNode = platformsBtn.querySelector('[data-platforms-count]');
+    if (countNode) countNode.textContent = String(_platformsConfiguredCount(cached));
+    const unavailable = !!(cached && cached.ok === false);
+    platformsBtn.disabled = unavailable;
+    platformsBtn.setAttribute('aria-disabled', unavailable ? 'true' : 'false');
+    if (unavailable && cached && cached.message) {
+      platformsBtn.setAttribute('title', cached.message);
+      platformsBtn.setAttribute('aria-label', cached.message);
+    }
+  }
+}
+
+// ── Messaging-platforms config (spec 2026-05-16) ──────────────────────
+//
+// Per-profile messaging-platform credentials live in <HERMES_HOME>/.env
+// and are edited through a modal launched from the Gateway tile. The
+// modal is profile-scoped — every call resolves the profile from the
+// `name` argument, never from active state — and reuses the existing
+// `.profile-skills-manager-overlay` chrome.
+//
+// The cache (`_platformsByProfile`, declared above) is shared between
+// the tile's count badge and the modal's first paint so we only pay
+// for one /api/profile/gateway/platforms fetch per 30s window. The
+// modal refreshes the cache in the background on open and after every
+// Save/Clear.
+
+function _platformsConfiguredCount(payload){
+  if (!payload || payload.ok === false || !Array.isArray(payload.platforms)) return 0;
+  let n = 0;
+  for (const pf of payload.platforms) {
+    if (pf && pf.status === 'configured') n++;
+  }
+  return n;
+}
+
+async function _loadProfilePlatforms(name, opts){
+  if (!name) return null;
+  const force = !!(opts && opts.force);
+  const cached = _platformsByProfile.get(name);
+  const now = Date.now();
+  if (!force && cached && cached.fetchedAt && (now - cached.fetchedAt) < _PLATFORMS_CACHE_TTL_MS) {
+    return cached;
+  }
+  try {
+    const fresh = await api('/api/profile/gateway/platforms?name=' + encodeURIComponent(name));
+    fresh.fetchedAt = Date.now();
+    _platformsByProfile.set(name, fresh);
+    return fresh;
+  } catch (e) {
+    // Surface as ok:false so the UI degrades the same way as the
+    // server-side "hermes-agent not available" path.
+    const errPayload = { ok: false, message: e && e.message ? e.message : String(e), fetchedAt: Date.now() };
+    _platformsByProfile.set(name, errPayload);
+    return errPayload;
+  }
+}
+
+function _renderPlatformCard(platform, profileName){
+  if (!platform) return '';
+  const key = esc(platform.key || '');
+  const label = esc(platform.label || platform.key || 'Unknown');
+  const emoji = esc(platform.emoji || '🔌');
+  const status = platform.status === 'configured' ? 'configured'
+               : platform.status === 'partial' ? 'partial'
+               : 'not_configured';
+  const statusLabel = status === 'configured' ? '● Configured'
+                    : status === 'partial' ? '● Partial'
+                    : '○ Not configured';
+  // Default expansion: partial expanded (call-to-action), others collapsed.
+  // Not-configured cards expand on click; configured cards collapse to
+  // show a clean status row and expand to reveal Replace controls.
+  const openByDefault = status === 'partial';
+  const openClass = openByDefault ? ' open' : '';
+  const isPlugin = !!platform.is_plugin;
+  let fieldsHTML = '';
+  if (isPlugin) {
+    const required = Array.isArray(platform.required_env) ? platform.required_env : [];
+    const setEnv = new Set(Array.isArray(platform.set_env) ? platform.set_env : []);
+    fieldsHTML += `<div class="pf-plugin-note">Plugin platform — schema-light fallback. Set the required environment variables directly.</div>`;
+    for (const varName of required) {
+      const isSet = setEnv.has(varName);
+      // Plugin fields default to password (no metadata available); show
+      // Replace pattern if currently set, empty input otherwise.
+      fieldsHTML += `
+        <div class="platforms-field">
+          <div class="pf-field-label"><span>${esc(varName)}</span></div>
+          ${isSet ? `
+            <div class="pf-secret-row">
+              <input class="pf-input" type="password" value="••••••••••" disabled aria-label="${esc(varName)} (set)">
+              <button type="button" class="pf-secret-replace" data-pf-replace="${esc(varName)}">Replace</button>
+            </div>
+          ` : `
+            <input class="pf-input" type="password" name="${esc(varName)}" autocomplete="off" spellcheck="false">
+          `}
+        </div>`;
+    }
+  } else {
+    const vars = Array.isArray(platform.vars) ? platform.vars : [];
+    for (const v of vars) {
+      const varName = esc(v.name || '');
+      const prompt = esc(v.prompt || v.name || '');
+      const help = v.help ? `<div class="pf-field-help">${esc(v.help)}</div>` : '';
+      const optionalBadge = v.required === false
+        ? `<span class="pf-field-optional">optional</span>`
+        : '';
+      const missingRequired = (v.required !== false) && !v.is_set;
+      const labelExtra = missingRequired && status === 'partial'
+        ? `<span class="pf-field-required-missing">required · missing</span>` : '';
+      if (v.password) {
+        if (v.is_set) {
+          fieldsHTML += `
+            <div class="platforms-field" data-required="${v.required === false ? 'false' : 'true'}">
+              <div class="pf-field-label"><span>${prompt}</span>${optionalBadge}${labelExtra}</div>
+              <div class="pf-secret-row">
+                <input class="pf-input" type="password" value="••••••••••••••••••" disabled aria-label="${prompt} (set)">
+                <button type="button" class="pf-secret-replace" data-pf-replace="${varName}">Replace</button>
+              </div>
+              ${help}
+            </div>`;
+        } else {
+          fieldsHTML += `
+            <div class="platforms-field${missingRequired ? ' is-missing' : ''}" data-required="${v.required === false ? 'false' : 'true'}">
+              <div class="pf-field-label"><span>${prompt}</span>${optionalBadge}${labelExtra}</div>
+              <input class="pf-input" type="password" name="${varName}" autocomplete="off" spellcheck="false" placeholder="">
+              ${help}
+            </div>`;
+        }
+      } else {
+        // Non-password values round-trip — pre-fill from `value` when present.
+        const val = typeof v.value === 'string' ? esc(v.value) : '';
+        fieldsHTML += `
+          <div class="platforms-field" data-required="${v.required === false ? 'false' : 'true'}">
+            <div class="pf-field-label"><span>${prompt}</span>${optionalBadge}${labelExtra}</div>
+            <input class="pf-input" type="text" name="${varName}" value="${val}" autocomplete="off" spellcheck="false">
+            ${help}
+          </div>`;
+      }
+    }
+  }
+  return `
+    <article class="platforms-card${openClass}" data-platform-key="${key}" data-platform-status="${status}">
+      <div class="platforms-card-head" data-platforms-toggle>
+        <span class="platforms-card-title">
+          <span class="platforms-card-emoji">${emoji}</span>
+          <span class="platforms-card-name">${label}${isPlugin ? ' <span class="platforms-card-plugin-tag">plugin</span>' : ''}</span>
+        </span>
+        <span class="platforms-card-right">
+          <span class="pf-status" data-status="${status}">${statusLabel}</span>
+          <span class="platforms-card-chevron" aria-hidden="true">›</span>
+        </span>
+      </div>
+      <div class="platforms-card-body">
+        ${fieldsHTML}
+        <div class="pf-actions">
+          <button type="button" class="pf-btn danger" data-platform-clear="${key}">Clear</button>
+          <div class="pf-actions-right">
+            <button type="button" class="pf-btn" data-platform-cancel="${key}">Cancel</button>
+            <button type="button" class="pf-btn primary" data-platform-save="${key}">Save ${label}</button>
+          </div>
+        </div>
+      </div>
+    </article>`;
+}
+
+function _platformsModalEscape(ev){
+  if (ev.key === 'Escape') _closePlatformsManager();
+}
+
+function _closePlatformsManager(){
+  const overlay = document.getElementById('profilePlatformsManagerOverlay');
+  if (overlay) overlay.remove();
+  document.removeEventListener('keydown', _platformsModalEscape, true);
+}
+
+async function _openPlatformsManager(profileName){
+  if (!profileName) return;
+  // Render the overlay shell immediately with a loading state so the
+  // modal pops without waiting for the fetch.
+  _closePlatformsManager();
+  const overlay = document.createElement('div');
+  overlay.id = 'profilePlatformsManagerOverlay';
+  // Reuse the existing skills-manager overlay chrome for backdrop, blur,
+  // and centering — keeps modal styling consistent across the WebUI.
+  overlay.className = 'profile-skills-manager-overlay platforms-manager-overlay';
+  overlay.innerHTML = `
+    <div class="profile-skills-manager-card platforms-manager-card" role="dialog" aria-modal="true" aria-labelledby="profilePlatformsManagerTitle">
+      <div class="profile-skills-manager-head">
+        <div class="profile-skills-manager-head-text">
+          <div class="profile-skills-manager-kicker">Messaging</div>
+          <h3 class="profile-skills-manager-title" id="profilePlatformsManagerTitle">Messaging platforms for <span id="profilePlatformsManagerName">${esc(profileName)}</span></h3>
+          <div class="profile-skills-manager-subtitle">Credentials are saved to this profile's .env file. Toggle the gateway after saving to verify connection.</div>
+        </div>
+        <div class="profile-skills-manager-actions">
+          <button type="button" class="profile-skills-manager-close" aria-label="Close" data-platforms-close>&times;</button>
+        </div>
+      </div>
+      <div id="profilePlatformsManagerBody" class="platforms-manager-list">
+        <div class="profile-skills-loading">Loading messaging platforms…</div>
+      </div>
+      <div class="profile-skills-manager-footer platforms-manager-footer">
+        <span class="platforms-manager-hint" id="profilePlatformsManagerHint"></span>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  // Close affordances. Background click closes; inner card click does NOT
+  // propagate so Save/Cancel/Replace inside the card cannot race the host
+  // listener and silently re-enter edit mode (project memory:
+  // feedback_inline_editor_click_bubble).
+  overlay.addEventListener('click', (ev) => {
+    if (ev.target === overlay) _closePlatformsManager();
+  });
+  const card = overlay.querySelector('.platforms-manager-card');
+  if (card) card.addEventListener('click', (ev) => { ev.stopPropagation(); });
+  const closeBtn = overlay.querySelector('[data-platforms-close]');
+  if (closeBtn) closeBtn.onclick = (ev) => { ev.stopPropagation(); _closePlatformsManager(); };
+  document.addEventListener('keydown', _platformsModalEscape, true);
+
+  // Fetch fresh payload. _loadProfilePlatforms uses the 30s TTL cache,
+  // so if the tile already warmed it on render we paint instantly.
+  const payload = await _loadProfilePlatforms(profileName, { force: false });
+  if (!document.getElementById('profilePlatformsManagerOverlay')) return;
+  _paintPlatformsManagerBody(profileName, payload);
+}
+
+function _paintPlatformsManagerBody(profileName, payload){
+  const body = document.getElementById('profilePlatformsManagerBody');
+  if (!body) return;
+  if (!payload || payload.ok === false) {
+    const msg = (payload && payload.message) || 'hermes-agent not available';
+    body.innerHTML = `<div class="profile-skills-error">${esc(msg)}</div>`;
+    return;
+  }
+  const platforms = Array.isArray(payload.platforms) ? payload.platforms : [];
+  if (platforms.length === 0) {
+    body.innerHTML = `<div class="profile-skills-empty">No platforms available.</div>`;
+    return;
+  }
+  body.innerHTML = platforms.map(pf => _renderPlatformCard(pf, profileName)).join('');
+  _bindPlatformsManagerHandlers(profileName, body);
+}
+
+function _bindPlatformsManagerHandlers(profileName, body){
+  body.querySelectorAll('[data-platforms-toggle]').forEach(head => {
+    head.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const card = head.closest('.platforms-card');
+      if (card) card.classList.toggle('open');
+    });
+  });
+  body.querySelectorAll('[data-pf-replace]').forEach(btn => {
+    btn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const varName = btn.getAttribute('data-pf-replace') || '';
+      const field = btn.closest('.platforms-field');
+      if (!field) return;
+      field.innerHTML = `
+        <div class="pf-field-label"><span>${esc(varName)}</span></div>
+        <input class="pf-input" type="password" name="${esc(varName)}" autocomplete="off" spellcheck="false" placeholder="" autofocus>`;
+      const input = field.querySelector('input');
+      if (input) input.focus();
+    });
+  });
+  body.querySelectorAll('[data-platform-cancel]').forEach(btn => {
+    btn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const card = btn.closest('.platforms-card');
+      if (!card) return;
+      // Re-render the card from the cached payload so unsaved edits are
+      // discarded. Then collapse it.
+      const key = card.getAttribute('data-platform-key');
+      const cached = _platformsByProfile.get(profileName);
+      const pf = cached && Array.isArray(cached.platforms)
+        ? cached.platforms.find(x => x.key === key) : null;
+      if (pf) {
+        const tmp = document.createElement('div');
+        tmp.innerHTML = _renderPlatformCard(pf, profileName);
+        const fresh = tmp.firstElementChild;
+        if (fresh) {
+          card.replaceWith(fresh);
+          _bindPlatformsManagerHandlers(profileName, body);
+        }
+      } else {
+        card.classList.remove('open');
+      }
+    });
+  });
+  body.querySelectorAll('[data-platform-save]').forEach(btn => {
+    btn.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      const key = btn.getAttribute('data-platform-save') || '';
+      const card = btn.closest('.platforms-card');
+      if (!card) return;
+      const values = {};
+      card.querySelectorAll('input[name]').forEach(inp => {
+        // Skip disabled "set" inputs (the •••• placeholder for password
+        // fields that are already set and not currently being replaced).
+        if (inp.disabled) return;
+        values[inp.name] = inp.value;
+      });
+      btn.disabled = true;
+      btn.textContent = 'Saving…';
+      try {
+        await _savePlatform(profileName, key, values);
+        _setPlatformsManagerHint('Saved. Toggle the gateway to verify connection.');
+      } catch (e) {
+        _setPlatformsManagerHint('Save failed: ' + (e && e.message ? e.message : String(e)));
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  });
+  body.querySelectorAll('[data-platform-clear]').forEach(btn => {
+    btn.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      const key = btn.getAttribute('data-platform-clear') || '';
+      btn.disabled = true;
+      try {
+        await _clearPlatform(profileName, key);
+        _setPlatformsManagerHint('Cleared. Toggle the gateway to apply.');
+      } catch (e) {
+        _setPlatformsManagerHint('Clear failed: ' + (e && e.message ? e.message : String(e)));
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  });
+}
+
+function _setPlatformsManagerHint(text){
+  const hint = document.getElementById('profilePlatformsManagerHint');
+  if (hint) hint.textContent = text || '';
+}
+
+async function _savePlatform(name, platformKey, values){
+  if (!name || !platformKey) return null;
+  const result = await api('/api/profile/gateway/platform?name=' + encodeURIComponent(name), {
+    method: 'POST',
+    body: JSON.stringify({ platform: platformKey, values: values || {} }),
+  });
+  // Refresh cache, repaint tile count, and repaint the modal so the
+  // saved card flips to its new status (configured/partial) in place.
+  const fresh = await _loadProfilePlatforms(name, { force: true });
+  _repaintGatewayTile(name);
+  const body = document.getElementById('profilePlatformsManagerBody');
+  if (body) _paintPlatformsManagerBody(name, fresh);
+  return result;
+}
+
+async function _clearPlatform(name, platformKey){
+  if (!name || !platformKey) return null;
+  const result = await api('/api/profile/gateway/platform?name=' + encodeURIComponent(name) +
+                           '&platform=' + encodeURIComponent(platformKey), {
+    method: 'DELETE',
+  });
+  const fresh = await _loadProfilePlatforms(name, { force: true });
+  _repaintGatewayTile(name);
+  const body = document.getElementById('profilePlatformsManagerBody');
+  if (body) _paintPlatformsManagerBody(name, fresh);
+  return result;
 }
 
 function _profileGatewayTile(p){
@@ -5204,7 +5575,18 @@ function _profileGatewayTile(p){
   const summary = _gatewayInfoSummary(state);
   const infoHidden = _gatewayInfoVisible(phase) ? '' : ' hidden';
   const controlUnavailable = state.control_available === false || phase === 'unavailable' || _GATEWAY_TRANSIENT_PHASES.has(phase);
-  const ariaChecked = phase === 'running' ? 'true' : 'false';
+  const isRunning = phase === 'running';
+  const ariaChecked = isRunning ? 'true' : 'false';
+  // Platforms button: rendered unconditionally in every gateway phase.
+  // Credential configuration is independent of lifecycle control — the
+  // button is only disabled when hermes-agent is not importable on the
+  // server (cached payload has ok=false).
+  const platformsCached = _platformsByProfile.get(p.name);
+  const platformsCount = _platformsConfiguredCount(platformsCached);
+  const platformsBtnDisabled = !!(platformsCached && platformsCached.ok === false);
+  const platformsTitle = platformsBtnDisabled
+    ? (platformsCached.message || 'hermes-agent not available')
+    : `Configure messaging platforms for ${p.name}`;
   return `
     <article class="profile-ops-tile profile-gateway-tile" aria-labelledby="opsGatewayTitle" data-profile-name="${name}">
       <div class="profile-ops-tile-head">
@@ -5229,6 +5611,13 @@ function _profileGatewayTile(p){
             <span class="profile-gateway-toggle-thumb"></span>
           </span>
           <span class="profile-gateway-toggle-label" id="opsGatewayToggleLabel">${esc(toggleLabel)}</span>
+        </button>
+        <button type="button" class="profile-gateway-platforms-btn"
+                data-profile-name="${name}" data-platforms-action="${name}"
+                title="${esc(platformsTitle)}"
+                aria-label="${esc(platformsTitle)}"${platformsBtnDisabled ? ' disabled aria-disabled="true"' : ''}>
+          <span class="profile-gateway-platforms-icon" aria-hidden="true">⚙</span>
+          <span class="profile-gateway-platforms-label">Platforms · <span class="profile-gateway-platforms-count" data-platforms-count>${platformsCount}</span></span>
         </button>
       </div>
     </article>`;
@@ -6271,6 +6660,10 @@ function _bindProfileOpsConsole(p, isActive, isDefault){
     body.querySelectorAll('[data-ops-action="skills"]').forEach(btn => {
       btn.onclick = () => _openProfileSkillsManager(profileName);
     });
+    // Platforms button on the Gateway tile (spec 2026-05-16).
+    body.querySelectorAll('[data-platforms-action]').forEach(btn => {
+      btn.onclick = (ev) => { ev.stopPropagation(); _openPlatformsManager(profileName); };
+    });
   }
 
   // Gateway toggle (v3 — replaces data-gateway-action button row).
@@ -6291,6 +6684,11 @@ function _bindProfileOpsConsole(p, isActive, isDefault){
   _refreshGatewayStatus(profileName).then(() => {
     _startGatewayPoller(profileName);
   }).catch(() => {});
+  // Warm the platforms cache for the tile's count badge. The modal will
+  // reuse this payload on first open if the 30s TTL hasn't elapsed.
+  _loadProfilePlatforms(profileName, { force: false })
+    .then(() => _repaintGatewayTile(profileName))
+    .catch(() => {});
 
   // Profile file widgets — scoped to the detail body (review F2).
   if (body) body.querySelectorAll('[data-profile-file]').forEach(btn => {

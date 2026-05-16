@@ -4126,6 +4126,20 @@ def handle_get(handler, parsed) -> bool:
         # NOTE: promotes transient phases as a side effect; GET is not idempotent here.
         return j(handler, data)
 
+    if parsed.path == "/api/profile/gateway/platforms":
+        qs = parse_qs(parsed.query)
+        name = (qs.get("name", [""])[0] or "").strip()
+        if not name:
+            return bad(handler, "name is required")
+        try:
+            from api.profiles import _list_platforms_for_profile
+            data = _list_platforms_for_profile(name)
+        except FileNotFoundError as e:
+            return bad(handler, _sanitize_error(e), 404)
+        except ValueError as e:
+            return bad(handler, _sanitize_error(e), 400)
+        return j(handler, data)
+
     # ── Skills API (GET) ──
     if parsed.path == "/api/skills":
         qs = parse_qs(parsed.query)
@@ -5378,6 +5392,31 @@ def handle_post(handler, parsed) -> bool:
         except (ValueError, FileNotFoundError) as e:
             return bad(handler, _sanitize_error(e), 404 if isinstance(e, FileNotFoundError) else 400)
 
+    if parsed.path == "/api/profile/gateway/platform":
+        # Name lives on the query string for symmetry with the GET endpoint.
+        qs = parse_qs(parsed.query)
+        name = (qs.get("name", [""])[0] or "").strip()
+        if not name:
+            return bad(handler, "name is required")
+        platform_key = ""
+        if isinstance(body.get("platform"), str):
+            platform_key = body["platform"].strip()
+        if not platform_key:
+            return bad(handler, "platform is required")
+        values = body.get("values")
+        if values is None:
+            values = {}
+        if not isinstance(values, dict):
+            return bad(handler, "values must be an object")
+        try:
+            from api.profiles import _set_platform_for_profile
+            data = _set_platform_for_profile(name, platform_key, values)
+        except FileNotFoundError as e:
+            return bad(handler, _sanitize_error(e), 404)
+        except ValueError as e:
+            return bad(handler, _sanitize_error(e), 400)
+        return j(handler, data)
+
     if parsed.path == "/api/profile/settings":
         from api.profiles import update_profile_settings_api
 
@@ -5987,6 +6026,24 @@ def handle_delete(handler, parsed) -> bool:
         if result is False:
             return _kanban_unknown_endpoint(handler, parsed, "DELETE")
         return True
+
+    if parsed.path == "/api/profile/gateway/platform":
+        qs = parse_qs(parsed.query)
+        name = (qs.get("name", [""])[0] or "").strip()
+        platform_key = (qs.get("platform", [""])[0] or "").strip()
+        if not name:
+            return bad(handler, "name is required")
+        if not platform_key:
+            return bad(handler, "platform is required")
+        try:
+            from api.profiles import _clear_platform_for_profile
+            data = _clear_platform_for_profile(name, platform_key)
+        except FileNotFoundError as e:
+            return bad(handler, _sanitize_error(e), 404)
+        except ValueError as e:
+            return bad(handler, _sanitize_error(e), 400)
+        return j(handler, data)
+
     return False
 
 # ── GET route helpers ─────────────────────────────────────────────────────────

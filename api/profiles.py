@@ -3206,11 +3206,18 @@ def profile_gateway_status_api(name: str) -> dict:
     # No WebUI phase recorded -> infer from runtime evidence or no evidence.
     if not phase:
         if runtime_phase == 'unknown':
+            # The gateway last self-reported running, but its heartbeat is
+            # stale (>120s old) and we have no live PID. Either the gateway
+            # process is gone or its heartbeat is broken; in both cases the
+            # actionable UI state is 'stopped', not 'unknown'. Reporting
+            # 'unknown' here would re-trap the profile in "Check Status"
+            # after the running->stopped reconciliation below clears phase.
             return _status_payload(
-                name, 'unknown', pid, None, None,
-                status_source=runtime_source or 'runtime_file', health=runtime_health,
-                desired_enabled=desired_enabled, updated_at=runtime_updated_at,
-                detail='Gateway last reported running, but this WebUI cannot verify current liveness.',
+                name, 'stopped', None, None, None,
+                status_source=runtime_source or 'runtime_file', health=down_health,
+                desired_enabled=desired_enabled if desired_enabled is not None else False,
+                updated_at=runtime_updated_at,
+                detail='Gateway last reported running, but the heartbeat is stale and no live PID is visible.',
             )
         if runtime_phase == 'stopped':
             return _status_payload(
@@ -3224,7 +3231,7 @@ def profile_gateway_status_api(name: str) -> dict:
         )
 
     if phase == 'starting':
-        if runtime_phase == 'unknown':
+        if runtime_phase == 'unknown' and _phase_age_seconds(phase_started_at) < GATEWAY_START_GRACE_SECONDS:
             return _status_payload(
                 name, 'unknown', pid, None, phase_started_at,
                 status_source=runtime_source or 'runtime_file', health=runtime_health,
@@ -3280,15 +3287,23 @@ def profile_gateway_status_api(name: str) -> dict:
         )
 
     if phase == 'running':
+        # A stale gateway_state.json + state.phase=running with no live PID is
+        # most commonly a WebUI restart that took the gateway subprocess with
+        # it, or a cross-container gateway whose heartbeat has been silent
+        # for >120s. Either way the recorded "running" belief is no longer
+        # backed by a positive liveness signal, so reconcile to 'stopped' and
+        # persist — leaving the profile pinned in 'unknown' forever (the
+        # previous behavior) traps the UI on "Check Status" with no escape.
+        _write_gateway_phase(profile_home, 'stopped')
         if runtime_phase == 'unknown':
             return _status_payload(
-                name, 'unknown', pid, None, phase_started_at,
-                status_source=runtime_source or 'runtime_file', health=runtime_health,
-                desired_enabled=desired_enabled, updated_at=runtime_updated_at,
-                detail='Gateway last reported running, but this WebUI cannot verify current liveness.',
+                name, 'stopped', None, None, None,
+                status_source=runtime_source or 'runtime_file',
+                health=down_health, desired_enabled=False,
+                updated_at=runtime_updated_at,
+                detail='Gateway last reported running, but the heartbeat is stale and no live PID is visible; resetting to stopped.',
             )
         # Post-running crash/no evidence — drop to stopped, not failed.
-        _write_gateway_phase(profile_home, 'stopped')
         return _status_payload(
             name, 'stopped', None, None, None,
             status_source=runtime_source or 'state_file', health=runtime_health or down_health,
@@ -3534,3 +3549,501 @@ def delete_profile_api(name: str) -> dict:
     # Drop cached root-profile-name lookup — list_profiles_api() shape changed.
     _invalidate_root_profile_cache()
     return {'ok': True, 'name': name}
+
+
+# ── Per-profile messaging-platform configuration ──────────────────────────
+#
+# Three helpers backing the WebUI's per-profile platform endpoints:
+#
+#   _list_platforms_for_profile(profile_name)        -> GET shape
+#   _set_platform_for_profile(profile_name, key, values) -> POST shape
+#   _clear_platform_for_profile(profile_name, key)   -> DELETE shape
+#
+# All three brackets HERMES_HOME via cron_profile_context_for_home so
+# `_platform_status()` reads the right profile's .env. Writes go through a
+# small parse-modify-serialize helper here (not hermes_cli.config.save_env_value)
+# so we round-trip user comments and blank lines bit-for-bit, and so we can
+# stay within stdlib without forcing an import path through hermes_cli for
+# every write.
+
+_ENV_VAR_NAME_RE = re.compile(r'^[A-Z_][A-Z0-9_]*$')
+
+# Map hermes _platform_status() free-text return values to the 3-state
+# contract the frontend expects.
+_STATUS_TEXT_TO_CONTRACT = {
+    'configured': 'configured',
+    'configured + paired': 'configured',
+    'enabled, not paired': 'partial',
+    'partially configured': 'partial',
+    'not configured': 'not_configured',
+}
+
+
+def _normalize_platform_status(text: str) -> str:
+    """Reduce an `_platform_status()` free-text label to the API contract.
+
+    Handles known suffixes (e.g. ``"configured + E2EE"``) by prefix-match.
+    Anything unrecognised maps to ``not_configured`` (the conservative default).
+    """
+    if not isinstance(text, str):
+        return 'not_configured'
+    raw = text.strip()
+    if not raw:
+        return 'not_configured'
+    if raw in _STATUS_TEXT_TO_CONTRACT:
+        return _STATUS_TEXT_TO_CONTRACT[raw]
+    # Suffix-tolerant: "configured + E2EE", "configured + something".
+    if raw.startswith('configured'):
+        return 'configured'
+    if raw.startswith('partially'):
+        return 'partial'
+    return 'not_configured'
+
+
+def _get_platforms_module():
+    """Return the hermes-agent gateway module providing platforms metadata.
+
+    Isolated into its own indirection so tests can monkey-patch the import
+    path without forcing `hermes_cli` onto `sys.path`. Raises ImportError
+    when hermes-agent is not installed; callers catch and return
+    ``{"ok": False, "message": "hermes-agent not available"}``.
+    """
+    from hermes_cli import gateway as _gw  # noqa: WPS433
+    return _gw
+
+
+def _resolve_profile_home_strict(name: str) -> Path:
+    """Validate name + resolve to profile home; raise FileNotFoundError if missing.
+
+    Mirrors the bracket pattern from `profile_gateway_status_api`.
+    """
+    _validate_profile_settings_name(name)
+    if _is_root_profile(name):
+        profile_home = _DEFAULT_HERMES_HOME
+    else:
+        profile_home = _resolve_named_profile_home(name)
+    if not profile_home.is_dir():
+        raise FileNotFoundError(f"Profile '{name}' not found.")
+    return profile_home
+
+
+def _read_env_file(env_path: Path) -> 'list[tuple[str, str, str]]':
+    """Read .env as a list of (kind, key, raw_line) tuples preserving order.
+
+    kind is one of:
+      * 'kv'      — key=value line. key is the env name, raw_line is the full
+                    line text including trailing newline (or "" for last-line-no-nl).
+      * 'other'   — blank line or comment. key is "", raw_line is the line text.
+
+    Used by the write/clear helpers to round-trip the file: edit in place,
+    drop / append keys, then re-serialise without losing user comments or
+    blank lines.
+    """
+    out: list[tuple[str, str, str]] = []
+    if not env_path.exists():
+        return out
+    try:
+        text = env_path.read_text(encoding='utf-8-sig', errors='replace')
+    except OSError:
+        return out
+    # splitlines(keepends=True) keeps each line's terminator so re-join is exact.
+    for line in text.splitlines(keepends=True):
+        stripped = line.strip()
+        if not stripped or stripped.startswith('#') or '=' not in stripped:
+            out.append(('other', '', line))
+            continue
+        key, _ = stripped.split('=', 1)
+        key = key.strip()
+        if not _ENV_VAR_NAME_RE.fullmatch(key):
+            out.append(('other', '', line))
+            continue
+        out.append(('kv', key, line))
+    return out
+
+
+def _env_value_for(records: list, key: str) -> Optional[str]:
+    """Return the current value for *key* in a parsed .env record list."""
+    for kind, k, line in records:
+        if kind == 'kv' and k == key:
+            stripped = line.strip()
+            _, v = stripped.split('=', 1)
+            return v.strip().strip('"').strip("'")
+    return None
+
+
+def _format_env_line(key: str, value: str) -> str:
+    """Render a single KEY=VALUE line. Strips embedded newlines for safety."""
+    safe = (value or '').replace('\r', '').replace('\n', '')
+    return f"{key}={safe}\n"
+
+
+def _write_env_atomic(env_path: Path, records: 'list[tuple[str, str, str]]') -> None:
+    """Serialise records back to *env_path* atomically.
+
+    Preserves original file permissions when present (mirrors hermes_cli
+    `save_env_value`).
+    """
+    import stat
+    import tempfile
+
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = ''.join(line for _kind, _k, line in records)
+    # Make sure the file ends with a newline.
+    if payload and not payload.endswith('\n'):
+        payload += '\n'
+
+    original_mode = None
+    if env_path.exists():
+        try:
+            original_mode = stat.S_IMODE(env_path.stat().st_mode)
+        except OSError:
+            original_mode = None
+
+    fd, tmp_path = tempfile.mkstemp(dir=str(env_path.parent),
+                                    suffix='.tmp', prefix='.env_')
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            f.write(payload)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                pass
+        os.replace(tmp_path, env_path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+    if original_mode is not None:
+        try:
+            os.chmod(env_path, original_mode)
+        except OSError:
+            pass
+
+
+def _apply_env_updates(env_path: Path,
+                       updates: 'dict[str, Optional[str]]') -> None:
+    """Apply a dict of {KEY: value_or_None} to .env, preserving siblings.
+
+    Semantics:
+      * ``value is None``  -> remove the key from the file (no-op if absent).
+      * ``value == ""``    -> stored as ``KEY=`` (caller decides whether to use).
+      * otherwise          -> set / replace the value.
+
+    Order preservation: keys that already exist are updated in place; new
+    keys are appended in the order they appear in *updates*.
+    """
+    records = _read_env_file(env_path)
+    seen_keys = {k for kind, k, _ in records if kind == 'kv'}
+
+    # Updates split into (existing-keys to update/remove) and (new keys to append).
+    to_append: list[tuple[str, str]] = []
+    for key, value in updates.items():
+        if not _ENV_VAR_NAME_RE.fullmatch(key):
+            raise ValueError(f"Invalid environment variable name: {key!r}")
+        if key in seen_keys:
+            continue
+        if value is not None:
+            to_append.append((key, value))
+
+    # Walk records, updating or dropping in place.
+    new_records: list[tuple[str, str, str]] = []
+    for kind, k, line in records:
+        if kind != 'kv' or k not in updates:
+            new_records.append((kind, k, line))
+            continue
+        new_value = updates[k]
+        if new_value is None:
+            # Drop the line entirely.
+            continue
+        new_records.append((kind, k, _format_env_line(k, new_value)))
+
+    for key, value in to_append:
+        new_records.append(('kv', key, _format_env_line(key, value)))
+
+    _write_env_atomic(env_path, new_records)
+
+
+def _normalize_allowlist_value(raw: str) -> str:
+    """Strip + dedupe a comma-separated allowlist while preserving order.
+
+    Mirrors the spirit of hermes_cli's per-platform setup helpers without
+    coupling to their per-platform regexes — those validate format, this
+    only canonicalises whitespace + dedupes. Server-side trim so we don't
+    trust client-side cleanup.
+    """
+    if not isinstance(raw, str):
+        return ''
+    seen: set[str] = set()
+    out: list[str] = []
+    for tok in raw.split(','):
+        tok = tok.strip()
+        if not tok or tok in seen:
+            continue
+        seen.add(tok)
+        out.append(tok)
+    return ','.join(out)
+
+
+def _platform_by_key(gw_module, key: str) -> Optional[dict]:
+    """Locate a single platform dict by `key` in `_all_platforms()`."""
+    try:
+        platforms = gw_module._all_platforms()
+    except Exception:
+        return None
+    for p in platforms:
+        if p.get('key') == key:
+            return p
+    return None
+
+
+def _declared_keys_for_platform(platform: dict) -> list[str]:
+    """Return the env-var names the schema declares for *platform*.
+
+    Built-in platforms expose `vars` (list of dicts with `name`); plugin
+    platforms expose `_registry_entry.required_env`.
+    """
+    if platform.get('_registry_entry') is not None:
+        entry = platform['_registry_entry']
+        req = getattr(entry, 'required_env', None) or []
+        return [str(k) for k in req]
+    out: list[str] = []
+    for var in platform.get('vars') or []:
+        name = var.get('name')
+        if isinstance(name, str) and name:
+            out.append(name)
+    return out
+
+
+def _list_platforms_for_profile(profile_name: str) -> dict:
+    """GET /api/profile/gateway/platforms?name=<profile_name>.
+
+    Raises:
+        ValueError: invalid profile name.
+        FileNotFoundError: profile directory missing.
+    """
+    profile_home = _resolve_profile_home_strict(profile_name)
+
+    try:
+        gw = _get_platforms_module()
+    except ImportError:
+        return {'ok': False, 'message': 'hermes-agent not available'}
+
+    env_path = profile_home / '.env'
+    env_records = _read_env_file(env_path)
+    env_values: dict[str, str] = {}
+    for kind, k, line in env_records:
+        if kind == 'kv':
+            _, v = line.strip().split('=', 1)
+            env_values[k] = v.strip().strip('"').strip("'")
+
+    with cron_profile_context_for_home(profile_home):
+        try:
+            raw_platforms = gw._all_platforms()
+        except Exception as exc:
+            logger.debug("platforms enumeration failed: %s", exc, exc_info=True)
+            raw_platforms = []
+        status_fn = getattr(gw, '_platform_status', None)
+
+        out_platforms: list[dict] = []
+        for p in raw_platforms:
+            try:
+                raw_status = status_fn(p) if callable(status_fn) else 'not configured'
+            except Exception:
+                raw_status = 'not configured'
+            status = _normalize_platform_status(raw_status)
+
+            entry = p.get('_registry_entry')
+            if entry is not None:
+                required_env = [str(k) for k in (getattr(entry, 'required_env', None) or [])]
+                set_env = [k for k in required_env if env_values.get(k)]
+                out_platforms.append({
+                    'key': p.get('key'),
+                    'label': p.get('label'),
+                    'emoji': p.get('emoji'),
+                    'status': status,
+                    'is_plugin': True,
+                    'required_env': required_env,
+                    'set_env': set_env,
+                })
+                continue
+
+            # Built-in platform: build the rich `vars` list.
+            vars_out: list[dict] = []
+            for var in p.get('vars') or []:
+                name = var.get('name')
+                if not isinstance(name, str) or not name:
+                    continue
+                is_password = bool(var.get('password'))
+                # `optional` truthy → required is False. Default to required.
+                required = not bool(var.get('optional'))
+                current = env_values.get(name)
+                entry_out: dict = {
+                    'name': name,
+                    'prompt': var.get('prompt') or name,
+                    'password': is_password,
+                    'help': var.get('help') or '',
+                    'required': required,
+                    'is_set': bool(current),
+                }
+                if var.get('is_allowlist'):
+                    entry_out['is_allowlist'] = True
+                if not is_password:
+                    # Non-password vars round-trip the current value (may be empty string).
+                    entry_out['value'] = current if current is not None else ''
+                vars_out.append(entry_out)
+
+            out_platforms.append({
+                'key': p.get('key'),
+                'label': p.get('label'),
+                'emoji': p.get('emoji'),
+                'status': status,
+                'is_plugin': False,
+                'vars': vars_out,
+            })
+
+    return {
+        'ok': True,
+        'profile': profile_name,
+        'platforms': out_platforms,
+    }
+
+
+def _set_platform_for_profile(profile_name: str,
+                              platform_key: str,
+                              values: dict) -> dict:
+    """POST /api/profile/gateway/platform?name=<profile_name>.
+
+    Raises:
+        ValueError: invalid profile name, unknown platform key, or unknown
+            value keys (validation messages name the offenders).
+        FileNotFoundError: profile directory missing.
+    """
+    profile_home = _resolve_profile_home_strict(profile_name)
+
+    try:
+        gw = _get_platforms_module()
+    except ImportError:
+        return {'ok': False, 'message': 'hermes-agent not available'}
+
+    if not isinstance(values, dict):
+        raise ValueError("values must be a dict of {KEY: string}")
+
+    if not isinstance(platform_key, str) or not platform_key:
+        raise ValueError("platform key is required")
+
+    platform = _platform_by_key(gw, platform_key)
+    if platform is None:
+        raise ValueError(f"Unknown platform key: {platform_key!r}")
+
+    declared = _declared_keys_for_platform(platform)
+    declared_set = set(declared)
+    submitted_keys = list(values.keys())
+    unknown = [k for k in submitted_keys if k not in declared_set]
+    if unknown:
+        raise ValueError(
+            f"Unknown values keys for platform {platform_key!r}: "
+            f"{sorted(unknown)!r}"
+        )
+
+    # Build the per-field intent: empty-password = no change (omit key),
+    # empty-non-password = remove key (None sentinel), otherwise set.
+    is_plugin = platform.get('_registry_entry') is not None
+
+    # Index var schemas by name for built-in lookup.
+    var_index: dict[str, dict] = {}
+    if not is_plugin:
+        for var in platform.get('vars') or []:
+            name = var.get('name')
+            if isinstance(name, str) and name:
+                var_index[name] = var
+
+    updates: dict[str, Optional[str]] = {}
+    for key in declared:
+        if key not in values:
+            continue
+        raw = values[key]
+        if not isinstance(raw, str):
+            raw = '' if raw is None else str(raw)
+
+        is_password = False
+        is_allowlist = False
+        if not is_plugin:
+            spec = var_index.get(key, {})
+            is_password = bool(spec.get('password'))
+            is_allowlist = bool(spec.get('is_allowlist'))
+
+        if raw == '':
+            if is_password:
+                # No-change: skip the update entirely.
+                continue
+            # Remove key from .env.
+            updates[key] = None
+            continue
+
+        if is_allowlist:
+            raw = _normalize_allowlist_value(raw)
+
+        updates[key] = raw
+
+    env_path = profile_home / '.env'
+    with cron_profile_context_for_home(profile_home):
+        if updates:
+            _apply_env_updates(env_path, updates)
+        # Recompute status (the bracketed context lets _platform_status
+        # see the freshly-written values).
+        status_fn = getattr(gw, '_platform_status', None)
+        try:
+            raw_status = status_fn(platform) if callable(status_fn) else 'not configured'
+        except Exception:
+            raw_status = 'not configured'
+
+    return {
+        'ok': True,
+        'profile': profile_name,
+        'platform': platform_key,
+        'status': _normalize_platform_status(raw_status),
+    }
+
+
+def _clear_platform_for_profile(profile_name: str, platform_key: str) -> dict:
+    """DELETE /api/profile/gateway/platform?name=<profile_name>&platform=<key>.
+
+    Removes every key declared by the platform schema. Sibling keys
+    (other platforms' creds, unrelated env vars) are preserved.
+
+    Raises:
+        ValueError: invalid profile name or unknown platform key.
+        FileNotFoundError: profile directory missing.
+    """
+    profile_home = _resolve_profile_home_strict(profile_name)
+
+    try:
+        gw = _get_platforms_module()
+    except ImportError:
+        return {'ok': False, 'message': 'hermes-agent not available'}
+
+    if not isinstance(platform_key, str) or not platform_key:
+        raise ValueError("platform key is required")
+
+    platform = _platform_by_key(gw, platform_key)
+    if platform is None:
+        raise ValueError(f"Unknown platform key: {platform_key!r}")
+
+    declared = _declared_keys_for_platform(platform)
+    updates: dict[str, Optional[str]] = {k: None for k in declared}
+
+    env_path = profile_home / '.env'
+    with cron_profile_context_for_home(profile_home):
+        if updates:
+            _apply_env_updates(env_path, updates)
+
+    return {
+        'ok': True,
+        'profile': profile_name,
+        'platform': platform_key,
+        'status': 'not_configured',
+    }

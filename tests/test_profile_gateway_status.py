@@ -179,6 +179,86 @@ def test_status_running_drops_to_stopped_when_pid_dies():
         assert persisted.get("phase") is None
 
 
+def test_status_running_reconciles_to_stopped_when_runtime_is_stale_unknown():
+    """After webui stop+start, the gateway subprocess is gone but state file
+    still says phase='running' and the gateway_state.json heartbeat is stale.
+
+    Previously the status endpoint returned phase='unknown' and *did not*
+    rewrite the state file, leaving the profile stuck on "Check Status"
+    forever. The recorded WebUI belief (phase=running) is only valid as long
+    as there is a positive liveness signal (live PID or fresh runtime file);
+    without either, reconcile to 'stopped' and persist.
+    """
+    import datetime as _dt
+
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        profile = _seed_named_profile(base, "coder")
+        profiles = _reload_profiles_module(base)
+        _install_fake_pid_alive(profiles, alive_pids=set())
+        (profile / "gateway.pid").write_text("1234", encoding="utf-8")
+        stale = (
+            _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(seconds=600)
+        ).isoformat()
+        (profile / "gateway_state.json").write_text(
+            json.dumps({"gateway_state": "running", "updated_at": stale}),
+            encoding="utf-8",
+        )
+        _write_state(profile, phase="running", phase_started_at=_past_iso(120))
+
+        result = profiles.profile_gateway_status_api("coder")
+
+        assert result["phase"] == "stopped"
+        assert result["pid"] is None
+        assert result["desired_enabled"] is False
+        # State file must be rewritten so the next status query is not stuck.
+        persisted = json.loads((profile / ".gateway-state.json").read_text())
+        assert persisted.get("phase") is None or persisted.get("phase") == "stopped"
+        # A second call must remain stopped (i.e. the fix is sticky in the
+        # correct direction, not flapping back to 'unknown').
+        result2 = profiles.profile_gateway_status_api("coder")
+        assert result2["phase"] == "stopped"
+
+
+def test_status_starting_reconciles_to_failed_when_runtime_is_stale_unknown():
+    """Same shape, starting phase: a stale runtime file with state.phase=starting
+    must not pin the profile in 'unknown' indefinitely. After the start grace
+    window elapses without a positive liveness signal, mark failed."""
+    import datetime as _dt
+
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        profile = _seed_named_profile(base, "coder")
+        profiles = _reload_profiles_module(base)
+        _install_fake_pid_alive(profiles, alive_pids=set())
+        (profile / "gateway.pid").write_text("1234", encoding="utf-8")
+        stale = (
+            _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(seconds=600)
+        ).isoformat()
+        (profile / "gateway_state.json").write_text(
+            json.dumps({"gateway_state": "running", "updated_at": stale}),
+            encoding="utf-8",
+        )
+        # phase_started_at older than the start grace window
+        _write_state(
+            profile,
+            phase="starting",
+            phase_started_at=_past_iso(profiles.GATEWAY_START_GRACE_SECONDS + 60),
+        )
+
+        result = profiles.profile_gateway_status_api("coder")
+
+        assert result["phase"] in ("failed", "stopped"), (
+            "stale runtime + expired starting grace + no live PID must reconcile, "
+            f"got phase={result['phase']!r}"
+        )
+        # And must persist — second call must not return 'unknown'.
+        result2 = profiles.profile_gateway_status_api("coder")
+        assert result2["phase"] != "unknown"
+
+
 def test_status_stopping_while_pid_alive():
     with tempfile.TemporaryDirectory() as td:
         base = Path(td) / ".hermes"
@@ -484,7 +564,16 @@ def test_status_reports_running_from_fresh_runtime_file_when_pid_not_visible():
         assert "secret" not in json.dumps(result).lower()
 
 
-def test_status_reports_unknown_from_stale_running_runtime_file():
+def test_status_reports_stopped_from_stale_running_runtime_file():
+    """Stale gateway_state.json + no WebUI phase + no live PID = stopped.
+
+    Older behavior reported 'unknown' here, which trapped the profile UI on
+    "Check Status" forever (no second signal could ever unstick it once the
+    heartbeat went silent). Reporting 'stopped' is both more accurate (a
+    >120s-silent gateway is not functioning) and actionable. If the gateway
+    is genuinely alive cross-container, its next fresh heartbeat will flip
+    the status back to 'running' via the runtime_phase=='running' branch.
+    """
     import datetime as _dt
 
     with tempfile.TemporaryDirectory() as td:
@@ -500,10 +589,10 @@ def test_status_reports_unknown_from_stale_running_runtime_file():
         )
 
         result = profiles.profile_gateway_status_api("coder")
-        assert result["phase"] == "unknown"
+        assert result["phase"] == "stopped"
         assert result["status_source"] == "runtime_file"
-        assert result["health"]["alive"] is None
-        assert result["health"]["reason"] == "gateway_stale_running_state"
+        assert result["health"]["alive"] is False
+        assert "stale" in (result.get("detail") or "").lower()
 
 
 def test_status_uses_selected_profile_name_not_active_profile():
