@@ -1,5 +1,6 @@
 """Hermes Web UI -- Session model and in-memory session store."""
 import collections
+import copy
 import datetime
 import hashlib
 import json
@@ -18,10 +19,17 @@ from api.config import (
     get_effective_default_model, _get_session_agent_lock,
 )
 from api.workspace import get_last_workspace
-from api.agent_sessions import read_importable_agent_session_rows, read_session_lineage_metadata
+from api.agent_sessions import (
+    _is_continuation_session,
+    read_importable_agent_session_rows,
+    read_session_lineage_metadata,
+)
 
 logger = logging.getLogger(__name__)
 CLI_VISIBLE_SESSION_LIMIT = 20
+_CLI_SESSIONS_CACHE_TTL_SECONDS = 5.0
+_CLI_SESSIONS_CACHE_LOCK = threading.Lock()
+_CLI_SESSIONS_CACHE = {}
 
 # ---------------------------------------------------------------------------
 # Stale temp-file cleanup
@@ -195,6 +203,42 @@ def _active_stream_ids():
         return set(STREAMS.keys())
 
 
+def _append_recovered_turn_to_context(session, recovered: dict) -> None:
+    context_messages = getattr(session, 'context_messages', None)
+    if not isinstance(context_messages, list) or not context_messages:
+        return
+    recovered_text = " ".join(str(recovered.get('content') or '').split())
+    if recovered_text:
+        for existing in reversed(context_messages[-8:]):
+            if not isinstance(existing, dict) or existing.get('role') != 'user':
+                continue
+            existing_text = " ".join(str(existing.get('content') or '').split())
+            if existing_text == recovered_text:
+                return
+    context_entry = {k: v for k, v in recovered.items() if k != 'timestamp'}
+    context_messages.append(context_entry)
+
+
+def _append_recovered_pending_turn(session, *, timestamp: int | None = None) -> dict | None:
+    pending_text = str(session.pending_user_message or '')
+    if not pending_text:
+        return None
+    recovered_ts = int(time.time())
+    if isinstance(timestamp, (int, float)) and timestamp > 0:
+        recovered_ts = int(timestamp)
+    recovered: dict = {
+        'role': 'user',
+        'content': session.pending_user_message,
+        'timestamp': recovered_ts,
+        '_recovered': True,
+    }
+    if session.pending_attachments:
+        recovered['attachments'] = list(session.pending_attachments)
+    session.messages.append(recovered)
+    _append_recovered_turn_to_context(session, recovered)
+    return recovered
+
+
 def _is_streaming_session(active_stream_id, active_stream_ids):
     return bool(active_stream_id and active_stream_id in active_stream_ids)
 
@@ -330,6 +374,7 @@ class Session:
                  compression_anchor_visible_idx=None,
                  compression_anchor_message_key=None,
                  compression_anchor_summary=None,
+                 pre_compression_snapshot: bool=False,
                  context_length=None, threshold_tokens=None,
                  last_prompt_tokens=None,
                  gateway_routing=None, gateway_routing_history=None,
@@ -367,6 +412,7 @@ class Session:
         self.compression_anchor_visible_idx = compression_anchor_visible_idx
         self.compression_anchor_message_key = compression_anchor_message_key
         self.compression_anchor_summary = compression_anchor_summary
+        self.pre_compression_snapshot = bool(pre_compression_snapshot)
         self.context_length = context_length
         self.threshold_tokens = threshold_tokens
         self.last_prompt_tokens = last_prompt_tokens
@@ -383,6 +429,7 @@ class Session:
         self.raw_source = kwargs.get('raw_source')
         self.session_source = kwargs.get('session_source')
         self.source_label = kwargs.get('source_label')
+        self.read_only = bool(kwargs.get('read_only', False))
         self.enabled_toolsets = enabled_toolsets  # List[str] or None — per-session toolset override
         self.composer_draft = composer_draft if isinstance(composer_draft, dict) else {}
         self._metadata_message_count = None
@@ -421,12 +468,12 @@ class Session:
             'personality', 'active_stream_id',
             'pending_user_message', 'pending_attachments', 'pending_started_at',
             'compression_anchor_visible_idx', 'compression_anchor_message_key',
-            'compression_anchor_summary',
+            'compression_anchor_summary', 'pre_compression_snapshot',
             'context_length', 'threshold_tokens', 'last_prompt_tokens',
             'gateway_routing', 'gateway_routing_history', 'llm_title_generated',
             'parent_session_id',
             'worktree_path', 'worktree_branch', 'worktree_repo_root', 'worktree_created_at',
-            'is_cli_session', 'source_tag', 'raw_source', 'session_source', 'source_label',
+            'is_cli_session', 'source_tag', 'raw_source', 'session_source', 'source_label', 'read_only',
             'enabled_toolsets', 'composer_draft',
         ]
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
@@ -585,6 +632,7 @@ class Session:
             'compression_anchor_visible_idx': self.compression_anchor_visible_idx,
             'compression_anchor_message_key': self.compression_anchor_message_key,
             'compression_anchor_summary': self.compression_anchor_summary,
+            'pre_compression_snapshot': self.pre_compression_snapshot,
             'context_length': self.context_length,
             'threshold_tokens': self.threshold_tokens,
             'last_prompt_tokens': self.last_prompt_tokens,
@@ -610,6 +658,7 @@ class Session:
             'raw_source': self.raw_source,
             'session_source': self.session_source,
             'source_label': self.source_label,
+            'read_only': self.read_only,
             'enabled_toolsets': self.enabled_toolsets,
             'composer_draft': self.composer_draft if isinstance(self.composer_draft, dict) else {},
             'is_streaming': _is_streaming_session(
@@ -682,15 +731,16 @@ def _apply_core_sync_or_error_marker(
         if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
             _recovered_ts = int(session.pending_started_at)
         if not _already_checkpointed:
+            _append_recovered_pending_turn(session, timestamp=_recovered_ts)
+        else:
             recovered = {
                 'role': 'user',
                 'content': session.pending_user_message,
-                'timestamp': _recovered_ts,
                 '_recovered': True,
             }
             if session.pending_attachments:
                 recovered['attachments'] = list(session.pending_attachments)
-            session.messages.append(recovered)
+            _append_recovered_turn_to_context(session, recovered)
         session.active_stream_id = None
         session.pending_user_message = None
         session.pending_attachments = []
@@ -739,15 +789,7 @@ def _apply_core_sync_or_error_marker(
         _recovered_ts = int(time.time())
         if isinstance(session.pending_started_at, (int, float)) and session.pending_started_at > 0:
             _recovered_ts = int(session.pending_started_at)
-        recovered: dict = {
-            'role': 'user',
-            'content': session.pending_user_message,
-            'timestamp': _recovered_ts,
-            '_recovered': True,
-        }
-        if session.pending_attachments:
-            recovered['attachments'] = list(session.pending_attachments)
-        session.messages.append(recovered)
+        _append_recovered_pending_turn(session, timestamp=_recovered_ts)
     session.active_stream_id = None
     session.pending_user_message = None
     session.pending_attachments = []
@@ -970,7 +1012,7 @@ def _hide_from_default_sidebar(session: dict) -> bool:
     """Return True for internal/background sessions hidden from the default list."""
     sid = str(session.get('session_id') or '')
     source = session.get('source_tag') or session.get('source')
-    return source == 'cron' or sid.startswith('cron_')
+    return bool(session.get('pre_compression_snapshot')) or source == 'cron' or sid.startswith('cron_')
 
 
 def _active_state_db_path() -> Path:
@@ -983,19 +1025,37 @@ def _active_state_db_path() -> Path:
     return hermes_home / 'state.db'
 
 
+def _sidebar_title_is_generic_webui(title: str | None) -> bool:
+    text = ' '.join(str(title or '').split())
+    if text == 'Hermes WebUI':
+        return True
+    prefix = 'Hermes WebUI #'
+    return text.startswith(prefix) and text[len(prefix):].isdigit()
+
+
 def _enrich_sidebar_lineage_metadata(sessions: list[dict]) -> None:
     """Attach state.db compression lineage metadata used by sidebar collapse."""
     try:
         metadata = read_session_lineage_metadata(
             _active_state_db_path(),
-            {s.get('session_id') for s in sessions},
+            {str(s.get('session_id')) for s in sessions if s.get('session_id')},
         )
     except Exception:
         return
     for session in sessions:
         sid = session.get('session_id')
         if sid in metadata:
-            session.update(metadata[sid])
+            entry = dict(metadata[sid])
+            state_db_title = entry.pop('_state_db_title', None)
+            session.update(entry)
+            title = session.get('title')
+            if (
+                state_db_title
+                and state_db_title != title
+                and _sidebar_title_is_generic_webui(title)
+            ):
+                session['_state_db_title'] = state_db_title
+                session['display_title'] = state_db_title
 
 
 def _diag_stage(diag, name: str) -> None:
@@ -1016,9 +1076,11 @@ def all_sessions(diag=None):
             _diag_stage(diag, "all_sessions.read_index")
             index = json.loads(SESSION_INDEX_FILE.read_text(encoding='utf-8'))
             _diag_stage(diag, "all_sessions.prune_index")
+            with LOCK:
+                in_memory_ids = set(SESSIONS.keys())
             index = [
                 s for s in index
-                if _index_entry_exists(s.get('session_id'))
+                if _index_entry_exists(s.get('session_id'), in_memory_ids=in_memory_ids)
             ]
             backfilled = []
             for i, s in enumerate(index):
@@ -1536,20 +1598,51 @@ def get_claude_code_session_messages(sid, projects_dir: Path | str | None = None
     return []
 
 
-def get_cli_sessions() -> list:
-    """Read CLI sessions from the agent's SQLite store and return them as
-    dicts in a format the WebUI sidebar can render alongside local sessions.
+def clear_cli_sessions_cache() -> None:
+    with _CLI_SESSIONS_CACHE_LOCK:
+        _CLI_SESSIONS_CACHE.clear()
 
-    Returns empty list if the SQLite DB is missing or any error occurs -- the
-    bridge is purely additive and never crashes the WebUI.
-    """
-    import os
-    cli_sessions = []
+
+def _copy_cli_sessions(sessions: list) -> list:
+    return copy.deepcopy(sessions)
+
+
+def _cli_sessions_cache_ttl_seconds() -> float:
     try:
-        cli_sessions.extend(get_claude_code_sessions())
-    except Exception:
-        logger.debug("Claude Code session scan failed", exc_info=True)
+        return max(0.0, float(_CLI_SESSIONS_CACHE_TTL_SECONDS))
+    except (TypeError, ValueError):
+        return 5.0
 
+
+def _path_cache_key(path) -> str | None:
+    if path is None:
+        return None
+    try:
+        return str(Path(path).expanduser().resolve(strict=False))
+    except Exception:
+        return str(path)
+
+
+def _path_stat_cache_key(path):
+    if path is None:
+        return None
+    try:
+        st = Path(path).stat()
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+
+def _sqlite_file_stat_cache_key(db_path: Path):
+    """Return a cheap invalidation key for a SQLite DB and WAL sidecars."""
+    return (
+        _path_stat_cache_key(db_path),
+        _path_stat_cache_key(Path(f"{db_path}-wal")),
+        _path_stat_cache_key(Path(f"{db_path}-shm")),
+    )
+
+
+def _resolve_cli_sessions_context():
     # Use the active WebUI profile's HERMES_HOME to find state.db.
     # The active profile is determined by what the user has selected in the UI
     # (stored in the server's runtime config). This means:
@@ -1564,17 +1657,35 @@ def get_cli_sessions() -> list:
     except Exception:
         hermes_home = Path(os.getenv('HERMES_HOME', str(HOME / '.hermes'))).expanduser().resolve()
 
-    db_path = hermes_home / 'state.db'
-    if not db_path.exists():
-        return cli_sessions
-
-    # Try to resolve the active CLI profile so imported sessions integrate
-    # with the WebUI profile filter (available since Sprint 22).
     try:
         from api.profiles import get_active_profile_name
-        _cli_profile = get_active_profile_name()
-    except ImportError:
-        _cli_profile = None  # older agent -- fall back to no profile
+        cli_profile = get_active_profile_name()
+    except Exception:
+        cli_profile = None
+
+    db_path = hermes_home / 'state.db'
+    projects_dir = _default_claude_code_projects_dir()
+    cache_key = (
+        str(hermes_home),
+        str(cli_profile or ''),
+        str(db_path),
+        _sqlite_file_stat_cache_key(db_path),
+        _path_cache_key(projects_dir),
+        _path_stat_cache_key(projects_dir),
+        _path_stat_cache_key(SESSION_INDEX_FILE),
+    )
+    return hermes_home, db_path, cli_profile, cache_key
+
+
+def _load_cli_sessions_uncached(hermes_home: Path, db_path: Path, _cli_profile) -> list:
+    cli_sessions = []
+    try:
+        cli_sessions.extend(get_claude_code_sessions())
+    except Exception:
+        logger.debug("Claude Code session scan failed", exc_info=True)
+
+    if not db_path.exists():
+        return cli_sessions
 
     # Memoize the cron project ID for this scan so we don't pay a lock-acquire +
     # disk-read of projects.json per cron session in the loop below.
@@ -1585,95 +1696,128 @@ def get_cli_sessions() -> list:
             _cron_pid_cache[0] = ensure_cron_project()
         return _cron_pid_cache[0]
 
-    try:
-        for row in read_importable_agent_session_rows(
-            db_path,
-            limit=CLI_VISIBLE_SESSION_LIMIT,
-            log=logger,
-            exclude_sources=None,
-        ):
-            sid = row['id']
-            raw_ts = row['last_activity'] or row['started_at']
-            # Prefer the CLI session's own profile from the DB; fall back to
-            # the active CLI profile so sidebar filtering works either way.
-            profile = _cli_profile  # CLI DB has no profile column; use active profile
+    for row in read_importable_agent_session_rows(
+        db_path,
+        limit=CLI_VISIBLE_SESSION_LIMIT,
+        log=logger,
+        exclude_sources=None,
+    ):
+        sid = row['id']
+        raw_ts = row['last_activity'] or row['started_at']
+        # Prefer the CLI session's own profile from the DB; fall back to
+        # the active CLI profile so sidebar filtering works either way.
+        profile = _cli_profile  # CLI DB has no profile column; use active profile
 
-            _source = row['source'] or 'cli'
-            _title = row['title']
-            if not _title and _source == 'cron' and sid.startswith('cron_'):
-                # Extract job_id from session ID (cron_{job_id}_{timestamp})
-                # and look up the human-friendly job name from jobs.json
-                parts = sid.split('_')
-                if len(parts) >= 3:
-                    _job_id = parts[1]
-                    try:
-                        _jobs_path = hermes_home / 'cron' / 'jobs.json'
-                        if _jobs_path.exists():
-                            import json as _json
-                            _jobs_data = _json.loads(_jobs_path.read_text())
-                            for _j in _jobs_data.get('jobs', []):
-                                if _j.get('id') == _job_id:
-                                    _title = _j.get('name') or _title
-                                    break
-                    except Exception:
-                        pass  # degrade gracefully
-            # If a WebUI JSON file exists for this session (e.g. previously
-            # imported or renamed in the sidebar), prefer its title over the
-            # state.db title.  This fixes rename-not-persisting for CLI sessions
-            # after compression chain extension (#1486).
+        _source = row['source'] or 'cli'
+        _title = row['title']
+        if not _title and _source == 'cron' and sid.startswith('cron_'):
+            # Extract job_id from session ID (cron_{job_id}_{timestamp})
+            # and look up the human-friendly job name from jobs.json
+            parts = sid.split('_')
+            if len(parts) >= 3:
+                _job_id = parts[1]
+                try:
+                    _jobs_path = hermes_home / 'cron' / 'jobs.json'
+                    if _jobs_path.exists():
+                        import json as _json
+                        _jobs_data = _json.loads(_jobs_path.read_text())
+                        for _j in _jobs_data.get('jobs', []):
+                            if _j.get('id') == _job_id:
+                                _title = _j.get('name') or _title
+                                break
+                except Exception:
+                    pass  # degrade gracefully
+        # If a WebUI JSON file exists for this session (e.g. previously
+        # imported or renamed in the sidebar), prefer its title over the
+        # state.db title.  This fixes rename-not-persisting for CLI sessions
+        # after compression chain extension (#1486).
+        try:
+            _webui_meta = Session.load_metadata_only(sid)
+            if _webui_meta and getattr(_webui_meta, 'title', None):
+                _title = _webui_meta.title
+        except Exception:
+            pass
+        _display_title = _title or f'{_source.title()} Session'
+        cli_sessions.append({
+            'session_id': sid,
+            'title': _display_title,
+            'workspace': str(get_last_workspace()),
+            'model': row['model'] or None,
+            'message_count': row['message_count'] or row['actual_message_count'] or 0,
+            'created_at': row['started_at'],
+            'updated_at': raw_ts,
+            'pinned': False,
+            'archived': False,
+            'project_id': _cron_pid() if is_cron_session(sid, _source) else None,
+            'profile': profile,
+            'source_tag': _source,
+            'raw_source': row.get('raw_source'),
+            'user_id': row.get('user_id'),
+            'chat_id': row.get('chat_id') or row.get('origin_chat_id'),
+            'chat_type': row.get('chat_type'),
+            'thread_id': row.get('thread_id'),
+            'session_key': row.get('session_key'),
+            'platform': row.get('platform'),
+            'session_source': row.get('session_source'),
+            'source_label': row.get('source_label'),
+            'parent_session_id': row.get('parent_session_id'),
+            'parent_title': row.get('parent_title'),
+            'parent_source': row.get('parent_source'),
+            'relationship_type': row.get('relationship_type'),
+            '_parent_lineage_root_id': row.get('_parent_lineage_root_id'),
+            'end_reason': row.get('end_reason'),
+            'actual_message_count': row.get('actual_message_count'),
+            'user_message_count': row.get('actual_user_message_count'),
+            '_lineage_root_id': row.get('_lineage_root_id'),
+            '_lineage_tip_id': row.get('_lineage_tip_id'),
+            '_compression_segment_count': row.get('_compression_segment_count'),
+            'is_cli_session': True,
+        })
+
+    return cli_sessions
+
+
+def get_cli_sessions() -> list:
+    """Read CLI sessions from the agent's SQLite store and return them as
+    dicts in a format the WebUI sidebar can render alongside local sessions.
+
+    Returns empty list if the SQLite DB is missing or any error occurs -- the
+    bridge is purely additive and never crashes the WebUI.
+    """
+    hermes_home, db_path, cli_profile, cache_key = _resolve_cli_sessions_context()
+    ttl = _cli_sessions_cache_ttl_seconds()
+    now = time.monotonic()
+
+    if ttl > 0:
+        with _CLI_SESSIONS_CACHE_LOCK:
+            cached = _CLI_SESSIONS_CACHE.get(cache_key)
+            if cached:
+                expires_at, cached_sessions = cached
+                if expires_at > now:
+                    return _copy_cli_sessions(cached_sessions)
+                _CLI_SESSIONS_CACHE.pop(cache_key, None)
             try:
-                _webui_meta = Session.load_metadata_only(sid)
-                if _webui_meta and getattr(_webui_meta, 'title', None):
-                    _title = _webui_meta.title
-            except Exception:
-                pass
-            _display_title = _title or f'{_source.title()} Session'
-            cli_sessions.append({
-                'session_id': sid,
-                'title': _display_title,
-                'workspace': str(get_last_workspace()),
-                'model': row['model'] or None,
-                'message_count': row['message_count'] or row['actual_message_count'] or 0,
-                'created_at': row['started_at'],
-                'updated_at': raw_ts,
-                'pinned': False,
-                'archived': False,
-                'project_id': _cron_pid() if is_cron_session(sid, _source) else None,
-                'profile': profile,
-                'source_tag': _source,
-                'raw_source': row.get('raw_source'),
-                'user_id': row.get('user_id'),
-                'chat_id': row.get('chat_id') or row.get('origin_chat_id'),
-                'chat_type': row.get('chat_type'),
-                'thread_id': row.get('thread_id'),
-                'session_key': row.get('session_key'),
-                'platform': row.get('platform'),
-                'session_source': row.get('session_source'),
-                'source_label': row.get('source_label'),
-                'parent_session_id': row.get('parent_session_id'),
-                'parent_title': row.get('parent_title'),
-                'parent_source': row.get('parent_source'),
-                'relationship_type': row.get('relationship_type'),
-                '_parent_lineage_root_id': row.get('_parent_lineage_root_id'),
-                'end_reason': row.get('end_reason'),
-                'actual_message_count': row.get('actual_message_count'),
-                'user_message_count': row.get('actual_user_message_count'),
-                '_lineage_root_id': row.get('_lineage_root_id'),
-                '_lineage_tip_id': row.get('_lineage_tip_id'),
-                '_compression_segment_count': row.get('_compression_segment_count'),
-                'is_cli_session': True,
-            })
+                sessions = _load_cli_sessions_uncached(hermes_home, db_path, cli_profile)
+            except Exception as _cli_err:
+                logger.warning(
+                    "get_cli_sessions() failed — check state.db schema or path (%s): %s",
+                    db_path, _cli_err,
+                )
+                return []
+            _CLI_SESSIONS_CACHE[cache_key] = (
+                time.monotonic() + ttl,
+                _copy_cli_sessions(sessions),
+            )
+            return _copy_cli_sessions(sessions)
+
+    try:
+        return _load_cli_sessions_uncached(hermes_home, db_path, cli_profile)
     except Exception as _cli_err:
-        # DB schema changed, locked, or corrupted -- log warning so admins can diagnose.
-        # Still degrade gracefully (don't crash the WebUI).
-        import logging as _logging
-        _logging.getLogger(__name__).warning(
+        logger.warning(
             "get_cli_sessions() failed — check state.db schema or path (%s): %s",
             db_path, _cli_err,
         )
         return []
-
-    return cli_sessions
 
 
 def _json_loads_if_string(value):
@@ -1697,7 +1841,6 @@ def get_cli_session_messages(sid) -> list:
     continuation chain, return the stitched full transcript across all segments
     in chronological order. Returns empty list on any error.
     """
-    import os
     if str(sid or '').startswith(f'{CLAUDE_CODE_SOURCE}_'):
         return get_claude_code_session_messages(sid)
     try:
@@ -1705,12 +1848,7 @@ def get_cli_session_messages(sid) -> list:
     except ImportError:
         return []
 
-    try:
-        from api.profiles import get_active_hermes_home
-        hermes_home = Path(get_active_hermes_home()).expanduser().resolve()
-    except Exception:
-        hermes_home = Path(os.getenv('HERMES_HOME', str(HOME / '.hermes'))).expanduser().resolve()
-    db_path = hermes_home / 'state.db'
+    db_path = _active_state_db_path()
     if not db_path.exists():
         return []
 

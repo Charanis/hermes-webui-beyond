@@ -123,6 +123,53 @@ def test_all_sessions_backfills_last_message_at_for_legacy_index_rows():
     assert persisted[0].get("last_message_at") == 100.0
 
 
+def test_all_sessions_prune_reuses_in_memory_id_snapshot(monkeypatch):
+    """Index pruning should not reacquire the session lock for every row."""
+    index_file = models.SESSION_INDEX_FILE
+    entries = [
+        {
+            "session_id": "sess_a",
+            "title": "Alpha",
+            "updated_at": 200.0,
+            "last_message_at": 200.0,
+            "workspace": "/tmp",
+            "model": "test",
+            "message_count": 1,
+            "created_at": 100.0,
+            "pinned": False,
+            "archived": False,
+        },
+        {
+            "session_id": "sess_b",
+            "title": "Bravo",
+            "updated_at": 150.0,
+            "last_message_at": 150.0,
+            "workspace": "/tmp",
+            "model": "test",
+            "message_count": 1,
+            "created_at": 90.0,
+            "pinned": False,
+            "archived": False,
+        },
+    ]
+    _write_index_file(index_file, entries)
+
+    seen = []
+
+    def _assert_snapshot_used(session_id, in_memory_ids=None):
+        assert in_memory_ids is not None, "all_sessions should snapshot SESSIONS once before pruning"
+        seen.append(session_id)
+        return True
+
+    monkeypatch.setattr(models, "_index_entry_exists", _assert_snapshot_used)
+    monkeypatch.setattr(models, "_enrich_sidebar_lineage_metadata", lambda _sessions: None)
+
+    rows = models.all_sessions()
+
+    assert [row["session_id"] for row in rows] == ["sess_a", "sess_b"]
+    assert seen == ["sess_a", "sess_b"]
+
+
 # ── 6. test_incremental_patch_correctness ─────────────────────────────────
 
 def test_incremental_patch_correctness():
@@ -276,6 +323,50 @@ def test_metadata_only_get_session_does_not_poison_full_session_cache():
     full = models.get_session("sess_cache")
     assert full.messages == [{"role": "user", "content": "hi"}]
     assert models.SESSIONS["sess_cache"] is full
+
+
+def test_pre_compression_snapshot_marker_is_persisted_and_compact():
+    """Pre-compression snapshots keep a distinct marker from manual archived state."""
+    s = Session(
+        session_id="sess_snapshot",
+        title="Before Compression",
+        messages=[{"role": "user", "content": "hi"}],
+        pre_compression_snapshot=True,
+    )
+
+    s.save()
+
+    payload = json.loads(s.path.read_text(encoding="utf-8"))
+    assert payload["pre_compression_snapshot"] is True
+    compact = s.compact()
+    assert compact["pre_compression_snapshot"] is True
+    assert compact["archived"] is False
+
+
+def test_pre_compression_snapshot_hidden_from_active_sidebar_but_file_remains(monkeypatch):
+    """Preserved compression snapshots should not appear as active sidebar rows."""
+    snapshot = Session(
+        session_id="old_sid",
+        title="Long Conversation",
+        messages=[{"role": "user", "content": "pre-compression history"}],
+        pre_compression_snapshot=True,
+        updated_at=100.0,
+    )
+    continuation = Session(
+        session_id="new_sid",
+        title="Long Conversation",
+        messages=[{"role": "user", "content": "compressed continuation"}],
+        parent_session_id="old_sid",
+        updated_at=200.0,
+    )
+    snapshot.save()
+    continuation.save()
+    monkeypatch.setattr(models, "_enrich_sidebar_lineage_metadata", lambda _sessions: None)
+
+    rows = models.all_sessions()
+
+    assert snapshot.path.exists(), "snapshot JSON must stay available for lineage traversal"
+    assert [row["session_id"] for row in rows] == ["new_sid"]
 
 
 def test_session_save_does_not_persist_metadata_message_count_hint():

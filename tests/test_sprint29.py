@@ -472,13 +472,13 @@ class TestSecureCookieFlag:
 
 
 class TestHMACLength:
-    def test_session_token_sig_is_32_chars(self):
-        """Session cookie signature must be 32 hex chars (128-bit), not 16."""
+    def test_session_token_sig_is_64_chars(self):
+        """Session cookie signature must be 64 hex chars (256-bit), not 32."""
         from api.auth import create_session
         cookie = create_session()
         token, sig = cookie.rsplit('.', 1)
-        assert len(sig) == 32, \
-            f"Expected 32-char signature (128-bit), got {len(sig)}: {sig}"
+        assert len(sig) == 64, \
+            f"Expected 64-char signature (SHA-256), got {len(sig)}: {sig}"
 
     def test_verify_session_rejects_old_16char_sig(self):
         """A cookie with a 16-char sig must fail verification."""
@@ -712,11 +712,31 @@ class TestSSRFCheck:
 
 class TestENVLock:
     def test_env_lock_importable_from_streaming(self):
-        """_ENV_LOCK must be importable from api.streaming."""
+        """_ENV_LOCK must be an importable threading-style lock.
+
+        Stage-360 maintainer fix: _ENV_LOCK MUST be non-reentrant
+        (threading.Lock, not RLock) — see QA test_env_lock_is_non_reentrant.
+        RLock would mask the deadlock pattern that the lock is designed to
+        catch. Background workers that need profile env should use the
+        narrow-lock pattern in profile_env_for_background_worker() rather
+        than relying on reentrance.
+        """
         from api.streaming import _ENV_LOCK
-        import threading
-        assert isinstance(_ENV_LOCK, type(threading.Lock())), \
-            "_ENV_LOCK must be a threading.Lock"
+
+        assert hasattr(_ENV_LOCK, "acquire"), "_ENV_LOCK must expose acquire()"
+        assert hasattr(_ENV_LOCK, "release"), "_ENV_LOCK must expose release()"
+        assert hasattr(_ENV_LOCK, "__enter__"), "_ENV_LOCK must support context manager use"
+        assert hasattr(_ENV_LOCK, "__exit__"), "_ENV_LOCK must support context manager use"
+
+        # Verify non-reentrance: a same-thread second acquire(blocking=False)
+        # while the lock is held must fail. This invariant matters because
+        # it catches a class of deadlock bugs early.
+        with _ENV_LOCK:
+            acquired_again = _ENV_LOCK.acquire(False)
+            assert not acquired_again, (
+                "_ENV_LOCK must be non-reentrant (threading.Lock, not RLock). "
+                "See QA test_env_lock_is_non_reentrant for the architectural reason."
+            )
 
     def test_env_lock_importable_in_routes(self):
         """api.routes must be able to import _ENV_LOCK from api.streaming."""

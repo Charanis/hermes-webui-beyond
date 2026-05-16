@@ -4,6 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Hermes</title>
+<!-- base href enables subpath mount support; all static paths must stay relative (no leading slash).
+     MUST appear before manifest/favicon links so browsers resolve relative URLs against the
+     correct base when the page is served from /session/<id> routes. See #2226. -->
+<script>(function(){var path=location.pathname,marker='/session/',i=path.indexOf(marker),p;i>=0?p=(path.slice(0,i+1)||'/'):p=(path.endsWith('/')?path:(path.replace(/\/[^\/]*$/,'/')||'/'));document.write('<base href="'+location.origin+p+'">');})()</script>
 <link rel="icon" type="image/svg+xml" href="static/favicon.svg">
 <link rel="icon" type="image/png" sizes="32x32" href="static/favicon-32.png">
 <link rel="shortcut icon" href="static/favicon.ico">
@@ -13,17 +17,16 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Hermes">
 <link rel="apple-touch-icon" sizes="512x512" href="static/apple-touch-icon.png">
-<!-- base href enables subpath mount support; all static paths must stay relative (no leading slash) -->
-<script>(function(){var path=location.pathname,marker='/session/',i=path.indexOf(marker),p;i>=0?p=(path.slice(0,i+1)||'/'):p=(path.endsWith('/')?path:(path.replace(/\/[^\/]*$/,'/')||'/'));document.write('<base href="'+location.origin+p+'">');})()</script>
-<script>(function(){var themes={light:1,dark:1,system:1},skins={default:1,ares:1,mono:1,slate:1,poseidon:1,sisyphus:1,charizard:1,sienna:1},legacy={slate:['dark','slate'],solarized:['dark','poseidon'],monokai:['dark','sisyphus'],nord:['dark','slate'],oled:['dark','default']},t=(localStorage.getItem('hermes-theme')||'dark').toLowerCase(),s=(localStorage.getItem('hermes-skin')||'').toLowerCase(),m=legacy[t],theme=m?m[0]:(themes[t]?t:'dark'),skin=skins[s]?s:(m?m[1]:'default');localStorage.setItem('hermes-theme',theme);localStorage.setItem('hermes-skin',skin);if(theme==='system')theme=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';if(theme==='dark')document.documentElement.classList.add('dark');if(skin!=='default')document.documentElement.dataset.skin=skin;})()</script>
+<script>(function(){var themes={light:1,dark:1,system:1},skins={default:1,ares:1,mono:1,slate:1,poseidon:1,sisyphus:1,charizard:1,sienna:1,nous:1},legacy={slate:['dark','slate'],solarized:['dark','poseidon'],monokai:['dark','sisyphus'],nord:['dark','slate'],oled:['dark','default']},t=(localStorage.getItem('hermes-theme')||'dark').toLowerCase(),s=(localStorage.getItem('hermes-skin')||'').toLowerCase(),m=legacy[t],theme=m?m[0]:(themes[t]?t:'dark'),skin=skins[s]?s:(m?m[1]:'default');localStorage.setItem('hermes-theme',theme);localStorage.setItem('hermes-skin',skin);if(theme==='system')theme=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';if(theme==='dark')document.documentElement.classList.add('dark');if(skin!=='default')document.documentElement.dataset.skin=skin;})()</script>
 <script>(function(){var fs=localStorage.getItem('hermes-font-size');if(fs&&fs!=='default')document.documentElement.dataset.fontSize=fs;})()</script>
-<!-- theme-color: surfaces the active theme's background to native chrome (Safari status bar, PWA, native WKWebView wrappers). Updated dynamically by boot.js when theme/skin changes. The light/dark default values match style.css :root --bg-1 / :root.dark --bg-1. -->
-<meta name="theme-color" content="#FEFCF7" media="(prefers-color-scheme: light)">
-<meta name="theme-color" content="#0D0D1A" media="(prefers-color-scheme: dark)">
+<!-- theme-color: surfaces the active app chrome color to native status bars (Safari status bar, PWA, native WKWebView wrappers). Updated dynamically by boot.js when theme/skin changes. The light/dark default values match style.css :root --sidebar / :root.dark --sidebar. -->
+<meta name="theme-color" content="#FAF7F0" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#141425" media="(prefers-color-scheme: dark)">
 <meta name="theme-color" id="hermes-theme-color" content="#0D0D1A">
-<script>(function(){try{var t=localStorage.getItem('hermes-theme')||'dark';if(t==='system')t=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';var c=t==='dark'?'#0D0D1A':'#FEFCF7';document.querySelectorAll('meta[name="theme-color"]').forEach(function(m){m.setAttribute('content',c);m.removeAttribute('media');});}catch(e){}})()</script>
+<script>(function(){try{var t=localStorage.getItem('hermes-theme')||'dark';if(t==='system')t=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';var c=t==='dark'?'#141425':'#FAF7F0';document.querySelectorAll('meta[name="theme-color"]').forEach(function(m){m.setAttribute('content',c);m.removeAttribute('media');});}catch(e){}})()</script>
 <script>(function(){try{document.documentElement.dataset.workspacePanel=localStorage.getItem('hermes-webui-workspace-panel')==='open'?'open':'closed';}catch(e){document.documentElement.dataset.workspacePanel='closed';}})()</script>
 <script>(function(){try{if(localStorage.getItem('hermes-webui-sidebar-collapsed')==='1')document.documentElement.dataset.sidebarCollapsed='1';}catch(e){}})()</script>
+<script>window.__HERMES_CONFIG__={maxUploadBytes:__MAX_UPLOAD_BYTES__};</script>
 <link rel="stylesheet" href="static/style.css?v=__WEBUI_VERSION__">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" integrity="sha384-LJcOxlx9IMbNXDqJ2axpfEQKkAYbFjJfhXexLfiRJhjDU81mzgkiQq8rkV0j6dVh" crossorigin="anonymous">
   <!-- KaTeX math rendering CSS (loaded eagerly to prevent layout shift) -->
@@ -276,15 +279,15 @@
       <div class="side-menu" id="settingsMenu">
         <button type="button" class="side-menu-item active" data-settings-section="conversation" onclick="switchSettingsSection('conversation')">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-          <span>Conversation</span>
+          <span data-i18n="settings_tab_conversation">Conversation</span>
         </button>
         <button type="button" class="side-menu-item" data-settings-section="appearance" onclick="switchSettingsSection('appearance')">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
-          <span>Appearance</span>
+          <span data-i18n="settings_tab_appearance">Appearance</span>
         </button>
         <button type="button" class="side-menu-item" data-settings-section="preferences" onclick="switchSettingsSection('preferences')">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
-          <span>Preferences</span>
+          <span data-i18n="settings_tab_preferences">Preferences</span>
         </button>
         <button type="button" class="side-menu-item" data-settings-section="providers" onclick="switchSettingsSection('providers')">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
@@ -292,11 +295,11 @@
         </button>
         <button type="button" class="side-menu-item" data-settings-section="plugins" onclick="switchSettingsSection('plugins')">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2l3 7h7l-5.5 4.3 2.1 7L12 16.2 5.4 20.3l2.1-7L2 9h7z"/></svg>
-          <span>Plugins</span>
+          <span data-i18n="settings_tab_plugins">Plugins</span>
         </button>
         <button type="button" class="side-menu-item" data-settings-section="system" onclick="switchSettingsSection('system')">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="20" height="8" rx="2"/><rect x="2" y="13" width="20" height="8" rx="2"/><line x1="6" y1="7" x2="6.01" y2="7"/><line x1="6" y1="17" x2="6.01" y2="17"/></svg>
-          <span>System</span>
+          <span data-i18n="settings_tab_system">System</span>
         </button>
       </div>
     </div>
@@ -342,7 +345,11 @@
     <div class="update-banner" id="updateBanner">
       <div style="display:flex;flex-direction:column;flex:1;min-width:0">
         <span id="updateMsg"></span>
-        <a id="updateWhatsNew" href="#" target="_blank" rel="noopener" style="font-size:11px;color:var(--accent);text-decoration:underline;display:none;margin-left:8px;white-space:nowrap">What's new?</a>
+        <div id="updateWhatsNewLinks" style="display:none;font-size:11px;margin-left:8px;white-space:nowrap"></div>
+        <div id="updateSummaryPanel" style="display:none;font-size:12px;line-height:1.45;margin-top:6px;padding:8px 10px;border:1px solid var(--border2);border-radius:8px;background:rgba(255,255,255,.04);max-width:720px;white-space:normal">
+          <div id="updateSummaryText"></div>
+          <div id="updateSummaryDiffLinks" style="display:none;font-size:11px;margin-top:8px"></div>
+        </div>
         <div id="updateError" style="display:none;font-size:12px;color:var(--error,#e05);margin-top:4px;word-break:break-word"></div>
       </div>
       <div style="display:flex;gap:8px;flex-shrink:0;flex-wrap:wrap">
@@ -854,7 +861,7 @@
             </div>
                         <div class="settings-field">
               <label data-i18n="settings_label_font_size">Font size</label>
-              <div id="fontSizePickerGrid" style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:4px">
+              <div id="fontSizePickerGrid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(96px,1fr));gap:8px;margin-top:4px">
                 <button type="button" data-font-size-val="small" onclick="_pickFontSize('small')" class="font-size-pick-btn" style="border:1px solid var(--border2);border-radius:10px;padding:10px 8px;text-align:center;cursor:pointer;background:none;transition:all .15s">
                   <div style="width:100%;height:40px;border-radius:6px;background:var(--surface);border:1px solid var(--border);margin-bottom:6px;display:flex;align-items:center;justify-content:center">
                     <span style="font-size:10px;font-weight:600;color:var(--muted)">Aa</span>
@@ -873,6 +880,12 @@
                   </div>
                   <span style="font-size:12px;font-weight:500;color:var(--text)" data-i18n="font_size_large">Large</span>
                 </button>
+                <button type="button" data-font-size-val="xlarge" onclick="_pickFontSize('xlarge')" class="font-size-pick-btn" style="border:1px solid var(--border2);border-radius:10px;padding:10px 8px;text-align:center;cursor:pointer;background:none;transition:all .15s">
+                  <div style="width:100%;height:40px;border-radius:6px;background:var(--surface);border:1px solid var(--border);margin-bottom:6px;display:flex;align-items:center;justify-content:center">
+                    <span style="font-size:20px;font-weight:600;color:var(--muted)">Aa</span>
+                  </div>
+                  <span style="font-size:12px;font-weight:500;color:var(--text)" data-i18n="font_size_xlarge">Extra Large</span>
+                </button>
               </div>
               <input type="hidden" id="settingsFontSize" value="default">
             </div>
@@ -889,6 +902,9 @@
                 <span data-i18n="settings_label_session_jump_buttons">Show session jump buttons</span>
               </label>
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_session_jump_buttons">Show floating Start and End buttons while reading long session histories.</div>
+            </div>
+            <div class="settings-field" style="margin-top:8px">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
                 <input type="checkbox" id="settingsSessionEndlessScroll" style="width:15px;height:15px;accent-color:var(--accent)">
                 <span data-i18n="settings_label_session_endless_scroll">Load older messages while scrolling up</span>
               </label>
@@ -991,6 +1007,13 @@
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsFadeTextEffect" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_fade_text_effect">Fade text effect</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_fade_text_effect">Fade newly streamed words in while the assistant is responding. Similar to OpenWebUI; off by default for maximum performance.</div>
+            </div>
+            <div class="settings-field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
                 <input type="checkbox" id="settingsSimplifiedToolCalling" style="width:15px;height:15px;accent-color:var(--accent)">
                 <span>Compact tool activity</span>
               </label>
@@ -1050,6 +1073,13 @@
                 <span data-i18n="settings_label_check_updates">Check for updates</span>
               </label>
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_check_updates">Show a banner when newer versions of the WebUI or Agent are available. Runs a background git fetch periodically.</div>
+            </div>
+            <div class="settings-field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsWhatsNewSummary" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_whats_new_summary">Summarize What's New with AI</span>
+              </label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_whats_new_summary">Changes the What's New action from opening the raw diff first to generating a short, human-readable summary. The regular diff comparison stays available after the summary.</div>
             </div>
             <div class="settings-field">
               <label for="settingsBotName" data-i18n="settings_label_bot_name">Assistant Name</label>
@@ -1138,7 +1168,9 @@
               <label data-i18n="mcp_tools_title">MCP Tools</label>
               <div style="font-size:11px;color:var(--muted);margin-bottom:8px" data-i18n="mcp_tools_desc">Search known tools across active MCP servers.</div>
               <input type="search" id="mcpToolSearch" class="mcp-tool-search" data-i18n-placeholder="mcp_tools_search_placeholder" placeholder="Search tools by name, server, or description…" oninput="filterMcpTools()" autocomplete="off">
-              <div id="mcpToolList"></div>
+              <div class="mcp-tool-toolbar" id="mcpToolToolbar" aria-live="polite"></div>
+              <div id="mcpToolList" class="mcp-tool-list"></div>
+              <div id="mcpToolPager" class="mcp-tool-pager" aria-label="MCP tools pagination" data-i18n-aria-label="mcp_tools_pagination_label"></div>
               <div class="mcp-restart-hint" data-i18n="mcp_tools_runtime_note">Tool inventory only uses already-known active MCP runtime data; the WebUI does not start or probe servers.</div>
             </div>
             <button class="sm-btn" onclick="saveSettings()" style="margin-top:12px;width:100%;padding:8px;font-weight:600" data-i18n="settings_save_btn">Save Settings</button>
@@ -1146,20 +1178,21 @@
       </div>
     </div>
   </main>
+  <button class="workspace-panel-edge-toggle has-tooltip has-tooltip--left" id="btnWorkspacePanelEdgeToggle" type="button" onclick="toggleWorkspacePanel(true)" data-tooltip="Show workspace panel" aria-label="Show workspace panel" aria-expanded="false">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>
+  </button>
   <aside class="rightpanel">
     <div class="resize-handle" id="rightpanelResize"></div>
     <div class="panel-header">
-      <span id="workspacePanelHeading" class="workspace-panel-heading" title="Workspace">Workspace</span><span id="workspaceHiddenIndicator" class="workspace-hidden-indicator" data-i18n-title="workspace_hidden_files_visible_title" title="Hidden files are visible — click for options" hidden onclick="toggleWorkspacePrefsMenu(event)"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg><span data-i18n="workspace_hidden_files_visible">hidden visible</span></span>
+      <div class="workspace-panel-title-group"><span id="workspacePanelHeading" class="workspace-panel-heading" title="Workspace">Workspace</span><span id="workspaceHiddenIndicator" class="workspace-hidden-indicator" data-i18n-title="workspace_hidden_files_visible_title" title="Hidden files are visible — click for options" hidden onclick="toggleWorkspacePrefsMenu(event)"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg><span data-i18n="workspace_hidden_files_visible">hidden visible</span></span></div>
       <span class="git-badge" id="gitBadge" style="display:none"></span>
       <div class="panel-actions">
-        <button class="panel-icon-btn has-tooltip has-tooltip--bottom" id="btnCollapseWorkspacePanel" data-tooltip="Hide workspace panel" onclick="toggleWorkspacePanel(false)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg></button>
         <button class="panel-icon-btn has-tooltip has-tooltip--bottom" id="btnUpDir" data-tooltip="Parent directory" onclick="navigateUp()" style="display:none"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg></button>
         <button class="panel-icon-btn has-tooltip has-tooltip--bottom" id="btnNewFile" data-tooltip="New file" onclick="promptNewFile()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
         <button class="panel-icon-btn has-tooltip has-tooltip--bottom" id="btnNewFolder" data-tooltip="New folder" onclick="promptNewFolder()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></button>
         <button class="panel-icon-btn has-tooltip has-tooltip--bottom" id="btnRefreshPanel" data-tooltip="Refresh" onclick="if(S.session)loadDir(S.currentDir)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></button>
         <button class="panel-icon-btn has-tooltip has-tooltip--bottom" id="btnWorkspacePrefs" data-tooltip="Workspace options" data-i18n-title="workspace_options" aria-haspopup="true" aria-expanded="false" onclick="toggleWorkspacePrefsMenu(event)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg><span class="workspace-prefs-dot" id="workspacePrefsDot" hidden></span></button>
         <button class="panel-icon-btn close-preview has-tooltip has-tooltip--bottom" id="btnClearPreview" data-tooltip="Close preview"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
-        <button class="panel-icon-btn mobile-close-btn" onclick="handleWorkspaceClose()" title="Close" aria-label="Close workspace panel">×</button>
       </div>
     </div>
     <div class="breadcrumb-bar" id="breadcrumbBar" style="display:none"></div>

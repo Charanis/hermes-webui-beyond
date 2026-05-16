@@ -93,6 +93,11 @@ let _sessionCompletionUnread = null;
 let _sessionObservedStreaming = null;
 const _sessionStreamingById = new Map();
 const _sessionListSnapshotById = new Map();
+let _sessionListPointerActive = false;
+let _sessionListLastScrollAt = 0;
+let _pendingSessionListPayload = null;
+let _pendingSessionListApplyTimer = 0;
+const SESSION_LIST_INTERACTION_IDLE_MS = 700;
 
 function _formatSessionModelWithGateway(s){
   if(!s||!s.model)return'';
@@ -535,6 +540,16 @@ async function loadSession(sid){
     S.busy=false;
   }
 
+  function _mergePendingSessionMessage(session,messages){
+    if(!Array.isArray(messages)) return false;
+    const pendingMsg=typeof getPendingSessionMessage==='function'?getPendingSessionMessage(session,messages):null;
+    if(!pendingMsg) return false;
+    const liveAssistantIdx=messages.findIndex(m=>m&&m.role==='assistant'&&m._live);
+    if(liveAssistantIdx>=0) messages.splice(liveAssistantIdx,0,pendingMsg);
+    else messages.push(pendingMsg);
+    return true;
+  }
+
   // Phase 2a: If session is streaming, restore from INFLIGHT cache before
   // loading full messages (INFLIGHT state is self-contained and sufficient).
   if(!INFLIGHT[sid]&&activeStreamId&&typeof loadInflightState==='function'){
@@ -553,6 +568,9 @@ async function loadSession(sid){
     // Streaming session: use cached INFLIGHT messages (already has pending assistant output).
     S.messages=INFLIGHT[sid].messages;
     S.toolCalls=(INFLIGHT[sid].toolCalls||[]);
+    if(_mergePendingSessionMessage(S.session,S.messages)){
+      INFLIGHT[sid].messages=S.messages;
+    }
     S.busy=true;
     // appendLiveToolCard() is guarded by S.activeStreamId; restore it before
     // replaying persisted live tools so the compact Activity count survives
@@ -629,8 +647,7 @@ async function loadSession(sid){
     updateQueueBadge(sid);
 
     // Attach pending user message if one is queued.
-    const pendingMsg=typeof getPendingSessionMessage==='function'?getPendingSessionMessage(S.session):null;
-    if(pendingMsg) S.messages.push(pendingMsg);
+    _mergePendingSessionMessage(S.session,S.messages);
 
     if(activeStreamId){
       S.busy=true;
@@ -1767,8 +1784,66 @@ function _mergeOptimisticFirstTurnSessions(fetchedSessions){
   return merged;
 }
 
-async function renderSessionList(){
+function _isSessionListUserInteracting(){
+  const now=Date.now();
+  const list=$('sessionList');
+  const pointerOverList=Boolean(list&&(list.matches(':hover')||list.matches(':focus-within')));
+  return Boolean(
+    _sessionListPointerActive ||
+    pointerOverList ||
+    (_sessionListLastScrollAt && now-_sessionListLastScrollAt<SESSION_LIST_INTERACTION_IDLE_MS)
+  );
+}
+
+function _schedulePendingSessionListApply(){
+  if(_pendingSessionListApplyTimer) clearTimeout(_pendingSessionListApplyTimer);
+  _pendingSessionListApplyTimer=setTimeout(()=>{
+    _pendingSessionListApplyTimer=0;
+    if(!_pendingSessionListPayload) return;
+    if(_isSessionListUserInteracting()){
+      _schedulePendingSessionListApply();
+      return;
+    }
+    const payload=_pendingSessionListPayload;
+    _pendingSessionListPayload=null;
+    if(payload.gen!==_renderSessionListGen) return;
+    _applySessionListPayload(payload.sessData,payload.projData);
+  }, Math.max(120, SESSION_LIST_INTERACTION_IDLE_MS));
+}
+
+function _applySessionListPayload(sessData, projData){
+  // Server's other_profile_count tells us how many sessions exist outside the
+  // active profile so the "Show N from other profiles" toggle can render
+  // without a second round-trip. Stashed on the module for renderSessionListFromCache.
+  _otherProfileCount = sessData.other_profile_count || 0;
+  _allSessions = _mergeOptimisticFirstTurnSessions(sessData.sessions||[]);
+  _clearLineageReportCache();
+  _allProjects = projData.projects||[];
+  // Capture server clock for clock-skew compensation (issue #1144).
+  // server_time is epoch seconds from the server's time.time().
+  // _serverTimeDelta = client - server, so (Date.now() - _serverTimeDelta)
+  // gives an approximation of the current server time.
+  if (typeof sessData.server_time === 'number' && sessData.server_time > 0) {
+    _serverTimeDelta = Date.now() - (sessData.server_time * 1000);
+  }
+  if (typeof sessData.server_tz === 'string') {
+    _serverTz = sessData.server_tz;
+  }
+  _markPollingCompletionUnreadTransitions(_allSessions);
+  const isStreaming = _allSessions.some(s => Boolean(s && s.is_streaming));
+  if (isStreaming) {
+    startStreamingPoll();
+  } else {
+    stopStreamingPoll();
+  }
+  ensureSessionTimeRefreshPoll();
+  renderSessionListFromCache();  // no-ops if rename is in progress
+}
+
+async function renderSessionList(opts={}){
+  const deferWhileInteracting=Boolean(opts&&opts.deferWhileInteracting);
   const _gen = ++_renderSessionListGen;
+  if(!deferWhileInteracting) _pendingSessionListPayload=null;
   try{
     if(!($('sessionSearch').value||'').trim()) _contentSearchResults = [];
     const allProfilesQS = _showAllProfiles ? '?all_profiles=1' : '';
@@ -1778,32 +1853,12 @@ async function renderSessionList(){
     ]);
     // Discard stale response — a newer renderSessionList() call superseded us.
     if (_gen !== _renderSessionListGen) return;
-    // Server's other_profile_count tells us how many sessions exist outside the
-    // active profile so the "Show N from other profiles" toggle can render
-    // without a second round-trip. Stashed on the module for renderSessionListFromCache.
-    _otherProfileCount = sessData.other_profile_count || 0;
-    _allSessions = _mergeOptimisticFirstTurnSessions(sessData.sessions||[]);
-    _clearLineageReportCache();
-    _allProjects = projData.projects||[];
-    // Capture server clock for clock-skew compensation (issue #1144).
-    // server_time is epoch seconds from the server's time.time().
-    // _serverTimeDelta = client - server, so (Date.now() - _serverTimeDelta)
-    // gives an approximation of the current server time.
-    if (typeof sessData.server_time === 'number' && sessData.server_time > 0) {
-      _serverTimeDelta = Date.now() - (sessData.server_time * 1000);
+    if(deferWhileInteracting&&_isSessionListUserInteracting()){
+      _pendingSessionListPayload={gen:_gen,sessData,projData};
+      _schedulePendingSessionListApply();
+      return;
     }
-    if (typeof sessData.server_tz === 'string') {
-      _serverTz = sessData.server_tz;
-    }
-    _markPollingCompletionUnreadTransitions(_allSessions);
-    const isStreaming = _allSessions.some(s => Boolean(s && s.is_streaming));
-    if (isStreaming) {
-      startStreamingPoll();
-    } else {
-      stopStreamingPoll();
-    }
-    ensureSessionTimeRefreshPoll();
-    renderSessionListFromCache();  // no-ops if rename is in progress
+    _applySessionListPayload(sessData,projData);
   }catch(e){console.warn('renderSessionList',e);}
 }
 
@@ -1821,7 +1876,7 @@ let _sessionTimeRefreshTimer = null;
 function startStreamingPoll(){
   if(_streamingPollTimer) return;
   _streamingPollTimer = setInterval(() => {
-    void renderSessionList();
+    void renderSessionList({deferWhileInteracting:true});
   }, _streamingPollMs);
 }
 
@@ -1841,7 +1896,7 @@ function ensureSessionTimeRefreshPoll(){
 function startGatewayPollFallback(ms){
   const intervalMs = Math.max(5000, Number(ms) || _gatewayFallbackPollMs);
   if(_gatewayPollTimer) clearInterval(_gatewayPollTimer);
-  _gatewayPollTimer = setInterval(() => { renderSessionList(); }, intervalMs);
+  _gatewayPollTimer = setInterval(() => { renderSessionList({deferWhileInteracting:true}); }, intervalMs);
 }
 
 function stopGatewayPollFallback(){
@@ -1864,7 +1919,7 @@ async function probeGatewaySSEStatus(){
     }
     if(resp.status === 503 || data.watcher_running === false){
       startGatewayPollFallback(data.fallback_poll_ms || _gatewayFallbackPollMs);
-      renderSessionList();
+      renderSessionList({deferWhileInteracting:true});
       if(!_gatewaySSEWarningShown && typeof showToast === 'function'){
         showToast('Gateway sync unavailable — falling back to periodic refresh.', 5000);
         _gatewaySSEWarningShown = true;
@@ -1875,7 +1930,7 @@ async function probeGatewaySSEStatus(){
     // Start fallback polling as a safe default; it will self-cancel
     // when the SSE connection recovers and sessions_changed fires.
     startGatewayPollFallback(_gatewayFallbackPollMs);
-    renderSessionList();
+    renderSessionList({deferWhileInteracting:true});
   }finally{
     _gatewayProbeInFlight = false;
   }
@@ -1892,7 +1947,7 @@ function startGatewaySSE(){
         if(data.sessions){
           stopGatewayPollFallback();
           _gatewaySSEWarningShown = false;
-          renderSessionList(); // re-fetch and re-render
+          renderSessionList({deferWhileInteracting:true}); // re-fetch and re-render
           // If the active session received new gateway messages, refresh the conversation view.
           // S.busy check prevents stomping on an in-progress WebUI response.
           // is_cli_session check ensures we only poll import_cli for CLI-originated sessions.
@@ -1960,7 +2015,7 @@ function filterSessions(){
   _searchDebounceTimer = setTimeout(async () => {
     try {
       const data = await api(`/api/sessions/search?q=${encodeURIComponent(q)}&content=1&depth=5`);
-      const titleIds = new Set(_allSessions.filter(s => (s.title||'Untitled').toLowerCase().includes(q.toLowerCase())).map(s=>s.session_id));
+      const titleIds = new Set(_allSessions.filter(s => _sessionDisplayTitle(s).toLowerCase().includes(q.toLowerCase())).map(s=>s.session_id));
       _contentSearchResults = (data.sessions||[]).filter(s => s.match_type === 'content' && !titleIds.has(s.session_id));
       renderSessionListFromCache();
     } catch(e) { /* ignore */ }
@@ -2244,7 +2299,7 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions){
       const childCopy={...child};
       if(parentSegment){
         childCopy._parent_segment_id=parentSegment.session_id;
-        childCopy._parent_segment_title=parentSegment.title||child.parent_title||'Untitled';
+        childCopy._parent_segment_title=_sessionDisplayTitle(parentSegment)||child.parent_title||'Untitled';
       }
       parentRow._child_sessions.push(childCopy);
       parentRow._child_session_count=parentRow._child_sessions.length;
@@ -2293,6 +2348,21 @@ function _collapseSessionLineageForSidebar(sessions){
     result.push({...chosen,_lineage_key:key,_lineage_collapsed_count:items.length,_lineage_segments:sorted});
   }
   return result;
+}
+
+function _sessionDisplayTitle(s){
+  const title=String((s&&(s.display_title||s._state_db_title||s.title))||'Untitled').trim();
+  return title||'Untitled';
+}
+
+function _sessionTitleIsDefaultWebUI(rawTitle){
+  const title=String(rawTitle||'').replace(/\s+/g,' ').trim();
+  return title==='Hermes WebUI'||/^Hermes WebUI #\d+$/.test(title);
+}
+
+function _sessionTitleTags(rawTitle){
+  if(_sessionTitleIsDefaultWebUI(rawTitle)) return [];
+  return String(rawTitle||'').match(/#[\w-]+/g)||[];
 }
 
 function _activeSessionIdForSidebar(){
@@ -2396,27 +2466,65 @@ function _sessionVirtualSpacer(height, where){
 }
 
 function _scheduleSessionVirtualizedRender(){
+  _sessionListLastScrollAt=Date.now();
   if(_renamingSid||_sessionVirtualScrollRaf) return;
+  const list=_sessionVirtualScrollList;
+  const total=Number(list&&list.dataset&&list.dataset.sessionVirtualTotal||0);
   // Skip the re-render if the list is below the virtualization threshold —
   // there's no virtual window to recompute, and re-rendering would just
   // rebuild the whole DOM on every scroll tick. Without this guard, the
   // unconditional scroll listener (attached for any list) caused
   // user-facing scroll jumps on small lists. (#1669 follow-up)
-  const list=_sessionVirtualScrollList;
-  if(list){
-    const total=Number(list.dataset.sessionVirtualTotal||0);
-    if(total>0&&total<=SESSION_VIRTUAL_THRESHOLD_ROWS) return;
-  }
-  _sessionVirtualScrollRaf=requestAnimationFrame(()=>{_sessionVirtualScrollRaf=0;renderSessionListFromCache();});
+  if(total>0&&total<=SESSION_VIRTUAL_THRESHOLD_ROWS) return;
+  _sessionVirtualScrollRaf=requestAnimationFrame(()=>{
+    _sessionVirtualScrollRaf=0;
+    const liveList=_sessionVirtualScrollList;
+    const liveTotal=Number(liveList&&liveList.dataset&&liveList.dataset.sessionVirtualTotal||0);
+    if(liveList&&liveTotal>SESSION_VIRTUAL_THRESHOLD_ROWS){
+      const nextWindow=_sessionVirtualWindow({
+        total:liveTotal,
+        scrollTop:liveList.scrollTop||0,
+        viewportHeight:liveList.clientHeight||520,
+        itemHeight:SESSION_VIRTUAL_ROW_HEIGHT,
+        buffer:SESSION_VIRTUAL_BUFFER_ROWS,
+        threshold:SESSION_VIRTUAL_THRESHOLD_ROWS,
+        activeIndex:-1,
+      });
+      const currentStart=Number(liveList.dataset.sessionVirtualStart||0);
+      const currentEnd=Number(liveList.dataset.sessionVirtualEnd||0);
+      if(nextWindow.virtualized&&nextWindow.start===currentStart&&nextWindow.end===currentEnd) return;
+    }
+    renderSessionListFromCache();
+  });
 }
 
 function _ensureSessionVirtualScrollHandler(list){
-  if(!list||_sessionVirtualScrollList===list) return;
+  if(!list) return;
+  if(_sessionVirtualScrollList===list) return;
   if(_sessionVirtualScrollList){
     _sessionVirtualScrollList.removeEventListener('scroll', _scheduleSessionVirtualizedRender);
+    _sessionVirtualScrollList.removeEventListener('pointerdown', _markSessionListPointerDown);
+    _sessionVirtualScrollList.removeEventListener('pointerup', _markSessionListPointerUp);
+    _sessionVirtualScrollList.removeEventListener('pointercancel', _markSessionListPointerUp);
+    _sessionVirtualScrollList.removeEventListener('pointerleave', _markSessionListPointerUp);
   }
   _sessionVirtualScrollList=list;
   list.addEventListener('scroll', _scheduleSessionVirtualizedRender, {passive:true});
+  list.addEventListener('pointerdown', _markSessionListPointerDown, {passive:true});
+  list.addEventListener('pointerup', _markSessionListPointerUp, {passive:true});
+  list.addEventListener('pointercancel', _markSessionListPointerUp, {passive:true});
+  list.addEventListener('pointerleave', _markSessionListPointerUp, {passive:true});
+}
+
+function _markSessionListPointerDown(){
+  _sessionListPointerActive=true;
+  _sessionListLastScrollAt=Date.now();
+}
+
+function _markSessionListPointerUp(){
+  _sessionListPointerActive=false;
+  _sessionListLastScrollAt=Date.now();
+  if(_pendingSessionListPayload) _schedulePendingSessionListApply();
 }
 
 function renderSessionListFromCache(){
@@ -2429,7 +2537,7 @@ function renderSessionListFromCache(){
   _purgeStaleInflightEntries();
   const q=($('sessionSearch').value||'').toLowerCase();
   const activeSidForSidebar=_activeSessionIdForSidebar();
-  const titleMatches=q?_allSessions.filter(s=>(s.title||'Untitled').toLowerCase().includes(q)):_allSessions;
+  const titleMatches=q?_allSessions.filter(s=>_sessionDisplayTitle(s).toLowerCase().includes(q)):_allSessions;
   // Merge content matches (deduped): content matches appended after title matches
   const titleIds=new Set(titleMatches.map(s=>s.session_id));
   const allMatched=q?[...titleMatches,..._contentSearchResults.filter(s=>!titleIds.has(s.session_id))]:titleMatches;
@@ -2721,8 +2829,8 @@ function renderSessionListFromCache(){
     }
     if(readOnly) el.classList.add('read-only-session');
     if(isActive&&S.session&&S.session._flash)delete S.session._flash;
-    const rawTitle=s.title||'Untitled';
-    const tags=(rawTitle.match(/#[\w-]+/g)||[]);
+    const rawTitle=_sessionDisplayTitle(s);
+    const tags=_sessionTitleTags(rawTitle);
     let cleanTitle=tags.length?rawTitle.replace(/#[\w-]+/g,'').trim():rawTitle;
     // Guard: system prompt content must never surface as a visible session title
     if(cleanTitle.startsWith('[SYSTEM:')){
@@ -2794,12 +2902,14 @@ function renderSessionListFromCache(){
         titleRow.appendChild(dot);
       }
     }
+    const density=(window._sidebarDensity==='detailed'?'detailed':'compact');
+    const showLineageMetadata=density==='detailed';
     const lineageKey=_sidebarLineageKeyForRow(s);
-    const segmentCount=_sessionSegmentCount(s);
-    const lineageSegments=_lineageSegmentsForRender(s,lineageKey);
-    const needsLineageReport=_lineageReportNeedsFetch(s,lineageKey,segmentCount);
-    const lineageReportKey=_lineageReportCacheKey(s,lineageKey);
-    const canExpandLineageSegments=Boolean(lineageKey&&segmentCount>1&&(lineageSegments.length>0||needsLineageReport||_lineageReportInflight.has(lineageReportKey)));
+    const segmentCount=showLineageMetadata?_sessionSegmentCount(s):0;
+    const lineageSegments=showLineageMetadata?_lineageSegmentsForRender(s,lineageKey):[];
+    const needsLineageReport=showLineageMetadata?_lineageReportNeedsFetch(s,lineageKey,segmentCount):false;
+    const lineageReportKey=showLineageMetadata?_lineageReportCacheKey(s,lineageKey):null;
+    const canExpandLineageSegments=showLineageMetadata&&Boolean(lineageKey&&segmentCount>1&&(lineageSegments.length>0||needsLineageReport||_lineageReportInflight.has(lineageReportKey)));
     const lineageSegmentsExpanded=canExpandLineageSegments&&_expandedLineageKeys.has(lineageKey);
     if(segmentCount>0){
       const segmentCountEl=document.createElement('span');
@@ -2848,7 +2958,6 @@ function renderSessionListFromCache(){
     }
     titleRow.appendChild(ts);
     sessionText.appendChild(titleRow);
-    const density=(window._sidebarDensity==='detailed'?'detailed':'compact');
     if(density==='detailed'){
       const metaBits=[];
       const msgCount=typeof s.message_count==='number'?s.message_count:0;
@@ -2877,7 +2986,7 @@ function renderSessionListFromCache(){
         const row=document.createElement('button');
         row.type='button';
         row.className='session-lineage-segment'+(activeSidForSidebar&&seg.session_id===activeSidForSidebar?' active':'');
-        const segTitle=seg.title||t('session_lineage_segment_untitled');
+        const segTitle=_sessionDisplayTitle(seg)||t('session_lineage_segment_untitled');
         const segTime=_formatRelativeSessionTime(_sessionTimestampMs(seg));
         row.textContent=`-> ${segTitle} - ${segTime}`;
         row.title=t('session_lineage_segment_open');
@@ -2903,7 +3012,7 @@ function renderSessionListFromCache(){
         const row=document.createElement('button');
         row.type='button';
         row.className='session-child-session'+(activeSidForSidebar&&child.session_id===activeSidForSidebar?' active':'');
-        const childTitle=child.title||'Untitled child session';
+        const childTitle=_sessionDisplayTitle(child)||'Untitled child session';
         const childTime=_formatRelativeSessionTime(_sessionTimestampMs(child));
         const parentNote=child._parent_segment_title?` via ${child._parent_segment_title}`:'';
         row.textContent=`-> ${childTitle}${parentNote} - ${childTime}`;

@@ -1,7 +1,7 @@
 const S={session:null,messages:[],entries:[],busy:false,pendingFiles:[],toolCalls:[],activeStreamId:null,currentDir:'.',activeProfile:'default',showHiddenWorkspaceFiles:false};
 const INFLIGHT={};  // keyed by session_id while request in-flight
 const SESSION_QUEUES={};  // keyed by session_id for queued follow-up turns
-const MAX_UPLOAD_BYTES=20*1024*1024;
+const MAX_UPLOAD_BYTES=(window.__HERMES_CONFIG__&&window.__HERMES_CONFIG__.maxUploadBytes)||20*1024*1024;
 const MAX_UPLOAD_MB=Math.round(MAX_UPLOAD_BYTES/1024/1024);
 // Tracks which session's queue to drain in setBusy(false).
 // Set to activeSid just before setBusy(false) in done/error handlers so the
@@ -347,6 +347,43 @@ async function jumpToSessionStart(){
   }catch(e){
     console.warn('jumpToSessionStart failed:',e);
     _programmaticScroll=false;
+  }
+}
+
+function _userMessageDomId(rawIdx){
+  return `msg-user-${rawIdx}`;
+}
+
+function _questionJumpButtonHtml(questionRawIdx){
+  if(typeof questionRawIdx!=='number'||questionRawIdx<0) return '';
+  const label=t('jump_to_question')||'Question';
+  const title=t('jump_to_question_label')||'Jump to the question for this response';
+  return `<button class="msg-question-jump-btn" type="button" title="${esc(title)}" aria-label="${esc(title)}" onclick="jumpToTurnQuestion(${questionRawIdx})"><span aria-hidden="true">↑</span><span>${esc(label)}</span></button>`;
+}
+
+function _highlightQuestionRow(row){
+  if(!row) return;
+  row.classList.remove('msg-question-highlight');
+  void row.offsetWidth;
+  row.classList.add('msg-question-highlight');
+  window.setTimeout(()=>row.classList.remove('msg-question-highlight'),1800);
+}
+
+async function jumpToTurnQuestion(questionRawIdx){
+  const container=$('messages');
+  if(!container||typeof questionRawIdx!=='number'||questionRawIdx<0) return;
+  const scrollToTarget=()=>{
+    const row=document.getElementById(_userMessageDomId(questionRawIdx));
+    if(!row) return false;
+    row.scrollIntoView({block:'center',behavior:'smooth'});
+    _highlightQuestionRow(row);
+    return true;
+  };
+  if(scrollToTarget()) return;
+  if(_messageHiddenBeforeCount()>0){
+    _messageRenderWindowSize=Math.max(_currentMessageRenderWindowSize(),_messageRenderableMessageCount());
+    renderMessages({ preserveScroll:true });
+    requestAnimationFrame(scrollToTarget);
   }
 }
 
@@ -813,26 +850,67 @@ async function populateModelDropdown(){
     const _modelsRes=await fetch(new URL('api/models',document.baseURI||location.href).href,{credentials:'include'});
     if(_redirectIfUnauth(_modelsRes)) return;
     const data=await _modelsRes.json();
-    if(!data.groups||!data.groups.length) return; // keep HTML defaults
     // Store active provider globally so the send path can warn on mismatch
     window._activeProvider=data.active_provider||null;
     // Store default model so newSession() can apply it (#872).
     // Per-page-load — not synced across browser tabs.
     window._defaultModel=data.default_model||null;
     window._configuredModelBadges=data.configured_model_badges||{};
+
+    const _synthGroupsFromConfigured=()=>{
+      const badgeMap=window._configuredModelBadges||{};
+      const grouped=new Map();
+      const addModel=(providerId,modelId)=>{
+        const pid=String(providerId||'configured').trim()||'configured';
+        const mid=String(modelId||'').trim();
+        if(!mid) return;
+        if(!grouped.has(pid)) grouped.set(pid,[]);
+        const arr=grouped.get(pid);
+        if(arr.some(m=>m.id===mid)) return;
+        arr.push({id:mid,label:getModelLabel(mid)});
+      };
+
+      for(const [modelId,badge] of Object.entries(badgeMap)){
+        const mid=String(modelId||'').trim();
+        // Prefer canonical IDs only; skip derived aliases such as
+        // @provider:model and provider/model to avoid noisy duplicates.
+        if(!mid||mid.startsWith('@')||mid.includes('/')) continue;
+        const provider=(badge&&badge.provider)||'configured';
+        addModel(provider,mid);
+      }
+
+      if(grouped.size===0&&data&&data.default_model){
+        addModel(data.active_provider||'configured',data.default_model);
+      }
+
+      const groups=[];
+      for(const [providerId,models] of grouped.entries()){
+        const display=(String(providerId).startsWith('custom:')
+          ? String(providerId).slice('custom:'.length)
+          : String(providerId))||'Configured';
+        groups.push({provider:display,provider_id:providerId,models});
+      }
+      return groups;
+    };
+
+    const groups=(Array.isArray(data.groups)&&data.groups.length)
+      ? data.groups
+      : _synthGroupsFromConfigured();
+
+    if(!groups.length) return; // no server groups and no configured fallback
     // Clear existing options
     sel.innerHTML='';
     _dynamicModelLabels={};
-    for(const g of data.groups){
+    for(const g of groups){
       const og=document.createElement('optgroup');
       og.label=g.provider;
       if(g.provider_id) og.dataset.provider=g.provider_id;
-      for(const m of g.models){
+      for(const m of (Array.isArray(g.models)?g.models:[])){
         const opt=document.createElement('option');
         opt.value=m.id;
         opt.textContent=m.label;
         og.appendChild(opt);
-        _dynamicModelLabels[m.id]=m.label;
+        _dynamicModelLabels[m.id]=m.id;
       }
       // Hydrate the label map from extra_models too (the catalog tail that
       // doesn't render as <option> entries when the picker is capped — see
@@ -842,7 +920,7 @@ async function populateModelDropdown(){
       // instead of falling back to the bare ID. #1567.
       if(Array.isArray(g.extra_models)){
         for(const m of g.extra_models){
-          if(m && m.id) _dynamicModelLabels[m.id]=m.label||m.id;
+          if(m && m.id) _dynamicModelLabels[m.id]=m.id;
         }
       }
       sel.appendChild(og);
@@ -971,12 +1049,13 @@ async function _fetchLiveModels(provider, sel){
  *
  * Provider detection is intentionally loose — we compare the model's slash
  * prefix (e.g. "openai/" from "openai/gpt-4o") against the active provider
- * name. Custom/local endpoints report active_provider='custom' or the
- * base_url hostname and we skip the check to avoid false positives.
+ * name. Custom/local endpoints report active_provider='custom', a named
+ * custom provider such as 'custom:zenmux', or the base_url hostname; skip the
+ * check for those values to avoid false positives.
  */
 function _checkProviderMismatch(modelId){
   const ap=(window._activeProvider||'').toLowerCase();
-  if(!ap||ap==='custom'||ap==='openrouter') return null; // can't reliably check
+  if(!ap||ap==='custom'||ap.startsWith('custom:')||ap==='openrouter') return null; // can't reliably check
   // @provider: prefixed IDs came from that provider's live model list — no mismatch possible
   if(modelId.startsWith('@')) return null;
   const slash=modelId.indexOf('/');
@@ -1094,11 +1173,19 @@ function renderModelDropdown(opts){
     if(child.tagName==='OPTGROUP'){
       const providerId=child.dataset&&child.dataset.provider?child.dataset.provider:'';
       for(const opt of Array.from(child.children)){
-        _modelData.push({value:opt.value,name:esc(opt.textContent||getModelLabel(opt.value)),id:esc(opt.value),group:child.label||'',badge:_getConfiguredModelBadge(opt.value,_badgeMap,providerId)});
+        const rawValue=String(opt.value||'');
+        const displayName=rawValue.startsWith('@custom:')
+          ? getModelLabel(rawValue)
+          : (opt.textContent||getModelLabel(rawValue));
+        _modelData.push({value:opt.value,name:esc(displayName),id:esc(opt.value),group:child.label||'',badge:_getConfiguredModelBadge(opt.value,_badgeMap,providerId)});
       }
     }
     if(child.tagName==='OPTION'){
-      _modelData.push({value:child.value,name:esc(child.textContent||getModelLabel(child.value)),id:esc(child.value),group:'',badge:_getConfiguredModelBadge(child.value,_badgeMap)});
+      const rawValue=String(child.value||'');
+      const displayName=rawValue.startsWith('@custom:')
+        ? getModelLabel(rawValue)
+        : (child.textContent||getModelLabel(rawValue));
+      _modelData.push({value:child.value,name:esc(displayName),id:esc(child.value),group:'',badge:_getConfiguredModelBadge(child.value,_badgeMap)});
     }
   }
   const _existingConfiguredKeys=new Set(_modelData.map(existing=>_normalizeConfiguredModelKey(existing.value)));
@@ -1152,8 +1239,32 @@ function renderModelDropdown(opts){
       }
     }
     const matches=(m)=>!term||found.has(m.value);
-    const configuredModels=_modelData
-      .filter(m=>m.badge&&matches(m))
+    const configuredCandidates=_modelData
+      .filter(m=>m.badge&&matches(m));
+    const configuredBySemanticKey=new Map();
+    const _configuredProviderKey=(m)=>String((m&&m.badge&&m.badge.provider)||_providerFromModelValue(m&&m.value)||'').toLowerCase();
+    const _configuredModelKey=(m)=>_normalizeConfiguredModelKey(m&&m.value||'');
+    const _configuredDisplayPriority=(m)=>{
+      // Prefer plain IDs over provider-qualified aliases for readability.
+      const v=String((m&&m.value)||'');
+      if(v.startsWith('@')) return 0;
+      if(v.includes('/')) return 1;
+      return 2;
+    };
+    for(const candidate of configuredCandidates){
+      const semanticKey=`${_configuredProviderKey(candidate)}::${_configuredModelKey(candidate)}`;
+      const existing=configuredBySemanticKey.get(semanticKey);
+      if(!existing){
+        configuredBySemanticKey.set(semanticKey,candidate);
+        continue;
+      }
+      const candidatePriority=_configuredDisplayPriority(candidate);
+      const existingPriority=_configuredDisplayPriority(existing);
+      if(candidatePriority>existingPriority){
+        configuredBySemanticKey.set(semanticKey,candidate);
+      }
+    }
+    const configuredModels=[...configuredBySemanticKey.values()]
       .sort((a,b)=>{
         const configuredRankA=_configuredRank(a.badge);
         const configuredRankB=_configuredRank(b.badge);
@@ -1173,17 +1284,28 @@ function renderModelDropdown(opts){
       configuredHeading.className='model-group';
       configuredHeading.textContent=t('model_group_configured')||'Configured';
       dd.appendChild(configuredHeading);
+      // 为了显示原始ID，建立 badgeKeyMap: badge对象->原始key
+      const badgeKeyMap = new Map();
+      for(const [k, v] of Object.entries(_badgeMap)){
+        badgeKeyMap.set(v, k);
+      }
       for(const m of configuredModels){
         const row=document.createElement('div');
         row.className='model-opt'+(m.value===sel.value?' active':'');
-        // Add provider info to badge label (e.g., "Primary (jingdong)")
-        let badgeLabel=m.badge?(m.badge.label||'Configured'):'';
-        if(m.badge&&m.badge.provider){
-          const providerName=m.badge.provider.replace(/^custom:/,'').split('/')[0];
-          badgeLabel+=` (${providerName})`;
+        let badgeLabel = '';
+        let modelName = m.name;
+        if (m.badge) {
+          // 直接用badge的原始key（即config.yaml里的ID）
+          const rawId = badgeKeyMap.get(m.badge) || m.value || m.badge.label || 'Configured';
+          badgeLabel = rawId;
+          modelName = rawId; // model-opt-name直接用原始ID
+          if(m.badge.provider){
+            const providerName=m.badge.provider.replace(/^custom:/,'').split('/')[0];
+            badgeLabel += ` (${providerName})`;
+          }
         }
         const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(badgeLabel)}</span>`:'';
-        row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${m.name}</span>${badgeHtml}</div><span class="model-opt-id">${m.id}</span>`;
+        row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(modelName)}</span>${badgeHtml}</div><span class="model-opt-id">${esc(m.id)}</span>`;
         row.onclick=()=>onSelect(m.value);
         dd.appendChild(row);
       }
@@ -1211,7 +1333,7 @@ function renderModelDropdown(opts){
       const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(m.badge.label||'Configured')}</span>`:'';
       // Inline provider chip on every row that has a group (#1425)
       const providerChip=m.group?`<span class="model-opt-provider">${esc(m.group)}</span>`:'';
-      row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${m.name}</span>${badgeHtml}${providerChip}</div><span class="model-opt-id">${m.id}</span>`;
+      row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(m.name)}</span>${badgeHtml}${providerChip}</div><span class="model-opt-id">${esc(m.id)}</span>`;
       row.onclick=()=>onSelect(m.value);
       dd.appendChild(row);
     }
@@ -2205,6 +2327,17 @@ function _fmtOllamaLabel(mid){
 
 function getModelLabel(modelId){
   if(!modelId) return 'Unknown';
+  const rawId=String(modelId||'');
+  // Preserve custom gateway model IDs exactly as configured.
+  // Examples:
+  //   @custom:ai_gateway:Qwen3.6-35B-A3B -> Qwen3.6-35B-A3B
+  //   @custom:qwen397b-64k               -> qwen397b-64k
+  if(rawId.startsWith('@custom:')){
+    const rest=rawId.slice('@custom:'.length);
+    if(rest.includes(':')) return rest.slice(rest.lastIndexOf(':')+1)||rawId;
+    if(rest.includes('/')) return rest.split('/').pop()||rawId;
+    return rest||rawId;
+  }
   // Check dynamic labels first, then fall back to splitting the ID
   if(_dynamicModelLabels[modelId]) return _dynamicModelLabels[modelId];
   // Static fallback for common models
@@ -2215,11 +2348,15 @@ function getModelLabel(modelId){
   // Strip @provider: prefix if present (e.g. @ollama-cloud:kimi-k2.6)
   if (_last.startsWith('@') && _last.includes(':')) _last = _last.split(':').slice(1).join(':');
   const looksLikeOllamaTag = /^[a-z0-9][\w.-]*:[\w.-]+$/i.test(_last);
+  const atProvider=(rawId.startsWith('@')&&rawId.includes(':'))
+    ? rawId.slice(1,rawId.indexOf(':')).toLowerCase()
+    : '';
+  const allowOllamaFormat=!atProvider||atProvider.startsWith('ollama');
   // Narrow: only apply Ollama formatter to IDs with explicit @ollama prefix or colon-tag format.
   // Avoids reformatting bare provider model IDs like claude-sonnet-4-6 or gpt-4o.
   const looksLikeBareOllamaId = modelId.startsWith('@ollama') || looksLikeOllamaTag;
   const ollamaLabel = _fmtOllamaLabel(_last);
-  if ((modelId.startsWith('ollama/') || modelId.startsWith('@ollama') || looksLikeOllamaTag || looksLikeBareOllamaId) && ollamaLabel !== _last) {
+  if (allowOllamaFormat && (modelId.startsWith('ollama/') || modelId.startsWith('@ollama') || looksLikeOllamaTag || looksLikeBareOllamaId) && ollamaLabel !== _last) {
     return ollamaLabel;
   }
   return _last || 'Unknown';
@@ -2288,6 +2425,16 @@ function _stripXmlToolCallsDisplay(s){
 function _sanitizeThinkingDisplayText(text){
   const stripped=_stripXmlToolCallsDisplay(String(text||''));
   return stripped.trim();
+}
+
+function _stripVisibleAssistantEchoFromThinking(thinkingText, visibleText){
+  let out=String(thinkingText||'');
+  const visible=String(visibleText||'');
+  if(!out||!visible) return out.trim();
+  visible.split(/\n{2,}/).map(s=>s.trim()).filter(s=>s.length>=20).forEach(snippet=>{
+    out=out.split(snippet).join('');
+  });
+  return out.trim();
 }
 
 function renderMd(raw){
@@ -3884,7 +4031,7 @@ async function refreshSession() {
     const data = await api(`/api/session?session_id=${encodeURIComponent(S.session.session_id)}`);
     S.session = data.session;
     S.messages = data.session.messages || [];
-    const pendingMsg=getPendingSessionMessage(data.session);
+    const pendingMsg=getPendingSessionMessage(data.session,S.messages);
     if(pendingMsg) S.messages.push(pendingMsg);
     S.activeStreamId=data.session.active_stream_id||null;
 
@@ -3898,38 +4045,252 @@ function _formatUpdateTargetStatus(label,info){
   const branch=info.branch?` (${info.branch})`:'';
   return `${label}${branch}: ${info.behind} update${info.behind>1?'s':''}`;
 }
+function _isSafeUpdateCompareUrl(url){
+  if(!url||!/^https?:\/\//i.test(url)) return false;
+  try{
+    const parsed=new URL(url);
+    return parsed.protocol==='https:'||parsed.protocol==='http:';
+  }catch(e){
+    return false;
+  }
+}
+function _updateCompareUrl(info){
+  if(!info) return null;
+  const compareUrl=info.compare_url||null;
+  if(compareUrl) return _isSafeUpdateCompareUrl(compareUrl)?compareUrl:null;
+  const repo_url=info.repo_url;
+  const currentSha=info.current_sha;
+  const latestSha=info.latest_sha;
+  if(!(repo_url&&currentSha&&latestSha)) return null;
+  const fallbackUrl=repo_url+'/compare/'+currentSha+'...'+latestSha;
+  return _isSafeUpdateCompareUrl(fallbackUrl)?fallbackUrl:null;
+}
+function _updateWhatsNewTargets(data){
+  const targets=[
+    {key:'webui',label:'WebUI',info:data&&data.webui},
+    {key:'agent',label:'Agent',info:data&&data.agent},
+  ];
+  return targets.map((target)=>({
+    key:target.key,
+    label:target.label,
+    info:target.info,
+    url:_updateCompareUrl(target.info),
+  })).filter((target)=>target.info&&target.info.behind>0&&target.url);
+}
+function _appendUpdateDiffLinks(container,targets,prefix){
+  if(!container) return;
+  if(prefix) container.appendChild(document.createTextNode(prefix));
+  targets.forEach((target,idx)=>{
+    if(idx>0) container.appendChild(document.createTextNode(' \u00b7 '));
+    const link=document.createElement('a');
+    link.href=target.url;
+    link.target='_blank';
+    link.rel='noopener';
+    link.style.color='var(--accent)';
+    link.style.textDecoration='underline';
+    link.textContent=target.label;
+    container.appendChild(link);
+  });
+}
+function _hideUpdateSummaryPanel(){
+  const panel=$('updateSummaryPanel');
+  const text=$('updateSummaryText');
+  const links=$('updateSummaryDiffLinks');
+  if(panel) panel.style.display='none';
+  if(text) text.textContent='';
+  if(links){links.replaceChildren();links.style.display='none';}
+}
+const WHATS_NEW_SUMMARY_STORAGE_KEY='hermes-whats-new-generated-summaries';
+function _loadStoredUpdateSummaries(){
+  window._whatsNewGeneratedSummaries=window._whatsNewGeneratedSummaries||{};
+  try{
+    const raw=sessionStorage.getItem(WHATS_NEW_SUMMARY_STORAGE_KEY);
+    if(!raw) return window._whatsNewGeneratedSummaries;
+    const stored=JSON.parse(raw);
+    if(stored&&typeof stored==='object') window._whatsNewGeneratedSummaries=stored;
+  }catch(_e){
+    try{sessionStorage.removeItem(WHATS_NEW_SUMMARY_STORAGE_KEY);}catch(_ignore){}
+  }
+  return window._whatsNewGeneratedSummaries;
+}
+function _persistGeneratedSummaries(){
+  try{sessionStorage.setItem(WHATS_NEW_SUMMARY_STORAGE_KEY,JSON.stringify(window._whatsNewGeneratedSummaries||{}));}catch(_e){}
+}
+function _pruneGeneratedSummaries(data){
+  const cache=_loadStoredUpdateSummaries();
+  const valid=new Set(_updateWhatsNewTargets(data||{}).map((target)=>target.key));
+  let changed=false;
+  Object.keys(cache).forEach((key)=>{
+    if(!valid.has(key)){delete cache[key];changed=true;}
+  });
+  if(changed) _persistGeneratedSummaries();
+}
+function _updateSummarySignature(info){
+  if(!info) return '';
+  return [info.current_sha||'',info.latest_sha||'',info.behind||0,info.compare_url||''].join('|');
+}
+function _updateSummaryButtonLabel(target,data){
+  const labels=target.key==='webui'
+    ? {generate:'Generate WebUI update summary',view:'View generated WebUI update summary',regenerate:'Re-generate WebUI update summary'}
+    : {generate:'Generate Agent update summary',view:'View generated Agent update summary',regenerate:'Re-generate Agent update summary'};
+  const cache=_loadStoredUpdateSummaries()[target.key];
+  const signature=_updateSummarySignature(data&&data[target.key]);
+  if(cache&&cache.signature===signature&&cache.payload) return labels.view;
+  if(cache&&cache.signature!==signature) return labels.regenerate;
+  return labels.generate;
+}
+function _rememberGeneratedSummary(target,payload,data){
+  if(!target) return;
+  window._whatsNewGeneratedSummaries=window._whatsNewGeneratedSummaries||{};
+  window._whatsNewGeneratedSummaries[target]={
+    signature:_updateSummarySignature(data&&data[target]),
+    payload:payload,
+  };
+  _persistGeneratedSummaries();
+}
+function _renderUpdateSummaryPanel(payload,data,targetKey){
+  const panel=$('updateSummaryPanel');
+  const text=$('updateSummaryText');
+  const links=$('updateSummaryDiffLinks');
+  if(!panel||!text) return;
+  panel.style.display='block';
+  const sections=Array.isArray(payload&&payload.summary_sections)?payload.summary_sections:null;
+  text.replaceChildren();
+  if(sections&&sections.length){
+    const wrap=document.createElement('div');
+    wrap.id='updateSummarySections';
+    wrap.style.display='grid';
+    wrap.style.gap='8px';
+    sections.forEach((section)=>{
+      const block=document.createElement('section');
+      const title=document.createElement('div');
+      title.style.fontWeight='650';
+      title.style.marginBottom='3px';
+      title.textContent=section.title||'Summary';
+      block.appendChild(title);
+      const ul=document.createElement('ul');
+      ul.style.margin='0';
+      ul.style.paddingLeft='18px';
+      (Array.isArray(section.items)?section.items:[]).forEach((item)=>{
+        const li=document.createElement('li');
+        li.textContent=String(item||'').trim();
+        if(li.textContent) ul.appendChild(li);
+      });
+      if(!ul.children.length){
+        const li=document.createElement('li');
+        li.textContent='No summary details available.';
+        ul.appendChild(li);
+      }
+      block.appendChild(ul);
+      wrap.appendChild(block);
+    });
+    text.appendChild(wrap);
+  }else{
+    text.textContent=(payload&&payload.summary)||payload||'No summary available.';
+  }
+  const targets=_updateWhatsNewTargets(data||window._updateData||{}).filter((target)=>!targetKey||target.key===targetKey);
+  if(links){
+    links.replaceChildren();
+    if(targets.length){
+      links.style.display='block';
+      _appendUpdateDiffLinks(links,targets,'Regular diff comparison: ');
+    }else{
+      links.style.display='none';
+    }
+  }
+}
+async function showWhatsNewSummary(target){
+  const data=window._updateData||{};
+  const scopedUpdates=target?{[target]:data[target]}:data;
+  const cache=target?_loadStoredUpdateSummaries()[target]:null;
+  const signature=target?_updateSummarySignature(data[target]):'';
+  if(cache&&cache.signature===signature&&cache.payload){
+    _renderUpdateSummaryPanel(cache.payload,data,target);
+    _renderUpdateWhatsNewLinks(data,{mode:'summary'});
+    return;
+  }
+  _renderUpdateSummaryPanel({summary:'Writing a simple summary…'},data,target);
+  try{
+    const res=await api('/api/updates/summary',{method:'POST',body:JSON.stringify({updates:scopedUpdates,target:target||null})});
+    _rememberGeneratedSummary(target,res,data);
+    _renderUpdateSummaryPanel(res,data,target);
+    _renderUpdateWhatsNewLinks(data,{mode:'summary'});
+  }catch(e){
+    console.warn('[updates] summary failed',e);
+    _renderUpdateSummaryPanel({
+      summary_sections:[
+        {title:"What you'll notice",items:['Could not generate the summary right now.']},
+        {title:'Worth knowing',items:['Try again later, or use the comparison links below for the raw update details.']},
+      ],
+    },data,target);
+  }
+}
+function _renderUpdateWhatsNewLinks(data){
+  const options=arguments.length>1&&arguments[1]?arguments[1]:{};
+  const container=$('updateWhatsNewLinks');
+  if(!container) return;
+  container.replaceChildren();
+  const targets=_updateWhatsNewTargets(data);
+  if(!targets.length){
+    container.style.display='none';
+    _hideUpdateSummaryPanel();
+    return;
+  }
+  container.style.display='block';
+  _pruneGeneratedSummaries(data);
+  const useSummary=(options.mode||'')==='summary'||window._whatsNewSummaryEnabled===true;
+  if(useSummary){
+    targets.forEach((target,idx)=>{
+      if(idx>0) container.appendChild(document.createTextNode(' \u00b7 '));
+      const btn=document.createElement('button');
+      btn.type='button';
+      btn.className='linklike';
+      btn.style.color='var(--accent)';
+      btn.style.textDecoration='underline';
+      btn.style.background='none';
+      btn.style.border='0';
+      btn.style.padding='0';
+      btn.style.cursor='pointer';
+      btn.textContent=_updateSummaryButtonLabel(target,data);
+      btn.onclick=()=>showWhatsNewSummary(target.key);
+      container.appendChild(btn);
+    });
+    return;
+  }
+  _hideUpdateSummaryPanel();
+  if(targets.length===1){
+    const target=targets[0];
+    const link=document.createElement('a');
+    link.href=target.url;
+    link.target='_blank';
+    link.rel='noopener';
+    link.style.color='var(--accent)';
+    link.style.textDecoration='underline';
+    link.textContent="What's new in "+target.label+'?';
+    container.appendChild(link);
+    return;
+  }
+  _appendUpdateDiffLinks(container,targets,"What's new: ");
+}
 function _showUpdateBanner(data){
   const parts=[];
   const webuiPart=_formatUpdateTargetStatus('WebUI',data.webui);
   const agentPart=_formatUpdateTargetStatus('Agent',data.agent);
   if(webuiPart) parts.push(webuiPart);
   if(agentPart) parts.push(agentPart);
-  if(!parts.length)return;
+  window._updateData=data;
+  if(!parts.length){
+    _renderUpdateWhatsNewLinks(data);
+    const staleBanner=$('updateBanner');
+    if(staleBanner) staleBanner.classList.remove('visible');
+    return;
+  }
   const msg=$('updateMsg');
   if(msg) msg.textContent='\u2B06 '+parts.join(', ')+' available';
   const banner=$('updateBanner');
   if(banner) banner.classList.add('visible');
-  window._updateData=data;
-  // Wire up "What's new?" link.
-  //
-  // Reset display:none + clear the href on every render — otherwise a stale
-  // link from a prior update banner can stay visible after we've moved past
-  // a state where the new payload no longer carries usable SHAs (#1579 case
-  // when the local HEAD diverges from upstream and the compare URL would 404).
-  const link=$('updateWhatsNew');
-  if(link){
-    link.style.display='none';
-    link.removeAttribute('href');
-    if(data.webui){
-      const repoUrl=data.webui.repo_url;
-      const curSha=data.webui.current_sha;
-      const newSha=data.webui.latest_sha;
-      if(repoUrl && curSha && newSha){
-        link.href=repoUrl+'/compare/'+curSha+'...'+newSha;
-        link.style.display='inline';
-      }
-    }
-  }
+  const summaryMode=window._whatsNewSummaryEnabled===true?'summary':'diff';
+  _renderUpdateWhatsNewLinks(data,{mode:summaryMode});
 }
 function dismissUpdate(){
   const b=$('updateBanner');if(b)b.classList.remove('visible');
@@ -4070,11 +4431,12 @@ async function _waitForServerThenReload(opts){
   if(msgEl) msgEl.textContent='⚠️ Server is taking longer than expected — click Reload when ready';
 }
 
-function getPendingSessionMessage(session){
+function getPendingSessionMessage(session, messagesOverride=null){
   const text=String(session?.pending_user_message||'').trim();
   if(!text) return null;
   const attachments=Array.isArray(session?.pending_attachments)?session.pending_attachments.filter(Boolean):[];
-  const messages=Array.isArray(session?.messages)?session.messages:[];
+  const sourceMessages=Array.isArray(messagesOverride)?messagesOverride:session?.messages;
+  const messages=Array.isArray(sourceMessages)?sourceMessages:[];
   const lastUser=[...messages].reverse().find(m=>m&&m.role==='user');
   if(lastUser){
     const lastText=String(msgContent(lastUser)||'').trim();
@@ -4256,7 +4618,7 @@ function _messageHasReasoningPayload(m){
   if(!m||m.role!=='assistant') return false;
   if(m.reasoning) return true;
   if(Array.isArray(m.content)) return m.content.some(p=>p&&(p.type==='thinking'||p.type==='reasoning'));
-  return /<think>[\s\S]*?<\/think>|<\|channel>thought\n[\s\S]*?<channel\|>|<\|turn\|>thinking\n[\s\S]*?<turn\|>/.test(String(m.content||''));
+  return /^\s*(?:<think>[\s\S]*?<\/think>|<\|channel\|?>thought\n?[\s\S]*?<channel\|>|<\|turn\|>thinking\n[\s\S]*?<turn\|>)/.test(String(m.content||''));
 }
 function _formatTurnTps(value){
   const n=Number(value);
@@ -4577,10 +4939,24 @@ function _isContextCompactionMessage(m){
   const text=msgContent(m)||String(m.content||'');
   return /^\s*\[context compaction/i.test(text) || /^\s*context compaction/i.test(text);
 }
+function _isPreservedCompressionTaskListMarkerText(text){
+  return /^\s*\[your active task list was preserved across context compression\]/i.test(String(text||''));
+}
+function _isPreservedCompressionTaskListMarkerOnlyText(text){
+  return _isPreservedCompressionTaskListMarkerText(text)
+    && !String(text||'')
+      .replace(/^\s*\[your active task list was preserved across context compression\]\s*/i,'')
+      .trim();
+}
 function _isPreservedCompressionTaskListMessage(m){
   if(!m||m.role!=='user') return false;
   const text=msgContent(m)||String(m.content||'');
   return /^\s*\[your active task list was preserved across context compression\]/i.test(text);
+}
+function _isMarkerOnlyAssistantCompressionMessage(m){
+  if(!m||m.role!=='assistant') return false;
+  const text=msgContent(m)||String(m.content||'');
+  return _isPreservedCompressionTaskListMarkerOnlyText(text);
 }
 function _preservedCompressionTaskListPreview(text){
   const body=String(text||'')
@@ -4607,9 +4983,11 @@ function _compressionAnchorIndex(visWithIdx, anchorKey, fallbackIdx=null){
     for(let i=visWithIdx.length-1;i>=0;i--){
       const candidate=_compressionMessageAnchorKey(visWithIdx[i].m);
       if(!candidate) continue;
+      const anchorTs=String(anchorKey.ts??'');
+      const candidateTs=String(candidate.ts??'');
       if(
         candidate.role===String(anchorKey.role||'') &&
-        String(candidate.ts??'')===String(anchorKey.ts??'') &&
+        (!anchorTs||!candidateTs||candidateTs===anchorTs) &&
         String(candidate.text||'')===String(anchorKey.text||'') &&
         Number(candidate.attachments||0)===Number(anchorKey.attachments||0)
       ){
@@ -4618,6 +4996,24 @@ function _compressionAnchorIndex(visWithIdx, anchorKey, fallbackIdx=null){
     }
   }
   return typeof fallbackIdx==='number' ? fallbackIdx : null;
+}
+function _latestCompressionReferenceMessage(messages, summaryText=''){
+  if(!Array.isArray(messages)||!messages.length) return {message:null, rawIdx:-1};
+  const summaryNorm=String(summaryText||'').replace(/\s+/g,' ').trim();
+  for(let i=messages.length-1;i>=0;i--){
+    const m=messages[i];
+    if(!_isContextCompactionMessage(m)) continue;
+    if(!summaryNorm) return {message:m, rawIdx:i};
+    let content='';
+    try{
+      content=String(msgContent(m)||'');
+    }catch(_){
+      content=String((m&&m.content)||'');
+    }
+    const contentNorm=content.replace(/\s+/g,' ').trim();
+    if(contentNorm.includes(summaryNorm)) return {message:m, rawIdx:i};
+  }
+  return {message:null, rawIdx:-1};
 }
 function _compressionReferenceCardHtml(text, open=false){
   const preview=text.split(/\n+/).filter(Boolean).slice(0,2).join(' ');
@@ -5021,7 +5417,10 @@ function renderMessages(options){
   $('emptyState').style.display=(vis.length||preservedCompressionTaskMessages.length)?'none':'';
   inner.innerHTML='';
   const compressionNode=compressionState?_compressionCardsNode(compressionState):null;
-  const referenceMessage=S.messages.find(m=>_isContextCompactionMessage(m));
+  const {message:referenceMessage, rawIdx:referenceMessageRawIdx}=_latestCompressionReferenceMessage(
+    S.messages,
+    sessionCompressionSummary
+  );
   const referenceText=referenceMessage
     ? msgContent(referenceMessage)||String(referenceMessage.content||'')
     : sessionCompressionSummary;
@@ -5072,15 +5471,28 @@ function renderMessages(options){
       break;
     }
   }
-  const insertionAnchor=_compressionAnchorIndex(
-    renderVisWithIdx,
+  const insertionAnchorFull=_compressionAnchorIndex(
+    visWithIdx,
     compressionState ? compressionState.anchorMessageKey : sessionCompressionAnchorKey,
     compressionState
       ? (typeof compressionState.anchorVisibleIdx==='number' ? compressionState.anchorVisibleIdx : compressionState.anchorRawIdx)
       : sessionCompressionAnchor
   );
+  let insertionAnchor=null;
+  if(typeof insertionAnchorFull==='number'){
+    if(insertionAnchorFull<windowStart) insertionAnchor=renderVisWithIdx.length?0:null;
+    else if(insertionAnchorFull<windowStart+renderVisWithIdx.length) insertionAnchor=insertionAnchorFull-windowStart;
+    else insertionAnchor=renderVisWithIdx.length?renderVisWithIdx.length-1:null;
+  }
   let _prevSepKey=null;
   let currentAssistantTurn=null;
+  const questionRawIdxByAssistantRawIdx=new Map();
+  let lastQuestionRawIdx=-1;
+  for(const entry of visWithIdx){
+    const role=entry&&entry.m&&entry.m.role;
+    if(role==='user') lastQuestionRawIdx=entry.rawIdx;
+    else if(role==='assistant') questionRawIdxByAssistantRawIdx.set(entry.rawIdx,lastQuestionRawIdx);
+  }
   const assistantSegments=new Map();
   const assistantThinking=new Map();
   const userRows=new Map();
@@ -5108,33 +5520,41 @@ function renderMessages(options){
     }
     if(!thinkingText && m.reasoning) thinkingText=m.reasoning;
     if(!thinkingText && typeof content==='string'){
-      const thinkMatch=content.match(/<think>([\s\S]*?)<\/think>/);
+      const thinkMatch=content.match(/^\s*<think>([\s\S]*?)<\/think>\s*/);
       if(thinkMatch){
         thinkingText=thinkMatch[1].trim();
-        content=content.replace(/<think>[\s\S]*?<\/think>\s*/,'').trimStart();
+        content=content.replace(/^\s*<think>[\s\S]*?<\/think>\s*/,'').trimStart();
       }
       if(!thinkingText){
         // Historical name "gemmaMatch" refers to MiniMax <|channel>thought format.
-        const gemmaMatch=content.match(/<\|channel>thought\n([\s\S]*?)<channel\|>/);
+        const gemmaMatch=content.match(/^\s*<\|channel\|?>thought\n?([\s\S]*?)<channel\|>\s*/);
         if(gemmaMatch){
           thinkingText=gemmaMatch[1].trim();
-          content=content.replace(/<\|channel>thought\n[\s\S]*?<channel\|>\s*/,'').trimStart();
+          content=content.replace(/^\s*<\|channel\|?>thought\n?[\s\S]*?<channel\|>\s*/,'').trimStart();
         }
       }
       if(!thinkingText){
         // Gemma 4 uses asymmetric <|turn|>thinking\n...<turn|> delimiters.
-        const gemmaTurnMatch=content.match(/<\|turn\|>thinking\n([\s\S]*?)<turn\|>/);
+        const gemmaTurnMatch=content.match(/^\s*<\|turn\|>thinking\n([\s\S]*?)<turn\|>\s*/);
         if(gemmaTurnMatch){
           thinkingText=gemmaTurnMatch[1].trim();
-          content=content.replace(/<\|turn\|>thinking\n[\s\S]*?<turn\|>\s*/,'').trimStart();
+          content=content.replace(/^\s*<\|turn\|>thinking\n[\s\S]*?<turn\|>\s*/,'').trimStart();
         }
       }
     }
     const clarifySelectionText=_clarifySelectionFromToolMessage(m);
     const isUser=m.role==='user'||!!clarifySelectionText;
+    if(!isUser&&_isMarkerOnlyAssistantCompressionMessage(m)){
+      content='**Error:** No response received after context compression. Please retry.';
+    }
     const contentForDisplay=clarifySelectionText||content;
     const displayContent=isUser?_stripWorkspaceDisplayPrefix(contentForDisplay):contentForDisplay;
+    if(thinkingText&&!isUser){
+      thinkingText=_stripVisibleAssistantEchoFromThinking(thinkingText, displayContent);
+    }
     const isLastAssistant=!isUser&&vi===renderVisWithIdx.length-1;
+    const nextRendered=renderVisWithIdx[vi+1];
+    const isTurnFinalAssistant=!isUser&&(!nextRendered||!nextRendered.m||nextRendered.m.role!=='assistant');
     let filesHtml='';
     if(m.attachments&&m.attachments.length){
       // Static regression tests intentionally look for msg-media-img/msg-file-badge near this branch.
@@ -5149,7 +5569,8 @@ function renderMessages(options){
     }
     let bodyHtml = isUser ? _renderUserFencedBlocks(displayContent) : renderMd(_stripXmlToolCallsDisplay(String(displayContent)));
     if(!isUser&&m.provider_details){
-      bodyHtml += `<details class="provider-error-details"><summary>Provider details</summary><pre><code>${esc(String(m.provider_details))}</code></pre></details>`;
+      const summary=m.provider_details_label||'Provider details';
+      bodyHtml += `<details class="provider-error-details"><summary>${esc(String(summary))}</summary><pre><code>${esc(String(m.provider_details))}</code></pre></details>`;
     }
     const statusHtml = (!isUser&&m._statusCard) ? _statusCardHtml(m._statusCard) : '';
     const isEditableUser=m.role==='user'&&rawIdx===lastUserRawIdx;
@@ -5166,7 +5587,10 @@ function renderMessages(options){
     const tsTitle=tsVal?(_fmtSv?_fmtSv(new Date(tsVal*1000),{}):new Date(tsVal*1000).toLocaleString()):'';
     const tsTime=_formatMessageFooterTimestamp(tsVal);
     const timeHtml = tsTime ? `<span class="msg-time" title="${esc(tsTitle)}">${tsTime}</span>` : '';
-    const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${ttsBtn}${forkBtn}${copyBtn}${retryBtn}</span></div>`;
+    const questionJumpBtn = (!isUser&&!m._live&&isTurnFinalAssistant)
+      ? _questionJumpButtonHtml(questionRawIdxByAssistantRawIdx.get(rawIdx))
+      : '';
+    const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${ttsBtn}${forkBtn}${copyBtn}${retryBtn}</span>${questionJumpBtn}</div>`;
 
     if(_isContextCompactionMessage(m)){
       if(compressionState || referenceNode){
@@ -5186,6 +5610,7 @@ function renderMessages(options){
       currentAssistantTurn=null;
       const row=document.createElement('div');
       row.className='msg-row';
+      row.id=_userMessageDomId(rawIdx);
       row.dataset.msgIdx=rawIdx;
       row.dataset.role='user';
       row.dataset.rawText=String(displayContent).trim();
@@ -5274,7 +5699,7 @@ function renderMessages(options){
       const turn=anchorSeg.closest('.assistant-turn');
       const blocks=_assistantTurnBlocks(turn);
       if(blocks){
-        blocks.appendChild(node);
+        blocks.insertBefore(node, anchorSeg);
         return;
       }
       const turnParent=turn && turn.parentElement;
@@ -5299,7 +5724,8 @@ function renderMessages(options){
   const handoffSummaryStates=_collectHandoffSummaryStates(S.messages);
 
   _insertCompressionLikeNode(compressionNode);
-  _insertCompressionLikeNode(referenceNode);
+  if(referenceNode&&referenceMessageRawIdx>=0) _insertCompressionLikeNodeByRawIdx(referenceNode, referenceMessageRawIdx);
+  else _insertCompressionLikeNode(referenceNode);
   _insertCompressionLikeNode(preservedOnlyNode, preservedOnlyAnchor);
   _insertCompressionLikeNode(handoffState?_handoffCardsNode(handoffState):null, renderVisWithIdx.length?renderVisWithIdx.length-1:null);
   for(const entry of handoffSummaryStates){
@@ -5650,20 +6076,41 @@ function _syncToolCallGroupSummary(group){
   if(label){
     if(toolCount) label.textContent=`Activity: ${toolCount} tool${toolCount===1?'':'s'}`;
     else label.textContent='Activity';
+    label.setAttribute('data-sweep-label', label.textContent);
   }
   if(durationEl){
     if(group.getAttribute('data-live-tool-call-group')==='1'){
       const activeText=_activityElapsedLabel(group);
+      const progressText=_activityLiveProgressLabel(group);
       if(activeText) group.setAttribute('data-active-turn-elapsed',activeText);
       else group.removeAttribute('data-active-turn-elapsed');
-      durationEl.textContent=activeText?`Working ${activeText}`:'';
-      durationEl.style.display=activeText?'':'none';
+      durationEl.textContent=[progressText, activeText].filter(Boolean).join(' · ');
+      durationEl.style.display=durationEl.textContent?'':'none';
     }else{
       const durationText=_formatTurnDuration(group.dataset.turnDuration);
       durationEl.textContent=durationText?`Done in ${durationText}`:'';
       durationEl.style.display=durationText?'':'none';
     }
   }
+}
+
+function _activityProgressLabelForToolName(name){
+  const key=String(name||'').toLowerCase().replace(/[^a-z0-9]+/g,'_');
+  if(!key) return 'Working';
+  if(key.includes('search')||key.includes('grep')) return 'Searching workspace';
+  if(key.includes('read')||key.includes('view')||key.includes('open')) return 'Reading files';
+  if(key.includes('write')||key.includes('patch')||key.includes('edit')) return 'Updating files';
+  if(key.includes('terminal')||key.includes('shell')||key.includes('command')||key.includes('process')) return 'Running command';
+  if(key.includes('web')||key.includes('fetch')||key.includes('curl')) return 'Checking web data';
+  if(key.includes('todo')||key.includes('plan')) return 'Planning next steps';
+  return 'Working';
+}
+
+function _activityLiveProgressLabel(group){
+  if(!group||group.getAttribute('data-live-tool-call-group')!=='1') return '';
+  const running=group.querySelector('.tool-card.tool-card-running .tool-card-name');
+  const latest=running || Array.from(group.querySelectorAll('.tool-card-name')).pop();
+  return _activityProgressLabelForToolName(latest?latest.textContent:'');
 }
 
 // ── Live tool card helpers (called during SSE streaming) ──
@@ -6440,6 +6887,20 @@ function _thinkingMarkup(text=''){
     ? `<div class="thinking-card${openClass}"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${esc(String(clean).trim())}</pre></div></div>`
     : `<div class="thinking"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>`;
 }
+function _renderThinkingInto(row,text=''){
+  if(!row) return;
+  const clean=_sanitizeThinkingDisplayText(text);
+  if(!clean){
+    row.innerHTML=_thinkingMarkup(text);
+    return;
+  }
+  const pre=row.querySelector('.thinking-card-body pre');
+  if(pre){
+    pre.textContent=clean;
+    return;
+  }
+  row.innerHTML=_thinkingMarkup(text);
+}
 function finalizeThinkingCard(){
   // Guard: only finalize thinking card if we're looking at the session that started it.
   // Without this check, switching tabs while a stream is running causes finalizeThinkingCard
@@ -6520,8 +6981,10 @@ function appendThinking(text=''){
       if(anchor) anchor.insertAdjacentElement('afterend', row);
       else blocks.appendChild(row);
     }
-    row.className=(text&&String(text).trim())?'assistant-segment thinking-card-row':'assistant-segment';
-    row.innerHTML=_thinkingMarkup(text);
+    const clean=_sanitizeThinkingDisplayText(text);
+    const hasClean=!!String(clean||'').trim();
+    row.className=hasClean?'assistant-segment thinking-card-row':'assistant-segment';
+    _renderThinkingInto(row,text);
     scrollIfPinned();
     // Auto-scroll the thinking card body to bottom if the user is watching
     // (scroll pinned). If the user scrolled up to read history, leave it alone.
@@ -6550,7 +7013,7 @@ function appendThinking(text=''){
     row.setAttribute('data-thinking-active','1');
     body.insertBefore(row, body.firstChild);
   }
-  row.innerHTML=_thinkingMarkup(text);
+  _renderThinkingInto(row,text);
   _syncToolCallGroupSummary(group);
   scrollIfPinned();
   if(_scrollPinned){
