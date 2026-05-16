@@ -5130,13 +5130,13 @@ function _gatewayLabelForPhase(phase){
 
 function _gatewayToggleLabelForPhase(phase){
   switch(phase){
-    case 'starting': return 'Gateway: Starting…';
-    case 'running': return 'Gateway: On';
-    case 'stopping': return 'Gateway: Stopping…';
-    case 'failed': return 'Gateway: Failed — click to retry';
-    case 'unknown': return 'Gateway: Check status';
-    case 'unavailable': return 'Gateway: Unavailable';
-    default: return 'Gateway: Off';
+    case 'starting': return 'Starting…';
+    case 'running': return 'On';
+    case 'stopping': return 'Stopping…';
+    case 'failed': return 'Failed';
+    case 'unknown': return 'Check status';
+    case 'unavailable': return 'Unavailable';
+    default: return 'Off';
   }
 }
 
@@ -5166,19 +5166,10 @@ function _repaintGatewayTile(profileName){
   const infoVisible = _gatewayInfoVisible(phase);
   const summary = _gatewayInfoSummary(state);
   const wifi = tile.querySelector('#profileGatewayWifi');
-  const pill = tile.querySelector('#opsGatewayPill');
-  const dot = tile.querySelector('#opsGatewayDot');
-  const stateLabel = tile.querySelector('#opsGatewayState');
   const info = tile.querySelector('[data-gateway-info]');
   const toggle = tile.querySelector('#opsGatewayToggle');
   const toggleLabel = tile.querySelector('#opsGatewayToggleLabel');
   if (wifi) wifi.setAttribute('data-state', phase);
-  if (pill) {
-    pill.setAttribute('data-state', phase);
-    pill.setAttribute('data-error', infoVisible ? summary : '');
-  }
-  if (dot) dot.setAttribute('data-state', phase);
-  if (stateLabel) stateLabel.textContent = _gatewayLabelForPhase(phase);
   if (info) {
     info.hidden = !infoVisible;
     info.setAttribute('data-tooltip', summary);
@@ -5187,6 +5178,7 @@ function _repaintGatewayTile(profileName){
   if (toggle) {
     toggle.setAttribute('data-state', phase);
     toggle.setAttribute('aria-checked', phase === 'running' ? 'true' : 'false');
+    toggle.setAttribute('data-error', infoVisible ? summary : '');
     toggle.disabled = controlUnavailable || _GATEWAY_TRANSIENT_PHASES.has(phase);
     toggle.setAttribute('aria-disabled', toggle.disabled ? 'true' : 'false');
   }
@@ -5570,7 +5562,6 @@ function _profileGatewayTile(p){
   }
   const state = _gatewayStateByProfile.get(p.name);
   const phase = state.phase || 'stopped';
-  const labelText = _gatewayLabelForPhase(phase);
   const toggleLabel = _gatewayToggleLabelForPhase(phase);
   const summary = _gatewayInfoSummary(state);
   const infoHidden = _gatewayInfoVisible(phase) ? '' : ' hidden';
@@ -5590,28 +5581,25 @@ function _profileGatewayTile(p){
   return `
     <article class="profile-ops-tile profile-gateway-tile" aria-labelledby="opsGatewayTitle" data-profile-name="${name}">
       <div class="profile-ops-tile-head">
-        <span class="profile-ops-tile-label profile-gateway-label" id="opsGatewayTitle">
-          <span class="profile-wifi profile-wifi-lg" id="profileGatewayWifi" data-state="${phase}" aria-hidden="true">${li('wifi',26)}</span>
-          <span class="profile-gateway-title">Agent Gateway</span>
-        </span>
-        <span class="profile-ops-status-pill profile-gateway-pill" id="opsGatewayPill" data-state="${phase}" data-error="${esc(summary)}">
-          <span id="opsGatewayDot" class="profile-status-dot profile-gateway-dot" data-state="${phase}" aria-hidden="true"></span>
-          <span id="opsGatewayState">${esc(labelText)}</span>
-          <button type="button" class="profile-gateway-info has-tooltip has-tooltip--bottom-right"
-                  data-gateway-info data-tooltip="${esc(summary)}"
-                  aria-label="View gateway status details"${infoHidden}>ⓘ</button>
-        </span>
+        <span class="profile-ops-tile-label profile-gateway-label" id="opsGatewayTitle">Agent Gateway</span>
+        <span class="profile-wifi profile-wifi-xl" id="profileGatewayWifi" data-state="${phase}" aria-hidden="true">${li('wifi',36)}</span>
       </div>
       <div class="profile-gateway-control">
-        <button id="opsGatewayToggle" class="profile-gateway-toggle" type="button"
-                role="switch" aria-checked="${ariaChecked}" aria-disabled="${controlUnavailable ? 'true' : 'false'}"
-                ${controlUnavailable ? 'disabled' : ''}
-                data-profile-name="${name}" data-gateway-toggle data-state="${phase}">
-          <span class="profile-gateway-toggle-track" aria-hidden="true">
-            <span class="profile-gateway-toggle-thumb"></span>
-          </span>
-          <span class="profile-gateway-toggle-label" id="opsGatewayToggleLabel">${esc(toggleLabel)}</span>
-        </button>
+        <div class="profile-gateway-toggle-group">
+          <button id="opsGatewayToggle" class="profile-gateway-toggle" type="button"
+                  role="switch" aria-checked="${ariaChecked}" aria-disabled="${controlUnavailable ? 'true' : 'false'}"
+                  ${controlUnavailable ? 'disabled' : ''}
+                  data-profile-name="${name}" data-gateway-toggle data-state="${phase}"
+                  data-error="${esc(summary)}">
+            <span class="profile-gateway-toggle-track" aria-hidden="true">
+              <span class="profile-gateway-toggle-thumb"></span>
+            </span>
+            <span class="profile-gateway-toggle-label" id="opsGatewayToggleLabel">${esc(toggleLabel)}</span>
+          </button>
+          <button type="button" class="profile-gateway-info has-tooltip has-tooltip--bottom-right has-tooltip--wrap"
+                  data-gateway-info data-tooltip="${esc(summary)}"
+                  aria-label="View gateway status details for ${name}"${infoHidden}>ⓘ</button>
+        </div>
         <button type="button" class="profile-gateway-platforms-btn"
                 data-profile-name="${name}" data-platforms-action="${name}"
                 title="${esc(platformsTitle)}"
@@ -6953,6 +6941,13 @@ async function _onGatewayToggle(profileName){
     _openGatewayInfoDialog(profileName);
     return;
   }
+
+  // Cancel any in-flight poller before the action so a stale 12s-cadence
+  // poll started from the running-state initial render cannot fire during
+  // the POST window and momentarily flip the UI back to 'stopping' after
+  // the action has already settled to 'stopped'. The post-action setTimeout
+  // below kicks off a fresh poller with the correct cadence.
+  _stopGatewayPoller(profileName);
 
   const action = (phase === 'running') ? 'stop' : 'start';
   const optimisticPhase = (action === 'start') ? 'starting' : 'stopping';

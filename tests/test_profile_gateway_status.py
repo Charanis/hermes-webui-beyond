@@ -103,6 +103,46 @@ def test_status_starting_within_grace_window():
         assert result["phase"] == "starting"
 
 
+def test_status_starting_with_stale_runtime_stays_starting_in_grace_window():
+    """After a WebUI restart, a fresh start (state.phase='starting') is
+    expected to find a stale gateway_state.json — the brand-new gateway
+    hasn't ticked yet. The status endpoint must stay at 'starting' during
+    the grace window rather than surface a 'Gateway runtime file is stale;
+    liveness is unknown' message that scares the user during a normal
+    start. Only the post-grace failure path may escalate.
+    """
+    import datetime as _dt
+
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        profile = _seed_named_profile(base, "coder")
+        profiles = _reload_profiles_module(base)
+        _install_fake_pid_alive(profiles, alive_pids=set())
+        # Stale runtime file from the prior (dead) gateway process.
+        stale = (
+            _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(seconds=600)
+        ).isoformat()
+        (profile / "gateway_state.json").write_text(
+            json.dumps({"gateway_state": "running", "updated_at": stale}),
+            encoding="utf-8",
+        )
+        # Just clicked Start — well within the grace window.
+        _write_state(profile, phase="starting", phase_started_at=_past_iso(2))
+
+        result = profiles.profile_gateway_status_api("coder")
+
+        assert result["phase"] == "starting", (
+            "Stale runtime during fresh start must not promote to 'unknown'; "
+            f"got phase={result['phase']!r}"
+        )
+        detail = (result.get("detail") or "")
+        assert "runtime file is stale" not in detail.lower(), (
+            "The 'runtime file is stale' message belongs to a steady-state "
+            "diagnosis, not the brand-new-start window."
+        )
+
+
 def test_status_promotes_starting_to_running_when_pid_alive():
     with tempfile.TemporaryDirectory() as td:
         base = Path(td) / ".hermes"

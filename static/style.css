@@ -794,6 +794,10 @@
   /* For right-edge elements (e.g. send button) — tooltip flips to the LEFT
      of the trigger so it doesn't extend past the viewport edge. */
   .has-tooltip--left::after{left:auto;right:calc(100% + 8px);top:50%;transform:translateY(-50%);}
+  /* Multiline variant — for triggers whose data-tooltip is a sentence/paragraph
+     (gateway error details, etc.) rather than a short label. Default tooltip
+     uses white-space:nowrap which overflows the viewport on long strings. */
+  .has-tooltip--wrap::after{white-space:normal;max-width:320px;width:max-content;line-height:1.35;}
   @media(prefers-reduced-motion:reduce){.has-tooltip::after{transition:none;transition-delay:0s;}}
 .rail-spacer{flex:1;min-height:8px;}
 .rail .nav-tab{flex:0 0 auto;padding:0;font-size:inherit;border-bottom:none;overflow:visible;}
@@ -4223,10 +4227,13 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
   border:1px solid var(--border);background:color-mix(in srgb,var(--sidebar) 70%,transparent);
   color:var(--muted);transition:color .25s,border-color .25s,background-color .25s,box-shadow .25s;
 }
-.profile-wifi-lg{
-  width:42px;height:42px;border-radius:11px;
+.profile-wifi-xl{
+  width:60px;height:60px;border-radius:14px;
 }
-.profile-wifi-lg svg{width:26px;height:26px;}
+.profile-wifi-xl svg{width:36px;height:36px;}
+.profile-gateway-toggle-group{
+  display:inline-flex;align-items:center;gap:10px;
+}
 
 .profile-wifi[data-state="stopped"]{
   color:var(--muted);
@@ -4272,7 +4279,6 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
 .profile-status-dot[data-state="failed"]{background:var(--danger,#E76F51);}
 
 /* Gateway status info affordance */
-.profile-gateway-pill{position:relative;gap:6px;}
 .profile-status-dot[data-state="unknown"]{background:var(--warn,#f59e0b);}
 .profile-status-dot[data-state="unavailable"]{background:var(--muted);}
 .profile-wifi[data-state="unknown"]{
@@ -4306,7 +4312,7 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
 /* ── Gateway toggle (replaces Start/Restart/Stop button row) ───────── */
 .profile-gateway-control{
   display:flex;align-items:center;justify-content:space-between;
-  margin-top:8px;gap:12px;
+  margin-top:8px;gap:12px;flex-wrap:wrap;
 }
 .profile-gateway-toggle{
   display:inline-flex;align-items:center;gap:10px;
@@ -4378,9 +4384,6 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
    Inline sibling of the toggle inside .profile-gateway-control. The
    control row is space-between, so toggle stays left and the platforms
    button sits right. Visible in every gateway phase. */
-.profile-gateway-control{
-  display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;
-}
 .profile-gateway-platforms-btn{
   display:inline-flex;align-items:center;gap:8px;
   background:transparent;color:var(--em,var(--text));

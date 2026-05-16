@@ -3231,13 +3231,16 @@ def profile_gateway_status_api(name: str) -> dict:
         )
 
     if phase == 'starting':
-        if runtime_phase == 'unknown' and _phase_age_seconds(phase_started_at) < GATEWAY_START_GRACE_SECONDS:
-            return _status_payload(
-                name, 'unknown', pid, None, phase_started_at,
-                status_source=runtime_source or 'runtime_file', health=runtime_health,
-                desired_enabled=desired_enabled, updated_at=runtime_updated_at,
-                detail='Gateway runtime file is stale; liveness is unknown from this WebUI runtime.',
-            )
+        # NOTE: previously this branch promoted 'starting' to 'unknown' as soon
+        # as the runtime file was stale, on the theory that we lacked a
+        # positive liveness signal. In practice the runtime file is *expected*
+        # to be stale immediately after a fresh start — the brand-new gateway
+        # hasn't ticked yet and any pre-existing gateway_state.json is from a
+        # prior (dead) process. Promoting to 'unknown' surfaces a scary
+        # "runtime file is stale" detail to the user during what should be a
+        # normal "Starting…" window. Stay at 'starting' through the grace
+        # window; the natural failure path below escalates to 'failed' if no
+        # live PID materializes in time.
         if _phase_age_seconds(phase_started_at) >= GATEWAY_START_GRACE_SECONDS:
             tail = _read_stderr_tail(profile_home)
             err = tail if tail else 'gateway failed to start within grace window'
@@ -3438,7 +3441,15 @@ def profile_gateway_control_api(name: str, action: str) -> dict:
         hook_result.setdefault('profile', name)
         hook_result.setdefault('action', action)
         hook_result.setdefault('configured', True)
-        hook_result['phase'] = transient_phase
+        # For a successful stop the handler is synchronous: by the time we
+        # return, the PID has been signalled and reaped. Persist phase='stopped'
+        # immediately so a racing status poll does not observe a stale
+        # 'stopping' stamp and flip the UI back from Off to Stopping.
+        if action == 'stop' and hook_result.get('ok'):
+            _write_gateway_phase(profile_home, 'stopped')
+            hook_result['phase'] = 'stopped'
+        else:
+            hook_result['phase'] = transient_phase
         if hook_result.get('ok') and action == 'start':
             _write_gateway_last_run(profile_home)
         return hook_result
@@ -3453,7 +3464,14 @@ def profile_gateway_control_api(name: str, action: str) -> dict:
     result.setdefault('profile', name)
     result.setdefault('action', action)
     result.setdefault('configured', True)
-    result['phase'] = transient_phase
+    # See hook branch above: persist 'stopped' eagerly on a successful stop so
+    # the response is authoritative and a concurrent poll cannot read back
+    # a transient 'stopping' stamp.
+    if action == 'stop' and result.get('ok'):
+        _write_gateway_phase(profile_home, 'stopped')
+        result['phase'] = 'stopped'
+    else:
+        result['phase'] = transient_phase
     if result.get('ok') and action == 'start':
         _write_gateway_last_run(profile_home)
     return result

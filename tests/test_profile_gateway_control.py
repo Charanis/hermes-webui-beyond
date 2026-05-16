@@ -577,6 +577,11 @@ def test_start_action_writes_starting_phase_before_returning():
 
 
 def test_stop_action_writes_stopping_phase_before_returning():
+    """The in-flight 'stopping' stamp is visible to a status poll that races
+    the kill; on success the handler reconciles to 'stopped' before returning
+    so the response is authoritative and the UI cannot flicker back to
+    'stopping' afterwards.
+    """
     import json
     with tempfile.TemporaryDirectory() as td:
         base = Path(td) / ".hermes"
@@ -593,7 +598,13 @@ def test_stop_action_writes_stopping_phase_before_returning():
         try:
             result = profiles.profile_gateway_control_api("coder", "stop")
             assert result["ok"] is True
-            assert result.get("phase") == "stopping"
+            # On successful stop, the response now reports the settled phase
+            # so a racing status poll cannot read back a stale 'stopping'
+            # stamp and flip the UI from Off → Stopping.
+            assert result.get("phase") == "stopped"
+            data = json.loads((profile / ".gateway-state.json").read_text())
+            assert data["phase"] is None
+            assert data["phase_started_at"] is None
         finally:
             profiles._set_gateway_control_hook(None)
 

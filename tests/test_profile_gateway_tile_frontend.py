@@ -28,8 +28,8 @@ def test_gateway_tile_knows_unknown_and_unavailable_are_not_stopped():
     toggle = _extract_function(PANELS_JS, "_gatewayToggleLabelForPhase")
     assert "case 'unknown': return 'Unknown';" in label
     assert "case 'unavailable': return 'Unavailable';" in label
-    assert "Gateway: Check status" in toggle
-    assert "Gateway: Unavailable" in toggle
+    assert "case 'unknown': return 'Check status';" in toggle
+    assert "case 'unavailable': return 'Unavailable';" in toggle
 
 
 def test_gateway_status_contract_fields_are_cached_and_repainted():
@@ -76,7 +76,7 @@ def test_gateway_tile_renders_keyboard_info_button_and_copyable_dialog_path():
     dialog = _extract_function(PANELS_JS, "_openGatewayInfoDialog")
     assert "profile-gateway-info" in tile
     assert "data-gateway-info" in tile
-    assert "aria-label=\"View gateway status details\"" in tile
+    assert "View gateway status details" in tile
     assert "data-gateway-info" in bind
     assert "_openGatewayInfoDialog(profileName)" in bind
     for required in ("role=\"dialog\"", "Gateway status details", "Profile", "Phase", "Status source", "Health reason", "Copy", "Close", "textarea"):
