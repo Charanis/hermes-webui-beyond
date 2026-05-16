@@ -47,7 +47,7 @@ def test_v3_css_classes_defined():
         ".profile-hero-description",
         ".profile-hero-description-edit",
         ".profile-wifi",
-        ".profile-wifi.on",
+        '.profile-wifi[data-state="running"]',
         ".profile-skill-chip",
     ):
         assert selector in STYLE_CSS, f"missing CSS selector {selector}"
@@ -307,10 +307,12 @@ def test_gateway_tile_uses_wifi_icon():
     assert "li('wifi'" in fn or 'li("wifi"' in fn, "gateway tile must call li('wifi', …)"
 
 
-def test_gateway_bindings_toggle_wifi_state():
-    fn = _extract_function(PANELS_JS, "_bindProfileOpsConsole")
-    assert "profileGatewayWifi" in fn, "_bindProfileOpsConsole must reach the wifi indicator"
-    assert "just-started" in fn, "gateway start should trigger the pulse animation class"
+def test_gateway_repaint_updates_wifi_state_and_disabled_control():
+    fn = _extract_function(PANELS_JS, "_repaintGatewayTile")
+    assert "profileGatewayWifi" in fn, "_repaintGatewayTile must reach the wifi indicator"
+    assert "setAttribute('data-state', phase)" in fn
+    assert "control_available" in fn
+    assert "toggle.disabled" in fn
 
 
 # ── Skills tile ───────────────────────────────────────────────────────────
@@ -323,7 +325,7 @@ def test_skills_tile_has_top_chips_container():
 
 
 def test_skills_hydrator_renders_chips_and_more_overflow():
-    fn = _extract_function(PANELS_JS, "_loadProfileSkillsTile")
+    fn = _extract_function(PANELS_JS, "_applyProfileSkillsSummary")
     assert "profile-skill-chip" in fn
     assert "profile-skill-more" in fn
 

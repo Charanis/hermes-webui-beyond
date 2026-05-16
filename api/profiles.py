@@ -1409,6 +1409,12 @@ def _read_gateway_state(profile_home: Path) -> dict:
 # a failure. Tuned for Telegram + Slack adapter cold-start latency.
 GATEWAY_START_GRACE_SECONDS = 8
 
+# Grace window for gateway stop before an alive signal is treated as the
+# truthful post-stop state again. This prevents a stale "stopping" stamp from
+# disabling the Profile Gateway toggle indefinitely when the gateway remains
+# running or is auto-restarted by its supervisor.
+GATEWAY_STOP_GRACE_SECONDS = 12
+
 
 def _write_gateway_phase(
     profile_home: Path,
@@ -1448,14 +1454,22 @@ def _write_gateway_phase(
     timestamp = started_at if started_at else now_iso
 
     if phase == 'stopped':
+        payload['desired_enabled'] = False
         payload['phase'] = None
         payload['phase_started_at'] = None
         payload['last_error'] = None
     elif phase == 'failed':
+        payload['desired_enabled'] = False
         payload['phase'] = 'failed'
         payload['phase_started_at'] = timestamp
         payload['last_error'] = last_error
-    elif phase in ('starting', 'stopping', 'running'):
+    elif phase in ('starting', 'running'):
+        payload['desired_enabled'] = True
+        payload['phase'] = phase
+        payload['phase_started_at'] = timestamp
+        payload['last_error'] = None
+    elif phase == 'stopping':
+        payload['desired_enabled'] = False
         payload['phase'] = phase
         payload['phase_started_at'] = timestamp
         payload['last_error'] = None
@@ -2600,8 +2614,8 @@ def _resolve_hermes_bin() -> str:
     return 'hermes'
 
 
-def _default_gateway_control(name: str, action: str) -> dict:
-    """In-process default gateway control backend.
+def _local_gateway_control(name: str, action: str) -> dict:
+    """In-process local gateway control backend.
 
     Brackets the HERMES_HOME swap via ``cron_profile_context_for_home`` so
     the child gateway process inherits the right profile via os.environ
@@ -2686,6 +2700,151 @@ def _default_gateway_control(name: str, action: str) -> dict:
         raise RuntimeError(f"gateway subsystem aborted: {exc}") from exc
 
 
+class _LocalGatewayControlAdapter:
+    name = 'local'
+    control_available = True
+
+    def status(self, profile_home: Path, profile_name: str) -> dict | None:
+        return None
+
+    def start(self, profile_home: Path, profile_name: str) -> dict:
+        return _local_gateway_control(profile_name, 'start')
+
+    def stop(self, profile_home: Path, profile_name: str) -> dict:
+        return _local_gateway_control(profile_name, 'stop')
+
+
+_CONTAINER_NAME_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$')
+
+
+class _DockerGatewayControlAdapter:
+    name = 'docker_exec'
+
+    def __init__(self, container: str):
+        container = str(container or '').strip()
+        if not _CONTAINER_NAME_RE.fullmatch(container):
+            raise ValueError('WEBUI_GATEWAY_DOCKER_CONTAINER must be a Docker container/service name')
+        self.container = container
+
+    def status(self, profile_home: Path, profile_name: str) -> dict | None:
+        import shutil as _shutil
+        if _shutil.which('docker'):
+            return None
+        detail = 'Docker gateway control is configured, but the docker CLI is unavailable to this WebUI process.'
+        return {
+            'phase': 'unavailable',
+            'status_source': 'adapter',
+            'health': {'alive': None, 'state': 'unknown', 'reason': 'docker_cli_unavailable'},
+            'control_available': False,
+            'detail': detail,
+        }
+
+    def _run(self, profile_home: Path, action: str) -> dict:
+        import subprocess as _subprocess
+        if action == 'start':
+            gateway_args = ['gateway', 'run', '--replace']
+            running = True
+        elif action == 'stop':
+            gateway_args = ['gateway', 'stop']
+            running = False
+        else:
+            raise ValueError(f"unknown gateway action: {action!r}")
+        cmd = [
+            'docker', 'exec', '-e', f'HERMES_HOME={Path(profile_home)}', self.container,
+            'hermes', *gateway_args,
+        ]
+        result = _subprocess.run(cmd, capture_output=True, text=True, timeout=10, check=False)
+        if result.returncode != 0:
+            raise RuntimeError(_sanitize_gateway_message(result.stderr or 'docker gateway command failed'))
+        return {'ok': True, 'running': running, 'adapter': self.name}
+
+    def start(self, profile_home: Path, profile_name: str) -> dict:
+        return self._run(profile_home, 'start')
+
+    def stop(self, profile_home: Path, profile_name: str) -> dict:
+        return self._run(profile_home, 'stop')
+
+
+def _load_gateway_webui_config(profile_home: Path) -> dict:
+    config_path = profile_home / 'config.yaml'
+    if not config_path.exists():
+        return {}
+    try:
+        import yaml as _yaml
+        loaded = _yaml.safe_load(config_path.read_text(encoding='utf-8'))
+    except Exception:
+        return {}
+    if not isinstance(loaded, dict):
+        return {}
+    webui_cfg = loaded.get('webui') if isinstance(loaded.get('webui'), dict) else {}
+    gateway_cfg = webui_cfg.get('gateway') if isinstance(webui_cfg.get('gateway'), dict) else {}
+    return gateway_cfg if isinstance(gateway_cfg, dict) else {}
+
+
+def _gateway_control_config(profile_home: Path) -> dict:
+    cfg = _load_gateway_webui_config(profile_home)
+    control_cfg = cfg.get('control') if isinstance(cfg.get('control'), dict) else {}
+    mode = os.getenv('WEBUI_GATEWAY_CONTROL_MODE') or control_cfg.get('mode') or 'local'
+    container = os.getenv('WEBUI_GATEWAY_DOCKER_CONTAINER') or control_cfg.get('container')
+    remote_health_url = os.getenv('WEBUI_GATEWAY_REMOTE_HEALTH_URL') or cfg.get('remote_health_url')
+    allow_service = str(os.getenv('WEBUI_GATEWAY_REMOTE_HEALTH_ALLOW_SERVICE', '')).lower() in ('1', 'true', 'yes')
+    if cfg.get('remote_health_allow_service') is True:
+        allow_service = True
+    return {
+        'mode': str(mode or 'local').strip().lower(),
+        'container': str(container or '').strip(),
+        'remote_health_url': str(remote_health_url or '').strip(),
+        'remote_health_allow_service': allow_service,
+    }
+
+
+def _select_gateway_control_adapter(name: str, profile_home: Path):
+    cfg = _gateway_control_config(profile_home)
+    mode = cfg['mode']
+    if mode in ('', 'local'):
+        return _LocalGatewayControlAdapter()
+    if mode == 'docker_exec':
+        return _DockerGatewayControlAdapter(cfg['container'])
+    if mode in ('remote_health', 'status_only', 'unavailable'):
+        return _UnavailableGatewayControlAdapter(f"Gateway lifecycle control mode '{mode}' is status-only in this WebUI.")
+    return _UnavailableGatewayControlAdapter(f"Unsupported gateway lifecycle control mode '{mode}'.")
+
+
+class _UnavailableGatewayControlAdapter:
+    name = 'unavailable'
+
+    def __init__(self, detail: str):
+        self.detail = _sanitize_gateway_message(detail)
+
+    def status(self, profile_home: Path, profile_name: str) -> dict:
+        return {
+            'phase': 'unavailable',
+            'status_source': 'adapter',
+            'health': {'alive': None, 'state': 'unknown', 'reason': 'control_unavailable'},
+            'control_available': False,
+            'detail': self.detail,
+        }
+
+    def start(self, profile_home: Path, profile_name: str) -> dict:
+        raise RuntimeError(self.detail)
+
+    def stop(self, profile_home: Path, profile_name: str) -> dict:
+        raise RuntimeError(self.detail)
+
+
+def _default_gateway_control(name: str, action: str) -> dict:
+    if _is_root_profile(name):
+        profile_home = _DEFAULT_HERMES_HOME
+    else:
+        profile_home = _resolve_named_profile_home(name)
+    adapter = _select_gateway_control_adapter(name, profile_home)
+    if action == 'start':
+        return adapter.start(profile_home, name)
+    if action == 'stop':
+        return adapter.stop(profile_home, name)
+    raise ValueError(f"unknown gateway action: {action!r}")
+
+
 def _is_pid_alive(pid: int) -> bool:
     """True if a process with `pid` exists and is signal-able.
 
@@ -2705,17 +2864,201 @@ def _is_pid_alive(pid: int) -> bool:
     return True
 
 
-def _read_gateway_pid(profile_home: Path) -> int | None:
-    """Return the PID from gateway.pid or None if missing/malformed."""
+def _gateway_status_module():
+    """Load Hermes gateway.status lazily so WebUI-only installs still work."""
+    import importlib as _importlib
+    return _importlib.import_module('gateway.status')
+
+
+def _gateway_running_pid_from_helper(pid_path: Path) -> int | None:
+    """Return the canonical Hermes running PID when the helper is available."""
+    try:
+        gateway_status = _gateway_status_module()
+        get_running_pid = gateway_status.get_running_pid
+    except Exception:
+        return None
+    try:
+        pid = get_running_pid(pid_path, cleanup_stale=False)
+    except TypeError:
+        try:
+            pid = get_running_pid(pid_path=pid_path, cleanup_stale=False)
+        except TypeError:
+            try:
+                pid = get_running_pid(cleanup_stale=False)
+            except TypeError:
+                pid = get_running_pid()
+    except Exception:
+        return None
+    try:
+        pid_int = int(pid)
+    except (TypeError, ValueError):
+        return None
+    return pid_int if pid_int > 0 else None
+
+
+def _read_gateway_pid_record(profile_home: Path) -> int | None:
+    """Return the PID recorded in gateway.pid, supporting JSON and legacy int."""
     pid_path = profile_home / 'gateway.pid'
     if not pid_path.exists():
         return None
     try:
         raw = pid_path.read_text(encoding='utf-8').strip()
-        pid = int(raw)
-        return pid if pid > 0 else None
+    except OSError:
+        return None
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        payload = raw
+    if isinstance(payload, dict):
+        payload = payload.get('pid')
+    if payload is None:
+        return None
+    try:
+        pid = int(payload)
+    except (TypeError, ValueError):
+        return None
+    return pid if pid > 0 else None
+
+
+def _read_gateway_pid(profile_home: Path) -> int | None:
+    """Return an observed-live gateway PID or None if missing/not visible."""
+    pid_path = profile_home / 'gateway.pid'
+    helper_pid = _gateway_running_pid_from_helper(pid_path)
+    if helper_pid is not None:
+        return helper_pid
+    pid = _read_gateway_pid_record(profile_home)
+    if pid and _is_pid_alive(pid):
+        return pid
+    return None
+
+
+def _read_gateway_runtime_status(profile_home: Path) -> dict | None:
+    """Read Hermes Agent's runtime gateway_state.json for this profile."""
+    runtime_path = profile_home / 'gateway_state.json'
+    if not runtime_path.exists():
+        return None
+    try:
+        data = json.loads(runtime_path.read_text(encoding='utf-8'))
     except (ValueError, OSError):
         return None
+    return data if isinstance(data, dict) else None
+
+
+def _gateway_runtime_health(runtime_status: dict | None) -> tuple[str | None, dict | None, str | None, str | None]:
+    """Map gateway_state.json to (phase, health, source, updated_at)."""
+    if not isinstance(runtime_status, dict):
+        return None, None, None, None
+    try:
+        from api import agent_health as _agent_health
+    except Exception:
+        _agent_health = None
+    updated_at = runtime_status.get('updated_at') if isinstance(runtime_status.get('updated_at'), str) else None
+    if _agent_health is not None and _agent_health._runtime_status_is_fresh(runtime_status):
+        return (
+            'running',
+            {'alive': True, 'state': 'alive', 'reason': 'cross_container_freshness'},
+            'runtime_file',
+            updated_at,
+        )
+    if _agent_health is not None and _agent_health._runtime_status_is_stale_running(runtime_status):
+        return (
+            'unknown',
+            {'alive': None, 'state': 'unknown', 'reason': 'gateway_stale_running_state'},
+            'runtime_file',
+            updated_at,
+        )
+    if runtime_status.get('gateway_state') == 'running':
+        return (
+            'unknown',
+            {'alive': None, 'state': 'unknown', 'reason': 'gateway_stale_running_state'},
+            'runtime_file',
+            updated_at,
+        )
+    return (
+        'stopped',
+        {'alive': False, 'state': 'down', 'reason': 'gateway_not_running'},
+        'runtime_file',
+        updated_at,
+    )
+
+
+def _remote_health_host_allowed(hostname: str, *, allow_service_hosts: bool = False) -> bool:
+    host = (hostname or '').strip().lower().strip('[]')
+    if host in ('localhost', '127.0.0.1', '::1'):
+        return True
+    if allow_service_hosts and re.fullmatch(r'[a-z][a-z0-9-]{0,62}', host):
+        return True
+    return False
+
+
+def _probe_gateway_remote_health(base_url: str, *, allow_service_hosts: bool = False, timeout: float = 0.75) -> dict | None:
+    """Probe a configured backend-only Gateway health URL with SSRF guardrails."""
+    from urllib.parse import urljoin, urlparse
+    import urllib.error as _urlerror
+    import urllib.request as _urlrequest
+
+    raw_url = str(base_url or '').strip()
+    if not raw_url:
+        return None
+    parsed = urlparse(raw_url)
+    if parsed.scheme not in ('http', 'https') or not _remote_health_host_allowed(parsed.hostname or '', allow_service_hosts=allow_service_hosts):
+        return {
+            'phase': 'unavailable',
+            'status_source': 'remote_health',
+            'health': {'alive': None, 'state': 'unknown', 'reason': 'unsafe_remote_health_url'},
+            'control_available': False,
+            'detail': 'Configured gateway remote health URL is not allowed by WebUI safety policy.',
+        }
+
+    class _NoRedirectHandler(_urlrequest.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+
+    opener = _urlrequest.build_opener(_NoRedirectHandler)
+
+    for suffix in ('/health/detailed', '/health'):
+        try:
+            req = _urlrequest.Request(urljoin(raw_url.rstrip('/') + '/', suffix.lstrip('/')), headers={'Accept': 'application/json'})
+            with opener.open(req, timeout=min(float(timeout), 1.0)) as resp:
+                body = resp.read(65536).decode('utf-8', errors='replace')
+            payload = json.loads(body) if body else {}
+            if not isinstance(payload, dict):
+                payload = {}
+            gateway_state = payload.get('gateway_state') or payload.get('state')
+            if gateway_state == 'running' or payload.get('ok') is True:
+                return {
+                    'phase': 'running',
+                    'status_source': 'remote_health',
+                    'health': {'alive': True, 'state': 'alive', 'reason': 'remote_health'},
+                    'control_available': False,
+                    'updated_at': payload.get('updated_at') if isinstance(payload.get('updated_at'), str) else None,
+                    'detail': 'Gateway is reachable through configured remote health; lifecycle control is status-only.',
+                }
+        except _urlerror.HTTPError as exc:
+            if suffix == '/health/detailed' and exc.code in (404, 405):
+                continue
+            return {
+                'phase': 'unavailable',
+                'status_source': 'remote_health',
+                'health': {'alive': None, 'state': 'unknown', 'reason': 'remote_health_unavailable'},
+                'control_available': False,
+                'detail': _sanitize_gateway_message(f'Gateway remote health probe failed: {exc}'),
+            }
+        except (_urlerror.URLError, TimeoutError, OSError, ValueError) as exc:
+            return {
+                'phase': 'unavailable',
+                'status_source': 'remote_health',
+                'health': {'alive': None, 'state': 'unknown', 'reason': 'remote_health_unavailable'},
+                'control_available': False,
+                'detail': _sanitize_gateway_message(f'Gateway remote health probe failed: {exc}'),
+            }
+    return {
+        'phase': 'stopped',
+        'status_source': 'remote_health',
+        'health': {'alive': False, 'state': 'down', 'reason': 'remote_health_down'},
+        'control_available': False,
+        'detail': 'Gateway remote health did not report a running gateway; lifecycle control is status-only.',
+    }
 
 
 def _read_stderr_tail(profile_home: Path, *, max_bytes: int = 5120) -> str:
@@ -2778,50 +3121,193 @@ def profile_gateway_status_api(name: str) -> dict:
     state = _read_gateway_state(profile_home)
     phase = state.get('phase')
     phase_started_at = state.get('phase_started_at')
+    last_error = _sanitize_gateway_message(state.get('last_error') or '') or None
+    desired_enabled = state.get('desired_enabled') if isinstance(state.get('desired_enabled'), bool) else None
     pid = _read_gateway_pid(profile_home)
-    pid_alive = _is_pid_alive(pid) if pid else False
+    pid_alive = pid is not None
+    runtime_status = _read_gateway_runtime_status(profile_home)
+    runtime_phase, runtime_health, runtime_source, runtime_updated_at = _gateway_runtime_health(runtime_status)
+    gateway_cfg = _gateway_control_config(profile_home)
+    remote_status = _probe_gateway_remote_health(
+        gateway_cfg.get('remote_health_url'),
+        allow_service_hosts=bool(gateway_cfg.get('remote_health_allow_service')),
+    )
+    adapter_status = None
+    try:
+        adapter_status = _select_gateway_control_adapter(name, profile_home).status(profile_home, name)
+    except Exception as exc:
+        adapter_status = {
+            'phase': 'unavailable',
+            'status_source': 'adapter',
+            'health': {'alive': None, 'state': 'unknown', 'reason': 'control_unavailable'},
+            'control_available': False,
+            'detail': _sanitize_gateway_message(str(exc)),
+        }
+    adapter_control_unavailable = (
+        isinstance(adapter_status, dict)
+        and adapter_status.get('control_available') is False
+    )
+    adapter_unavailable_detail = None
+    if adapter_control_unavailable and isinstance(adapter_status, dict):
+        adapter_unavailable_detail = adapter_status.get('detail')
 
-    # No phase recorded -> infer from PID liveness only.
-    if not phase:
-        if pid_alive:
-            # PID file with live process but no phase — treat as running.
-            # Synthesize a 'running' state so future polls are consistent.
+    pid_health = {'alive': True, 'state': 'alive', 'reason': 'pid_alive'}
+    down_health = {'alive': False, 'state': 'down', 'reason': 'gateway_not_running'}
+    unknown_health = {'alive': None, 'state': 'unknown', 'reason': 'gateway_not_configured'}
+
+    # Decisive alive signals win except while an explicit stop transition is in flight.
+    if phase != 'stopping' and pid_alive:
+        if phase in (None, '', 'starting'):
             _write_gateway_phase(profile_home, 'running', started_at=phase_started_at)
-            return _status_payload(name, 'running', pid, None, phase_started_at)
-        return _status_payload(name, 'stopped', None, None, None)
+        return _status_payload(
+            name, 'running', pid, None, phase_started_at,
+            status_source='pid', health=pid_health, desired_enabled=desired_enabled,
+            control_available=not adapter_control_unavailable,
+            detail=adapter_unavailable_detail,
+        )
+
+    if phase != 'stopping' and runtime_phase == 'running':
+        if phase in (None, '', 'starting'):
+            _write_gateway_phase(profile_home, 'running', started_at=phase_started_at)
+        return _status_payload(
+            name, 'running', pid, None, phase_started_at,
+            status_source=runtime_source or 'runtime_file', health=runtime_health,
+            desired_enabled=desired_enabled, updated_at=runtime_updated_at,
+            control_available=not adapter_control_unavailable,
+            detail=adapter_unavailable_detail,
+        )
+
+    if phase != 'stopping' and isinstance(remote_status, dict) and remote_status.get('phase') == 'running':
+        if phase in (None, '', 'starting'):
+            _write_gateway_phase(profile_home, 'running', started_at=phase_started_at)
+        return _status_payload(
+            name, 'running', pid, None, phase_started_at,
+            status_source='remote_health', health=remote_status.get('health'),
+            desired_enabled=desired_enabled, updated_at=remote_status.get('updated_at'),
+            control_available=False, detail=remote_status.get('detail'),
+        )
+
+    if isinstance(adapter_status, dict) and adapter_status.get('phase') == 'unavailable':
+        return _status_payload(
+            name, 'unavailable', pid, None, phase_started_at,
+            status_source=adapter_status.get('status_source') or 'adapter',
+            health=adapter_status.get('health'), control_available=False,
+            desired_enabled=desired_enabled, detail=adapter_status.get('detail'),
+        )
+
+    if isinstance(remote_status, dict) and remote_status.get('phase') == 'unavailable' and runtime_phase is None:
+        return _status_payload(
+            name, 'unavailable', pid, None, phase_started_at,
+            status_source='remote_health', health=remote_status.get('health'),
+            control_available=False, desired_enabled=desired_enabled,
+            detail=remote_status.get('detail'),
+        )
+
+    # No WebUI phase recorded -> infer from runtime evidence or no evidence.
+    if not phase:
+        if runtime_phase == 'unknown':
+            return _status_payload(
+                name, 'unknown', pid, None, None,
+                status_source=runtime_source or 'runtime_file', health=runtime_health,
+                desired_enabled=desired_enabled, updated_at=runtime_updated_at,
+                detail='Gateway last reported running, but this WebUI cannot verify current liveness.',
+            )
+        if runtime_phase == 'stopped':
+            return _status_payload(
+                name, 'stopped', None, None, None,
+                status_source=runtime_source or 'runtime_file', health=runtime_health,
+                desired_enabled=desired_enabled, updated_at=runtime_updated_at,
+            )
+        return _status_payload(
+            name, 'stopped', None, None, None,
+            status_source='none', health=unknown_health, desired_enabled=desired_enabled,
+        )
 
     if phase == 'starting':
-        if pid_alive:
-            _write_gateway_phase(profile_home, 'running', started_at=phase_started_at)
-            return _status_payload(name, 'running', pid, None, phase_started_at)
+        if runtime_phase == 'unknown':
+            return _status_payload(
+                name, 'unknown', pid, None, phase_started_at,
+                status_source=runtime_source or 'runtime_file', health=runtime_health,
+                desired_enabled=desired_enabled, updated_at=runtime_updated_at,
+                detail='Gateway runtime file is stale; liveness is unknown from this WebUI runtime.',
+            )
         if _phase_age_seconds(phase_started_at) >= GATEWAY_START_GRACE_SECONDS:
             tail = _read_stderr_tail(profile_home)
             err = tail if tail else 'gateway failed to start within grace window'
             _write_gateway_phase(profile_home, 'failed', last_error=err)
-            return _status_payload(name, 'failed', pid, err, phase_started_at)
-        return _status_payload(name, 'starting', pid, None, phase_started_at)
+            return _status_payload(
+                name, 'failed', pid, err, phase_started_at,
+                status_source='state_file', health=down_health, desired_enabled=False,
+                detail=err,
+            )
+        return _status_payload(
+            name, 'starting', pid, None, phase_started_at,
+            status_source='state_file', health={'alive': None, 'state': 'unknown', 'reason': 'starting'},
+            desired_enabled=True,
+        )
 
     if phase == 'stopping':
-        if not pid_alive:
+        if not pid_alive and runtime_phase != 'running':
             _write_gateway_phase(profile_home, 'stopped')
-            return _status_payload(name, 'stopped', None, None, None)
-        return _status_payload(name, 'stopping', pid, None, phase_started_at)
+            return _status_payload(
+                name, 'stopped', None, None, None,
+                status_source=runtime_source or 'state_file', health=runtime_health or down_health,
+                desired_enabled=False, updated_at=runtime_updated_at,
+            )
+        if _phase_age_seconds(phase_started_at) >= GATEWAY_STOP_GRACE_SECONDS:
+            detail = 'Gateway is still running after the stop grace window; status refreshed so controls are available.'
+            if pid_alive:
+                _write_gateway_phase(profile_home, 'running')
+                return _status_payload(
+                    name, 'running', pid, None, None,
+                    status_source='pid', health=pid_health, desired_enabled=True,
+                    control_available=not adapter_control_unavailable,
+                    detail=adapter_unavailable_detail or detail,
+                )
+            if runtime_phase == 'running':
+                _write_gateway_phase(profile_home, 'running')
+                return _status_payload(
+                    name, 'running', pid, None, None,
+                    status_source=runtime_source or 'runtime_file', health=runtime_health,
+                    desired_enabled=True, updated_at=runtime_updated_at,
+                    control_available=not adapter_control_unavailable,
+                    detail=adapter_unavailable_detail or detail,
+                )
+        return _status_payload(
+            name, 'stopping', pid, None, phase_started_at,
+            status_source='state_file', health={'alive': None, 'state': 'unknown', 'reason': 'stopping'},
+            desired_enabled=False,
+        )
 
     if phase == 'running':
-        if pid_alive:
-            return _status_payload(name, 'running', pid, None, phase_started_at)
-        # Post-running crash — drop to stopped, not failed.
+        if runtime_phase == 'unknown':
+            return _status_payload(
+                name, 'unknown', pid, None, phase_started_at,
+                status_source=runtime_source or 'runtime_file', health=runtime_health,
+                desired_enabled=desired_enabled, updated_at=runtime_updated_at,
+                detail='Gateway last reported running, but this WebUI cannot verify current liveness.',
+            )
+        # Post-running crash/no evidence — drop to stopped, not failed.
         _write_gateway_phase(profile_home, 'stopped')
-        return _status_payload(name, 'stopped', None, None, None)
+        return _status_payload(
+            name, 'stopped', None, None, None,
+            status_source=runtime_source or 'state_file', health=runtime_health or down_health,
+            desired_enabled=False, updated_at=runtime_updated_at,
+        )
 
     if phase == 'failed':
         return _status_payload(
-            name, 'failed', pid, state.get('last_error'), phase_started_at
+            name, 'failed', pid, last_error, phase_started_at,
+            status_source='state_file', health=down_health,
+            desired_enabled=False, detail=last_error,
         )
 
     # Unknown phase string -> treat as stopped (defensive).
     _write_gateway_phase(profile_home, 'stopped')
-    return _status_payload(name, 'stopped', None, None, None)
+    return _status_payload(
+        name, 'stopped', None, None, None,
+        status_source='state_file', health=down_health, desired_enabled=False,
+    )
 
 
 def _status_payload(
@@ -2830,15 +3316,59 @@ def _status_payload(
     pid: int | None,
     last_error: str | None,
     phase_started_at: str | None,
+    *,
+    status_source: str = 'none',
+    health: dict | None = None,
+    control_available: bool = True,
+    desired_enabled: bool | None = None,
+    updated_at: str | None = None,
+    detail: str | None = None,
 ) -> dict:
-    return {
+    safe_last_error = _sanitize_gateway_message(last_error or '') or None
+    safe_detail = _sanitize_gateway_message(detail or '') or None
+    if desired_enabled is None:
+        desired_enabled = phase in ('running', 'starting', 'stopping')
+    payload = {
         'ok': True,
         'profile': name,
         'phase': phase,
         'pid': pid,
-        'last_error': last_error,
+        'last_error': safe_last_error,
         'phase_started_at': phase_started_at,
+        'status_source': status_source,
+        'health': health or {'alive': None, 'state': 'unknown', 'reason': 'not_configured'},
+        'control_available': control_available,
+        'desired_enabled': desired_enabled,
+        'updated_at': updated_at,
+        'detail': safe_detail,
     }
+    return payload
+
+
+def _gateway_control_failure_message(name: str, action: str, raw_message: str) -> str:
+    """Return a sanitized, actionable message for profile gateway failures."""
+    conflict = _telegram_token_profile_conflict_detail(name, action, raw_message)
+    if conflict:
+        return conflict
+    return _sanitize_gateway_message(raw_message)
+
+
+def _telegram_token_profile_conflict_detail(name: str, action: str, raw_message: str) -> str | None:
+    """Classify Telegram token-lock failures as profile conflicts.
+
+    The Hermes Gateway uses a lock named ``telegram-bot-token_lock`` to prevent
+    duplicate long-polling with the same Telegram bot token. Raw lock errors can
+    include token fragments, so replace them with copyable remediation text.
+    """
+    text = (raw_message or '').lower()
+    if 'telegram-bot-token_lock' not in text:
+        return None
+    return (
+        f"Profile '{name}' could not start the Telegram Gateway because its "
+        "Telegram bot token is already in use by another Gateway/profile. "
+        "Stop the other profile's Gateway, or configure a unique "
+        "TELEGRAM_BOT_TOKEN for this profile, then retry."
+    )
 
 
 def profile_gateway_control_api(name: str, action: str) -> dict:
@@ -2870,7 +3400,7 @@ def profile_gateway_control_api(name: str, action: str) -> dict:
     _write_gateway_phase(profile_home, transient_phase)
 
     def _record_failure(exc: Exception) -> dict:
-        message = _sanitize_gateway_message(str(exc))
+        message = _gateway_control_failure_message(name, action, str(exc))
         _write_gateway_phase(profile_home, 'failed', last_error=message)
         return {
             'ok': False,
@@ -2944,6 +3474,15 @@ def _write_gateway_last_run(profile_home: Path) -> None:
 _SECRET_PATTERN = re.compile(
     r'(?i)(api[_-]?key|token|secret|password)\s*[:=]\s*\S+'
 )
+_AUTH_HEADER_PATTERN = re.compile(
+    r'(?i)\bauthorization\s*:\s*(?:bearer|token|basic)?\s*[^\s\'\"]+'
+)
+_CLI_SECRET_PATTERN = re.compile(
+    r'(?i)(--(?:api[-_]?key|token|secret|password))(?:\s+|=)(?:"[^"]*"|\'[^\']*\'|\S+)'
+)
+_TELEGRAM_BOT_TOKEN_VALUE_PATTERN = re.compile(
+    r'\b\d{5,}:[A-Za-z0-9_-]{10,}\b'
+)
 
 
 def _sanitize_gateway_message(message: str) -> str:
@@ -2957,7 +3496,10 @@ def _sanitize_gateway_message(message: str) -> str:
     """
     if not message:
         return ''
-    text = _SECRET_PATTERN.sub(r'\1=[redacted]', message)
+    text = _AUTH_HEADER_PATTERN.sub('Authorization: [redacted]', message)
+    text = _CLI_SECRET_PATTERN.sub(lambda match: f'{match.group(1)} [redacted]', text)
+    text = _SECRET_PATTERN.sub(r'\1=[redacted]', text)
+    text = _TELEGRAM_BOT_TOKEN_VALUE_PATTERN.sub('[redacted]', text)
     return text[-500:]
 
 

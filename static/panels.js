@@ -5103,15 +5103,21 @@ function _profileRuntimePanel(p, isActive){
 // persists across detail-open/close so a re-open shows the last known
 // phase before the first status poll lands.
 const _gatewayStateByProfile = new Map();
-// Active pollers keyed by profile name → setInterval handle.
+// Active pollers keyed by profile name → setTimeout handle.
 const _gatewayPollers = new Map();
+const _GATEWAY_TRANSIENT_PHASES = new Set(['starting', 'stopping']);
+const _GATEWAY_INFO_PHASES = new Set(['failed', 'unknown', 'unavailable']);
+const _GATEWAY_TRANSIENT_POLL_MS = 1500;
+const _GATEWAY_STABLE_POLL_MS = 12000;
 
 function _gatewayLabelForPhase(phase){
   switch(phase){
     case 'starting': return 'Starting';
     case 'running': return 'Running';
     case 'stopping': return 'Stopping';
-    case 'failed': return 'Starting Failed';
+    case 'failed': return 'Start Failed';
+    case 'unknown': return 'Unknown';
+    case 'unavailable': return 'Unavailable';
     default: return 'Stopped';
   }
 }
@@ -5122,8 +5128,26 @@ function _gatewayToggleLabelForPhase(phase){
     case 'running': return 'Gateway: On';
     case 'stopping': return 'Gateway: Stopping…';
     case 'failed': return 'Gateway: Failed — click to retry';
+    case 'unknown': return 'Gateway: Check status';
+    case 'unavailable': return 'Gateway: Unavailable';
     default: return 'Gateway: Off';
   }
+}
+
+function _gatewayInfoSummary(state){
+  if (!state) return 'Gateway status detail unavailable.';
+  const phase = state.phase || 'unknown';
+  const reason = state.health && state.health.reason ? state.health.reason : 'no reason provided';
+  const detail = state.detail || state.last_error || 'No additional detail.';
+  return `${_gatewayLabelForPhase(phase)}: ${reason}. ${detail}`.slice(0, 220);
+}
+
+function _gatewayInfoReason(state){
+  return state && state.health && state.health.reason ? state.health.reason : '—';
+}
+
+function _gatewayInfoVisible(phase){
+  return _GATEWAY_INFO_PHASES.has(phase || 'stopped');
 }
 
 function _repaintGatewayTile(profileName){
@@ -5132,24 +5156,33 @@ function _repaintGatewayTile(profileName){
   const tile = document.querySelector(`.profile-gateway-tile[data-profile-name="${CSS.escape(profileName)}"]`);
   if (!tile) return;  // tile not currently rendered for this profile
   const phase = state.phase || 'stopped';
+  const controlUnavailable = state.control_available === false || phase === 'unavailable';
+  const infoVisible = _gatewayInfoVisible(phase);
+  const summary = _gatewayInfoSummary(state);
   const wifi = tile.querySelector('#profileGatewayWifi');
   const pill = tile.querySelector('#opsGatewayPill');
   const dot = tile.querySelector('#opsGatewayDot');
   const stateLabel = tile.querySelector('#opsGatewayState');
+  const info = tile.querySelector('[data-gateway-info]');
   const toggle = tile.querySelector('#opsGatewayToggle');
   const toggleLabel = tile.querySelector('#opsGatewayToggleLabel');
   if (wifi) wifi.setAttribute('data-state', phase);
   if (pill) {
     pill.setAttribute('data-state', phase);
-    const errMsg = phase === 'failed' ? (state.last_error || 'Gateway failed to start.') : '';
-    pill.setAttribute('data-error', errMsg);
-    pill.setAttribute('title', errMsg);
+    pill.setAttribute('data-error', infoVisible ? summary : '');
   }
   if (dot) dot.setAttribute('data-state', phase);
   if (stateLabel) stateLabel.textContent = _gatewayLabelForPhase(phase);
+  if (info) {
+    info.hidden = !infoVisible;
+    info.setAttribute('data-tooltip', summary);
+    info.setAttribute('aria-label', `View gateway status details for ${profileName}`);
+  }
   if (toggle) {
     toggle.setAttribute('data-state', phase);
     toggle.setAttribute('aria-checked', phase === 'running' ? 'true' : 'false');
+    toggle.disabled = controlUnavailable || _GATEWAY_TRANSIENT_PHASES.has(phase);
+    toggle.setAttribute('aria-disabled', toggle.disabled ? 'true' : 'false');
   }
   if (toggleLabel) toggleLabel.textContent = _gatewayToggleLabelForPhase(phase);
 }
@@ -5166,9 +5199,11 @@ function _profileGatewayTile(p){
   }
   const state = _gatewayStateByProfile.get(p.name);
   const phase = state.phase || 'stopped';
-  const lastError = state.last_error || '';
   const labelText = _gatewayLabelForPhase(phase);
   const toggleLabel = _gatewayToggleLabelForPhase(phase);
+  const summary = _gatewayInfoSummary(state);
+  const infoHidden = _gatewayInfoVisible(phase) ? '' : ' hidden';
+  const controlUnavailable = state.control_available === false || phase === 'unavailable' || _GATEWAY_TRANSIENT_PHASES.has(phase);
   const ariaChecked = phase === 'running' ? 'true' : 'false';
   return `
     <article class="profile-ops-tile profile-gateway-tile" aria-labelledby="opsGatewayTitle" data-profile-name="${name}">
@@ -5177,14 +5212,18 @@ function _profileGatewayTile(p){
           <span class="profile-wifi profile-wifi-lg" id="profileGatewayWifi" data-state="${phase}" aria-hidden="true">${li('wifi',26)}</span>
           <span class="profile-gateway-title">Agent Gateway</span>
         </span>
-        <span class="profile-ops-status-pill profile-gateway-pill" id="opsGatewayPill" data-state="${phase}" data-error="${esc(lastError)}" title="${esc(lastError)}">
-          <span id="opsGatewayDot" class="profile-status-dot profile-gateway-dot" data-state="${phase}" aria-hidden="true"><span class="dot-info" aria-hidden="true">ⓘ</span></span>
+        <span class="profile-ops-status-pill profile-gateway-pill" id="opsGatewayPill" data-state="${phase}" data-error="${esc(summary)}">
+          <span id="opsGatewayDot" class="profile-status-dot profile-gateway-dot" data-state="${phase}" aria-hidden="true"></span>
           <span id="opsGatewayState">${esc(labelText)}</span>
+          <button type="button" class="profile-gateway-info has-tooltip has-tooltip--bottom-right"
+                  data-gateway-info data-tooltip="${esc(summary)}"
+                  aria-label="View gateway status details"${infoHidden}>ⓘ</button>
         </span>
       </div>
       <div class="profile-gateway-control">
         <button id="opsGatewayToggle" class="profile-gateway-toggle" type="button"
-                role="switch" aria-checked="${ariaChecked}"
+                role="switch" aria-checked="${ariaChecked}" aria-disabled="${controlUnavailable ? 'true' : 'false'}"
+                ${controlUnavailable ? 'disabled' : ''}
                 data-profile-name="${name}" data-gateway-toggle data-state="${phase}">
           <span class="profile-gateway-toggle-track" aria-hidden="true">
             <span class="profile-gateway-toggle-thumb"></span>
@@ -6240,14 +6279,17 @@ function _bindProfileOpsConsole(p, isActive, isDefault){
     if (toggle) {
       toggle.onclick = () => _onGatewayToggle(profileName);
     }
+    const info = body.querySelector('[data-gateway-info]');
+    if (info) {
+      info.onclick = () => _openGatewayInfoDialog(profileName);
+    }
   }
   // Kick off an initial status read for this profile so the seed phase
-  // is replaced by the authoritative server-side phase.
+  // is replaced by the authoritative server-side phase, then keep polling
+  // while this detail view remains visible (slow for stable phases, fast
+  // for starting/stopping).
   _refreshGatewayStatus(profileName).then(() => {
-    const st = _gatewayStateByProfile.get(profileName);
-    if (st && (st.phase === 'starting' || st.phase === 'stopping')) {
-      _startGatewayPoller(profileName);
-    }
+    _startGatewayPoller(profileName);
   }).catch(() => {});
 
   // Profile file widgets — scoped to the detail body (review F2).
@@ -6416,7 +6458,10 @@ async function _opsDuplicateProfile(profileName){
   });
   if (!newName) return;
   try {
-    const result = await api('/api/profile/duplicate', { method: 'POST', body: JSON.stringify({ name: profileName, new_name: newName }) });
+    const result = await api('/api/profile/duplicate', {
+      method: 'POST',
+      body: JSON.stringify({ name: profileName, new_name: newName })
+    });
     showToast(`Duplicated to "${newName}"`);
     await loadProfilesPanel();
     const target = result && result.profile && result.profile.name ? result.profile.name : newName;
@@ -6426,6 +6471,79 @@ async function _opsDuplicateProfile(profileName){
   }
 }
 
+function _openGatewayInfoDialog(profileName){
+  const state = _gatewayStateByProfile.get(profileName) || { phase: 'unknown' };
+  const existing = document.getElementById('gatewayInfoDialogOverlay');
+  if (existing) existing.remove();
+  const overlay = document.createElement('div');
+  overlay.id = 'gatewayInfoDialogOverlay';
+  overlay.className = 'gateway-info-dialog';
+  const phase = state.phase || 'unknown';
+  const source = state.status_source || '—';
+  const reason = _gatewayInfoReason(state);
+  const detail = state.detail || state.last_error || 'No additional detail was provided.';
+  const copyText = [
+    `Profile: ${profileName}`,
+    `Phase: ${phase}`,
+    `Status source: ${source}`,
+    `Health reason: ${reason}`,
+    '',
+    detail,
+  ].join('\n');
+  overlay.innerHTML = `
+    <div class="gateway-info-card" role="dialog" aria-modal="true" aria-labelledby="gatewayInfoDialogTitle">
+      <div class="input-dialog-head">
+        <div>
+          <div id="gatewayInfoDialogTitle" class="input-dialog-title">Gateway status details</div>
+          <div class="input-dialog-message">Copyable runtime detail for the selected profile gateway.</div>
+        </div>
+        <button type="button" class="input-dialog-close" data-gateway-info-action="close" aria-label="Close">×</button>
+      </div>
+      <dl class="gateway-info-grid">
+        <dt>Profile</dt><dd>${esc(profileName)}</dd>
+        <dt>Phase</dt><dd>${esc(_gatewayLabelForPhase(phase))}</dd>
+        <dt>Status source</dt><dd>${esc(source)}</dd>
+        <dt>Health reason</dt><dd>${esc(reason)}</dd>
+      </dl>
+      <textarea class="gateway-info-detail" readonly rows="8">${esc(detail)}</textarea>
+      <div class="input-dialog-actions">
+        <button type="button" class="profile-ops-button" data-gateway-info-action="copy">Copy</button>
+        <button type="button" class="profile-ops-button primary" data-gateway-info-action="close">Close</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  const detailEl = overlay.querySelector('.gateway-info-detail');
+  const closeBtn = overlay.querySelector('[data-gateway-info-action="close"]');
+  const opener = document.querySelector(`.profile-gateway-tile[data-profile-name="${CSS.escape(profileName)}"] [data-gateway-info]`);
+  const cleanup = () => {
+    document.removeEventListener('keydown', onKey, true);
+    overlay.remove();
+    if (opener) opener.focus();
+  };
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(copyText);
+      showToast('Gateway details copied');
+    } catch (_) {
+      if (detailEl) {
+        detailEl.focus();
+        detailEl.select();
+        try { document.execCommand('copy'); showToast('Gateway details copied'); }
+        catch (e) { showToast('Copy failed: ' + (e && e.message || e)); }
+      }
+    }
+  };
+  const onKey = (ev) => { if (ev.key === 'Escape') { ev.preventDefault(); cleanup(); } };
+  overlay.addEventListener('click', (ev) => { if (ev.target === overlay) cleanup(); });
+  overlay.querySelectorAll('[data-gateway-info-action]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (btn.dataset.gatewayInfoAction === 'copy') copy(); else cleanup();
+    });
+  });
+  document.addEventListener('keydown', onKey, true);
+  setTimeout(() => { if (closeBtn) closeBtn.focus(); }, 0);
+}
+
 // ── Gateway toggle handler + poller (v3) ──────────────────────────────
 
 async function _onGatewayToggle(profileName){
@@ -6433,11 +6551,15 @@ async function _onGatewayToggle(profileName){
   const state = _gatewayStateByProfile.get(profileName) || { phase: 'stopped' };
   const phase = state.phase || 'stopped';
   if (phase === 'starting' || phase === 'stopping') return;  // locked
+  if (state.control_available === false || phase === 'unavailable') {
+    _openGatewayInfoDialog(profileName);
+    return;
+  }
 
   const action = (phase === 'running') ? 'stop' : 'start';
   const optimisticPhase = (action === 'start') ? 'starting' : 'stopping';
   _gatewayStateByProfile.set(profileName, {
-    ...state, phase: optimisticPhase, last_error: null,
+    ...state, phase: optimisticPhase, last_error: null, detail: null,
   });
   _repaintGatewayTile(profileName);
 
@@ -6448,8 +6570,13 @@ async function _onGatewayToggle(profileName){
     });
     if (result && result.ok === false) {
       _gatewayStateByProfile.set(profileName, {
-        phase: 'failed',
-        last_error: result.message || 'Gateway action failed.',
+        ...state,
+        phase: result.phase || 'failed',
+        last_error: result.message || result.last_error || 'Gateway action failed.',
+        detail: result.detail || result.message || 'Gateway action failed.',
+        status_source: result.status_source || state.status_source || null,
+        health: result.health || state.health || null,
+        control_available: result.control_available !== false,
         phase_started_at: null,
         pid: null,
       });
@@ -6458,25 +6585,19 @@ async function _onGatewayToggle(profileName){
       return;
     }
     if (result && result.phase) {
-      _gatewayStateByProfile.set(profileName, {
-        phase: result.phase,
-        last_error: result.last_error || null,
-        phase_started_at: result.phase_started_at || null,
-        pid: result.pid || null,
-      });
+      _gatewayStateByProfile.set(profileName, _normalizeGatewayStatus(result, state));
       _repaintGatewayTile(profileName);
     }
-    // Fast-track first refresh, then start the poller for transient phases.
+    // Fast-track first refresh, then let the visible poller choose cadence.
     setTimeout(() => _refreshGatewayStatus(profileName).then(() => {
-      const st = _gatewayStateByProfile.get(profileName);
-      if (st && (st.phase === 'starting' || st.phase === 'stopping')) {
-        _startGatewayPoller(profileName);
-      }
+      _startGatewayPoller(profileName);
     }).catch(() => {}), 250);
   } catch (e) {
     _gatewayStateByProfile.set(profileName, {
+      ...state,
       phase: 'failed',
       last_error: String((e && e.message) || e),
+      detail: String((e && e.message) || e),
       phase_started_at: null,
       pid: null,
     });
@@ -6485,18 +6606,32 @@ async function _onGatewayToggle(profileName){
   }
 }
 
+function _normalizeGatewayStatus(result, prior){
+  const prev = prior || {};
+  return {
+    ...prev,
+    phase: result.phase || 'stopped',
+    desired_enabled: result.desired_enabled === true,
+    control_available: result.control_available !== false,
+    status_source: result.status_source || null,
+    health: result.health || null,
+    detail: result.detail || null,
+    last_error: result.last_error || result.detail || null,
+    phase_started_at: result.phase_started_at || null,
+    pid: result.pid || null,
+    updated_at: result.updated_at || null,
+  };
+}
+
 async function _refreshGatewayStatus(profileName){
   try {
     const result = await api(
       '/api/profile/gateway/status?name=' + encodeURIComponent(profileName)
     );
     if (!result || result.ok !== true) return null;
-    _gatewayStateByProfile.set(profileName, {
-      phase: result.phase || 'stopped',
-      last_error: result.last_error || null,
-      phase_started_at: result.phase_started_at || null,
-      pid: result.pid || null,
-    });
+    // Cache canonical contract fields: control_available, status_source,
+    // health, detail, desired_enabled, plus compatibility phase/pid fields.
+    _gatewayStateByProfile.set(profileName, _normalizeGatewayStatus(result, _gatewayStateByProfile.get(profileName)));
     _repaintGatewayTile(profileName);
     return result;
   } catch (_) {
@@ -6505,28 +6640,41 @@ async function _refreshGatewayStatus(profileName){
   }
 }
 
+function _gatewayDetailVisible(profileName){
+  if (document.visibilityState === 'hidden') return false;
+  if (_currentPanel !== 'profiles') return false;
+  if (!_currentProfileDetail || _currentProfileDetail.name !== profileName) return false;
+  return !!document.querySelector(`.profile-gateway-tile[data-profile-name="${CSS.escape(profileName)}"]`);
+}
+
 function _startGatewayPoller(profileName){
   if (_gatewayPollers.has(profileName)) return;  // already polling
-  const handle = setInterval(async () => {
-    const result = await _refreshGatewayStatus(profileName);
-    const phase = result && result.phase;
-    if (phase && phase !== 'starting' && phase !== 'stopping') {
-      _stopGatewayPoller(profileName);
-    }
-  }, 1500);
-  _gatewayPollers.set(profileName, handle);
+  const schedule = (delay) => {
+    const handle = setTimeout(async () => {
+      if (document.visibilityState === 'hidden' || _currentPanel !== 'profiles' || !_currentProfileDetail || _currentProfileDetail.name !== profileName) { _stopGatewayPoller(profileName); return; }
+      if (!_gatewayDetailVisible(profileName)) { _stopGatewayPoller(profileName); return; }
+      const result = await _refreshGatewayStatus(profileName);
+      if (!_gatewayDetailVisible(profileName)) { _stopGatewayPoller(profileName); return; }
+      const state = _gatewayStateByProfile.get(profileName) || {};
+      const phase = (result && result.phase) || state.phase || 'stopped';
+      schedule(_GATEWAY_TRANSIENT_PHASES.has(phase) ? _GATEWAY_TRANSIENT_POLL_MS : _GATEWAY_STABLE_POLL_MS);
+    }, delay);
+    _gatewayPollers.set(profileName, handle);
+  };
+  const state = _gatewayStateByProfile.get(profileName) || {};
+  schedule(_GATEWAY_TRANSIENT_PHASES.has(state.phase) ? _GATEWAY_TRANSIENT_POLL_MS : _GATEWAY_STABLE_POLL_MS);
 }
 
 function _stopGatewayPoller(profileName){
   const handle = _gatewayPollers.get(profileName);
   if (handle) {
-    clearInterval(handle);
+    clearTimeout(handle);
     _gatewayPollers.delete(profileName);
   }
 }
 
 function _stopAllGatewayPollers(){
-  for (const handle of _gatewayPollers.values()) clearInterval(handle);
+  for (const handle of _gatewayPollers.values()) clearTimeout(handle);
   _gatewayPollers.clear();
 }
 

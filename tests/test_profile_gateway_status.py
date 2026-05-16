@@ -26,7 +26,16 @@ def _reload_profiles_module(base_home: Path):
         if n in sys.modules:
             del sys.modules[n]
     profiles = importlib.import_module("api.profiles")
+
+    # Restore original modules and package attributes so this temporary import
+    # does not leave api.profiles pointing at a module that is no longer present
+    # in sys.modules. Later tests call importlib.reload(api.profiles), which
+    # requires those references to remain consistent.
     sys.modules.update(_saved)
+    api_pkg = sys.modules.get("api")
+    if api_pkg is not None:
+        for name, module in _saved.items():
+            setattr(api_pkg, name.rsplit(".", 1)[-1], module)
     return profiles
 
 
@@ -183,6 +192,63 @@ def test_status_stopping_while_pid_alive():
         assert result["phase"] == "stopping"
 
 
+def test_status_stale_stopping_reports_running_when_pid_still_alive():
+    """A stop transition must not disable the UI forever.
+
+    If the stop action was stamped long ago but an alive gateway PID is still
+    visible, the truthful status is running so the toggle can be used again.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        profile = _seed_named_profile(base, "coder")
+        profiles = _reload_profiles_module(base)
+        _install_fake_pid_alive(profiles, alive_pids={1234})
+        (profile / "gateway.pid").write_text("1234", encoding="utf-8")
+        _write_state(profile, phase="stopping", phase_started_at=_past_iso(600))
+
+        result = profiles.profile_gateway_status_api("coder")
+
+        assert result["phase"] == "running"
+        assert result["pid"] == 1234
+        assert result["status_source"] == "pid"
+        assert result["control_available"] is True
+        persisted = json.loads((profile / ".gateway-state.json").read_text())
+        assert persisted["phase"] == "running"
+
+
+def test_status_stale_stopping_reports_running_from_fresh_runtime_file():
+    """Same stuck-stop recovery when WebUI cannot see the gateway PID.
+
+    Split container/WSL setups can have no visible PID but a fresh
+    gateway_state.json heartbeat; that is also an alive signal and should
+    unlock the toggle after the stop grace window.
+    """
+    import datetime as _dt
+
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        profile = _seed_named_profile(base, "coder")
+        profiles = _reload_profiles_module(base)
+        _install_fake_pid_alive(profiles, alive_pids=set())
+        fresh = _dt.datetime.now(_dt.timezone.utc).isoformat()
+        (profile / "gateway_state.json").write_text(
+            json.dumps({"gateway_state": "running", "updated_at": fresh}),
+            encoding="utf-8",
+        )
+        _write_state(profile, phase="stopping", phase_started_at=_past_iso(600))
+
+        result = profiles.profile_gateway_status_api("coder")
+
+        assert result["phase"] == "running"
+        assert result["pid"] is None
+        assert result["status_source"] == "runtime_file"
+        assert result["control_available"] is True
+        persisted = json.loads((profile / ".gateway-state.json").read_text())
+        assert persisted["phase"] == "running"
+
+
 def test_status_stopping_promotes_to_stopped_when_pid_gone():
     with tempfile.TemporaryDirectory() as td:
         base = Path(td) / ".hermes"
@@ -193,6 +259,58 @@ def test_status_stopping_promotes_to_stopped_when_pid_gone():
         _write_state(profile, phase="stopping", phase_started_at=_past_iso(1))
         result = profiles.profile_gateway_status_api("coder")
         assert result["phase"] == "stopped"
+
+
+def test_status_stale_stopping_reports_stopped_when_pid_and_runtime_are_dead():
+    """A stale stop intent with no live signal must reconcile to stopped.
+
+    This is the mirror of stale-stop-with-live-PID recovery: once the stop
+    grace window has elapsed, a dead/missing PID plus absent runtime heartbeat
+    is a terminal stopped state, not an indefinite disabled toggle.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        profile = _seed_named_profile(base, "coder")
+        profiles = _reload_profiles_module(base)
+        _install_fake_pid_alive(profiles, alive_pids=set())
+        (profile / "gateway.pid").write_text("1234", encoding="utf-8")
+        _write_state(profile, phase="stopping", phase_started_at=_past_iso(600))
+
+        result = profiles.profile_gateway_status_api("coder")
+
+        assert result["phase"] == "stopped"
+        assert result["pid"] is None
+        assert result["health"]["alive"] is False
+        persisted = json.loads((profile / ".gateway-state.json").read_text())
+        assert persisted.get("phase") is None
+        assert persisted.get("desired_enabled") is False
+
+
+def test_status_stale_stopping_reports_stopped_when_no_live_signal_remains():
+    """A stale stop intent with no PID/runtime heartbeat must unlock as stopped."""
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        profile = _seed_named_profile(base, "coder")
+        profiles = _reload_profiles_module(base)
+        _install_fake_pid_alive(profiles, alive_pids=set())
+        (profile / "gateway.pid").write_text("1234", encoding="utf-8")
+        (profile / "gateway_state.json").write_text(
+            json.dumps({"gateway_state": "stopped", "updated_at": _past_iso(600)}),
+            encoding="utf-8",
+        )
+        _write_state(profile, phase="stopping", phase_started_at=_past_iso(600))
+
+        result = profiles.profile_gateway_status_api("coder")
+
+        assert result["phase"] == "stopped"
+        assert result["pid"] is None
+        assert result["status_source"] == "runtime_file"
+        assert result["control_available"] is True
+        persisted = json.loads((profile / ".gateway-state.json").read_text())
+        assert persisted["phase"] is None
+        assert persisted["desired_enabled"] is False
 
 
 def test_status_failed_is_sticky():
@@ -298,3 +416,204 @@ def test_status_promotion_preserves_phase_started_at_across_polls():
         second = profiles.profile_gateway_status_api("coder")
         assert second["phase"] == "running"
         assert second["phase_started_at"] == original_started
+
+
+def test_status_reports_running_from_json_gateway_pid(monkeypatch):
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        profile = _seed_named_profile(base, "coder")
+        (profile / "gateway.pid").write_text(json.dumps({"pid": 2468, "argv": ["hermes", "gateway"]}), encoding="utf-8")
+        profiles = _reload_profiles_module(base)
+
+        calls = []
+
+        class FakeGatewayStatus:
+            @staticmethod
+            def get_running_pid(pid_path, cleanup_stale=False):
+                calls.append((Path(pid_path), cleanup_stale))
+                return 2468
+
+        monkeypatch.setattr(profiles, "_gateway_status_module", lambda: FakeGatewayStatus)
+        result = profiles.profile_gateway_status_api("coder")
+        assert result["phase"] == "running"
+        assert result["pid"] == 2468
+        assert result["status_source"] == "pid"
+        assert result["health"] == {"alive": True, "state": "alive", "reason": "pid_alive"}
+        assert calls == [(profile / "gateway.pid", False)]
+
+
+def test_status_reports_running_from_legacy_integer_gateway_pid():
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        profile = _seed_named_profile(base, "coder")
+        profiles = _reload_profiles_module(base)
+        _install_fake_pid_alive(profiles, alive_pids={1357})
+        (profile / "gateway.pid").write_text("1357", encoding="utf-8")
+
+        result = profiles.profile_gateway_status_api("coder")
+        assert result["phase"] == "running"
+        assert result["pid"] == 1357
+        assert result["status_source"] == "pid"
+        assert result["health"] == {"alive": True, "state": "alive", "reason": "pid_alive"}
+
+
+def test_status_reports_running_from_fresh_runtime_file_when_pid_not_visible():
+    import datetime as _dt
+
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        profile = _seed_named_profile(base, "coder")
+        profiles = _reload_profiles_module(base)
+        _install_fake_pid_alive(profiles, alive_pids=set())
+        fresh = _dt.datetime.now(_dt.timezone.utc).isoformat()
+        (profile / "gateway_state.json").write_text(
+            json.dumps({"gateway_state": "running", "updated_at": fresh, "argv": ["hermes", "gateway", "--token", "secret"]}),
+            encoding="utf-8",
+        )
+
+        result = profiles.profile_gateway_status_api("coder")
+        assert result["phase"] == "running"
+        assert result["pid"] is None
+        assert result["status_source"] == "runtime_file"
+        assert result["health"]["alive"] is True
+        assert result["health"]["reason"] == "cross_container_freshness"
+        assert "token" not in json.dumps(result).lower()
+        assert "secret" not in json.dumps(result).lower()
+
+
+def test_status_reports_unknown_from_stale_running_runtime_file():
+    import datetime as _dt
+
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        profile = _seed_named_profile(base, "coder")
+        profiles = _reload_profiles_module(base)
+        _install_fake_pid_alive(profiles, alive_pids=set())
+        stale = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(seconds=600)).isoformat()
+        (profile / "gateway_state.json").write_text(
+            json.dumps({"gateway_state": "running", "updated_at": stale}),
+            encoding="utf-8",
+        )
+
+        result = profiles.profile_gateway_status_api("coder")
+        assert result["phase"] == "unknown"
+        assert result["status_source"] == "runtime_file"
+        assert result["health"]["alive"] is None
+        assert result["health"]["reason"] == "gateway_stale_running_state"
+
+
+def test_status_uses_selected_profile_name_not_active_profile():
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        active = _seed_named_profile(base, "active")
+        selected = _seed_named_profile(base, "selected")
+        profiles = _reload_profiles_module(base)
+        profiles._active_profile = "active"
+        _install_fake_pid_alive(profiles, alive_pids={9002})
+        (active / "gateway.pid").write_text("9001", encoding="utf-8")
+        (selected / "gateway.pid").write_text("9002", encoding="utf-8")
+
+        result = profiles.profile_gateway_status_api("selected")
+        assert result["profile"] == "selected"
+        assert result["phase"] == "running"
+        assert result["pid"] == 9002
+
+
+def test_status_only_config_with_stopped_state_disables_controls(monkeypatch):
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        profile = _seed_named_profile(base, "coder")
+        (profile / "config.yaml").write_text(
+            "webui:\n  gateway:\n    control:\n      mode: status_only\n",
+            encoding="utf-8",
+        )
+        _write_state(profile, phase="stopped", desired_enabled=False)
+        profiles = _reload_profiles_module(base)
+        monkeypatch.delenv("WEBUI_GATEWAY_CONTROL_MODE", raising=False)
+        monkeypatch.delenv("WEBUI_GATEWAY_REMOTE_HEALTH_URL", raising=False)
+        _install_fake_pid_alive(profiles, alive_pids=set())
+
+        result = profiles.profile_gateway_status_api("coder")
+
+        assert result["phase"] == "unavailable"
+        assert result["status_source"] == "adapter"
+        assert result["control_available"] is False
+        assert result["detail"]
+
+
+def test_unavailable_config_with_failed_state_disables_controls(monkeypatch):
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        profile = _seed_named_profile(base, "coder")
+        (profile / "config.yaml").write_text(
+            "webui:\n  gateway:\n    control:\n      mode: unavailable\n",
+            encoding="utf-8",
+        )
+        _write_state(profile, phase="failed", desired_enabled=False, last_error="old failure")
+        profiles = _reload_profiles_module(base)
+        monkeypatch.delenv("WEBUI_GATEWAY_CONTROL_MODE", raising=False)
+        monkeypatch.delenv("WEBUI_GATEWAY_REMOTE_HEALTH_URL", raising=False)
+        _install_fake_pid_alive(profiles, alive_pids=set())
+
+        result = profiles.profile_gateway_status_api("coder")
+
+        assert result["phase"] == "unavailable"
+        assert result["status_source"] == "adapter"
+        assert result["control_available"] is False
+        assert result["detail"]
+
+
+def test_docker_exec_config_with_stopped_state_disables_controls_when_cli_missing(monkeypatch):
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        profile = _seed_named_profile(base, "coder")
+        (profile / "config.yaml").write_text(
+            "webui:\n  gateway:\n    control:\n      mode: docker_exec\n      container: hermes-agent\n",
+            encoding="utf-8",
+        )
+        _write_state(profile, phase="stopped", desired_enabled=False)
+        profiles = _reload_profiles_module(base)
+        monkeypatch.delenv("WEBUI_GATEWAY_CONTROL_MODE", raising=False)
+        monkeypatch.delenv("WEBUI_GATEWAY_DOCKER_CONTAINER", raising=False)
+        monkeypatch.delenv("WEBUI_GATEWAY_REMOTE_HEALTH_URL", raising=False)
+        monkeypatch.setattr("shutil.which", lambda name: None if name == "docker" else "/usr/bin/other")
+        _install_fake_pid_alive(profiles, alive_pids=set())
+
+        result = profiles.profile_gateway_status_api("coder")
+
+        assert result["phase"] == "unavailable"
+        assert result["status_source"] == "adapter"
+        assert result["control_available"] is False
+        assert "docker" in result["detail"].lower()
+
+
+def test_status_only_config_preserves_pid_running_but_disables_controls(monkeypatch):
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        profile = _seed_named_profile(base, "coder")
+        (profile / "config.yaml").write_text(
+            "webui:\n  gateway:\n    control:\n      mode: status_only\n",
+            encoding="utf-8",
+        )
+        (profile / "gateway.pid").write_text("4242", encoding="utf-8")
+        _write_state(profile, phase="stopped", desired_enabled=False)
+        profiles = _reload_profiles_module(base)
+        monkeypatch.delenv("WEBUI_GATEWAY_CONTROL_MODE", raising=False)
+        monkeypatch.delenv("WEBUI_GATEWAY_REMOTE_HEALTH_URL", raising=False)
+        _install_fake_pid_alive(profiles, alive_pids={4242})
+
+        result = profiles.profile_gateway_status_api("coder")
+
+        assert result["phase"] == "running"
+        assert result["status_source"] == "pid"
+        assert result["control_available"] is False
+        assert result["detail"]

@@ -8,9 +8,12 @@ Plan reference: Phase 1C. The endpoint must:
 """
 
 import importlib
+import json
 import os
 import sys
 import tempfile
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -31,7 +34,16 @@ def _reload_profiles_module(base_home: Path):
             del sys.modules[name]
 
     profiles = importlib.import_module("api.profiles")
+
+    # Restore original modules and package attributes so this temporary import
+    # does not leave api.profiles pointing at a module that is no longer present
+    # in sys.modules. Later tests call importlib.reload(api.profiles), which
+    # requires those references to remain consistent.
     sys.modules.update(_saved)
+    api_pkg = sys.modules.get("api")
+    if api_pkg is not None:
+        for name, module in _saved.items():
+            setattr(api_pkg, name.rsplit(".", 1)[-1], module)
     return profiles
 
 
@@ -39,6 +51,13 @@ def _seed_named_profile(base: Path, name: str) -> Path:
     profile_dir = base / "profiles" / name
     profile_dir.mkdir(parents=True, exist_ok=True)
     return profile_dir
+
+
+def _serve_once(host: str, handler_cls):
+    server = ThreadingHTTPServer((host, 0), handler_cls)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server
 
 
 def test_invalid_action_rejected():
@@ -625,3 +644,267 @@ def test_stop_failure_writes_failed_phase_with_error():
             assert data.get("last_error")
         finally:
             profiles._set_gateway_control_hook(None)
+
+
+def test_duplicate_telegram_token_failure_surfaces_copyable_profile_conflict_detail():
+    """Shared Telegram bot tokens are profile conflicts, not generic failures."""
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        profile = _seed_named_profile(base, "coder")
+        profiles = _reload_profiles_module(base)
+
+        def fake_hook(name, action):
+            raise RuntimeError(
+                "telegram-bot-token_lock is already held; duplicate Telegram polling "
+                "for bot token 123456789:SHOULD_NOT_LEAK_THIS_FAKE_TELEGRAM_TOKEN"
+            )
+
+        profiles._set_gateway_control_hook(fake_hook)
+        try:
+            result = profiles.profile_gateway_control_api("coder", "start")
+            assert result["ok"] is False
+            assert result["phase"] == "failed"
+            detail = result["message"]
+            assert "Profile 'coder'" in detail
+            assert "Telegram bot token" in detail
+            assert "another Gateway/profile" in detail
+            assert "Stop the other profile" in detail
+            assert "TELEGRAM_BOT_TOKEN" in detail
+            assert "SHOULD_NOT_LEAK" not in detail
+            assert "123456789:" not in detail
+
+            status = profiles.profile_gateway_status_api("coder")
+            assert status["phase"] == "failed"
+            assert status["detail"] == detail
+            assert status["last_error"] == detail
+            assert "another Gateway/profile" in status["detail"]
+
+            persisted = json.loads((profile / ".gateway-state.json").read_text())
+            assert persisted["phase"] == "failed"
+            assert persisted["last_error"] == detail
+        finally:
+            profiles._set_gateway_control_hook(None)
+
+
+# ── Docker/WSL Gateway adapter contract ─────────────────────────────────────
+
+
+def test_gateway_control_adapter_defaults_to_local(monkeypatch):
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        _seed_named_profile(base, "coder")
+        profiles = _reload_profiles_module(base)
+        monkeypatch.delenv("WEBUI_GATEWAY_CONTROL_MODE", raising=False)
+
+        adapter = profiles._select_gateway_control_adapter("coder", base / "profiles" / "coder")
+
+        assert adapter.name == "local"
+
+
+def test_gateway_control_adapter_uses_docker_only_when_explicit(monkeypatch):
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        profile = _seed_named_profile(base, "coder")
+        profiles = _reload_profiles_module(base)
+        monkeypatch.setenv("WEBUI_GATEWAY_CONTROL_MODE", "docker_exec")
+        monkeypatch.setenv("WEBUI_GATEWAY_DOCKER_CONTAINER", "hermes-agent")
+
+        adapter = profiles._select_gateway_control_adapter("coder", profile)
+
+        assert adapter.name == "docker_exec"
+
+
+def test_docker_adapter_builds_profile_scoped_commands_without_executing(monkeypatch):
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        profile = _seed_named_profile(base, "coder")
+        profiles = _reload_profiles_module(base)
+        adapter = profiles._DockerGatewayControlAdapter("hermes-agent")
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append((cmd, kwargs))
+            class Result:
+                returncode = 0
+                stderr = ""
+            return Result()
+
+        monkeypatch.setattr("subprocess.run", fake_run)
+
+        start = adapter.start(profile, "coder")
+        stop = adapter.stop(profile, "coder")
+
+        assert start["ok"] is True
+        assert stop["ok"] is True
+        assert len(calls) == 2
+        assert calls[0][0] == [
+            "docker", "exec", "-e", f"HERMES_HOME={profile}", "hermes-agent",
+            "hermes", "gateway", "run", "--replace",
+        ]
+        assert calls[1][0] == [
+            "docker", "exec", "-e", f"HERMES_HOME={profile}", "hermes-agent",
+            "hermes", "gateway", "stop",
+        ]
+        assert all(call[1]["timeout"] <= 10 for call in calls)
+
+
+def test_docker_cli_unavailable_status_is_unavailable_and_sanitized(monkeypatch):
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        profile = _seed_named_profile(base, "coder")
+        profiles = _reload_profiles_module(base)
+        monkeypatch.setenv("WEBUI_GATEWAY_CONTROL_MODE", "docker_exec")
+        monkeypatch.setenv("WEBUI_GATEWAY_DOCKER_CONTAINER", "hermes-agent")
+        monkeypatch.setattr(profiles, "_read_gateway_pid", lambda home: None)
+        monkeypatch.setattr("shutil.which", lambda name: None if name == "docker" else "/usr/bin/other")
+
+        result = profiles.profile_gateway_status_api("coder")
+
+        assert result["phase"] == "unavailable"
+        assert result["control_available"] is False
+        assert "docker" in result["detail"].lower()
+        assert str(profile) not in result["detail"]
+        assert "token=" not in result["detail"].lower()
+
+
+def test_remote_health_probe_rejects_unsafe_urls_and_times_out_quickly(monkeypatch):
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        _seed_named_profile(base, "coder")
+        profiles = _reload_profiles_module(base)
+        calls = []
+
+        def fake_urlopen(req, timeout=None):
+            calls.append((req.full_url, timeout))
+            raise AssertionError("unsafe URL should not be requested")
+
+        monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+        unsafe = profiles._probe_gateway_remote_health("http://169.254.169.254/latest/meta-data")
+
+        assert unsafe["phase"] == "unavailable"
+        assert unsafe["control_available"] is False
+        assert calls == []
+
+        class TimeoutOpener:
+            def open(self, req, timeout=None):
+                calls.append((req.full_url, timeout))
+                raise TimeoutError("too slow token=SECRET")
+
+        monkeypatch.setattr("urllib.request.build_opener", lambda *handlers: TimeoutOpener())
+        timed_out = profiles._probe_gateway_remote_health("http://127.0.0.1:8642")
+
+        assert timed_out["phase"] == "unavailable"
+        assert timed_out["control_available"] is False
+        assert calls and calls[-1][1] <= 1.0
+        assert "SECRET" not in timed_out["detail"]
+
+
+def test_remote_health_probe_does_not_follow_redirect_to_disallowed_host():
+    target_hits = 0
+
+    class TargetHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            nonlocal target_hits
+            target_hits += 1
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"ok": true}')
+
+        def log_message(self, format, *args):  # pragma: no cover - keep test output quiet
+            return
+
+    target = None
+    try:
+        target = _serve_once("127.0.0.2", TargetHandler)
+    except OSError as exc:
+        pytest.skip(f"loopback alias 127.0.0.2 unavailable: {exc}")
+    assert target is not None
+    target_port = target.server_port
+
+    class RedirectHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(302)
+            self.send_header("Location", f"http://127.0.0.2:{target_port}/health")
+            self.end_headers()
+
+        def log_message(self, format, *args):  # pragma: no cover - keep test output quiet
+            return
+
+    redirector = _serve_once("127.0.0.1", RedirectHandler)
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td) / ".hermes"
+            (base / "profiles").mkdir(parents=True)
+            _seed_named_profile(base, "coder")
+            profiles = _reload_profiles_module(base)
+
+            result = profiles._probe_gateway_remote_health(f"http://127.0.0.1:{redirector.server_port}")
+    finally:
+        redirector.shutdown()
+        redirector.server_close()
+        target.shutdown()
+        target.server_close()
+
+    assert result["phase"] == "unavailable"
+    assert result["control_available"] is False
+    assert target_hits == 0
+
+
+def test_gateway_message_sanitizer_redacts_headers_and_cli_credentials():
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        _seed_named_profile(base, "coder")
+        profiles = _reload_profiles_module(base)
+
+        message = (
+            "Authorization: Bearer DUMMYBEARER123\n"
+            "curl -H 'authorization: token DUMMYTOKEN456'\n"
+            "hermes gateway run --password DUMMYPASS123 --api-key DUMMYKEY789 "
+            "--token=DUMMYTOKEN789 --secret DUMMYSECRET123"
+        )
+
+        sanitized = profiles._sanitize_gateway_message(message)
+
+    for leaked in (
+        "DUMMYBEARER123",
+        "DUMMYTOKEN456",
+        "DUMMYPASS123",
+        "DUMMYKEY789",
+        "DUMMYTOKEN789",
+        "DUMMYSECRET123",
+    ):
+        assert leaked not in sanitized
+    assert "Authorization: [redacted]" in sanitized
+    assert "--password [redacted]" in sanitized
+    assert "--api-key [redacted]" in sanitized
+
+
+def test_gateway_status_failed_phase_redacts_cli_style_last_error():
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        profile = _seed_named_profile(base, "coder")
+        profiles = _reload_profiles_module(base)
+        (profile / ".gateway-state.json").write_text(
+            json.dumps({
+                "phase": "failed",
+                "last_error": "gateway failed --password DUMMYPASS123 Authorization: Bearer DUMMYBEARER123",
+            }),
+            encoding="utf-8",
+        )
+
+        result = profiles.profile_gateway_status_api("coder")
+
+    assert result["phase"] == "failed"
+    assert result["last_error"] == result["detail"]
+    assert "DUMMYPASS123" not in result["detail"]
+    assert "DUMMYBEARER123" not in result["detail"]
