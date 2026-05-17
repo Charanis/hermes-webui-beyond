@@ -4748,10 +4748,9 @@ async function loadProfilesPanel() {
       if (p.provider) meta.push(p.provider);
       const skillsMeta = _profileSkillsCountMeta(p);
       if (skillsMeta) meta.push(skillsMeta);
-      const gatewayLabel = p.gateway_running ? t('profile_gateway_running') : t('profile_gateway_stopped');
-      const gwDot = p.gateway_running
-        ? `<span class="profile-opt-badge running" aria-hidden="true"></span><span class="sr-only">${esc(gatewayLabel)}</span>`
-        : `<span class="profile-opt-badge stopped" aria-hidden="true"></span><span class="sr-only">${esc(gatewayLabel)}</span>`;
+      const gatewayState = _profileCardGatewayPhase(p);
+      const gatewayLabel = _profileCardGatewayLabel(gatewayState);
+      const gatewaySignal = `<span class="profile-card-gateway profile-wifi" data-profile-name="${esc(p.name)}" data-state="${esc(gatewayState)}" aria-hidden="true" title="${esc(gatewayLabel)}">${li('wifi',15)}</span><span class="sr-only">${esc(gatewayLabel)}</span>`;
       const isActive = p.name === activeName;
       const activeBadge = isActive ? `<span class="profile-card-active-pill">${esc(t('profile_active'))}</span>` : '';
       const ariaLabelParts = [p.name];
@@ -4763,10 +4762,10 @@ async function loadProfilesPanel() {
         <div class="profile-card-header">
           ${_profileAvatarForUi(p,'profile-avatar--card')}
           <div class="profile-card-copy">
-            <div class="profile-card-name${isActive ? ' is-active' : ''}">${gwDot}<span class="profile-card-name-text">${esc(p.name)}</span>${activeBadge}</div>
+            <div class="profile-card-name${isActive ? ' is-active' : ''}"><span class="profile-card-name-text">${esc(p.name)}</span>${activeBadge}</div>
             ${meta.length ? `<div class="profile-card-meta">${esc(meta.join(' \u00b7 '))}</div>` : `<div class="profile-card-meta">${esc(t('profile_no_configuration'))}</div>`}
           </div>
-          <button type="button" class="profile-card-chat-btn" aria-label="Start chat with ${esc(p.name)}" title="Start chat">${li('message-square',15)}</button>
+          <div class="profile-card-actions">${gatewaySignal}<button type="button" class="profile-card-chat-btn" aria-label="Start chat with ${esc(p.name)}" title="Start chat">${li('message-square',15)}</button></div>
         </div>`;
       card.onclick = (ev) => {
         if (ev.target && ev.target.closest && ev.target.closest('.profile-card-chat-btn')) return;
@@ -4883,14 +4882,9 @@ function _profileHeroDossier(p, isActive, isDefault){
   const name = esc(p.name);
   // Active is conveyed by the inline pill — there is intentionally no bare
   // status dot next to the profile name in v3 (the pill carries it).
-  const activePill = isActive
+  const activeControl = isActive
     ? `<span class="profile-active-pill"><span class="profile-active-pill__dot" aria-hidden="true"></span>Active</span>`
-    : '';
-  // When inactive, "Make active" takes the primary slot.
-  // Starting a chat is available directly from each profile in the left list.
-  const makeActiveBtn = isActive
-    ? ''
-    : `<button id="opsMakeActive" class="profile-ops-button primary" type="button">Make active</button>`;
+    : `<button id="opsMakeActive" class="profile-active-pill profile-active-pill--action" type="button" aria-label="Make ${name} active profile">Make Active</button>`;
   // The destructive Remove item is gated for the default profile by both
   // a `disabled` attribute on the menu item AND a guard in the click handler.
   const removeDisabled = isDefault ? 'disabled aria-disabled="true"' : '';
@@ -4904,7 +4898,7 @@ function _profileHeroDossier(p, isActive, isDefault){
         <button id="profileHeroAvatarEdit" type="button" class="profile-hero-avatar-edit" aria-label="Change avatar" title="Change avatar">✎</button>
       </div>
       <div class="profile-hero-body">
-        <div id="profileHeroName" class="profile-hero-name">${name}${activePill ? ' ' + activePill : ''}</div>
+        <div id="profileHeroName" class="profile-hero-name">${name}${activeControl ? ' ' + activeControl : ''}</div>
         <div id="profileHeroActivity" class="profile-hero-activity empty" aria-live="polite"><span class="muted">Loading activity…</span></div>
         <div class="profile-hero-description-row">
           <div id="profileHeroDescription" class="profile-hero-description placeholder" role="button" tabindex="0" title="Click to edit description">Loading description…</div>
@@ -4934,7 +4928,6 @@ function _profileHeroDossier(p, isActive, isDefault){
               <div class="ws-dropdown profile-default-workspace-dropdown" id="profileDefaultWorkspaceDropdown"></div>
             </div>
           </label>
-          ${makeActiveBtn}
         </div>
       </div>
       <div class="profile-hero-menu-host">
@@ -5289,12 +5282,43 @@ function _gatewayInfoVisible(phase){
   return _GATEWAY_INFO_PHASES.has(phase || 'stopped');
 }
 
+function _profileCardGatewayPhase(profile){
+  const seedPhase = profile && profile.gateway_running ? 'running' : 'stopped';
+  if (!profile || !profile.name) return seedPhase;
+  if (!_gatewayStateByProfile.has(profile.name)) {
+    _gatewayStateByProfile.set(profile.name, {
+      phase: seedPhase, last_error: null, phase_started_at: null, pid: null,
+    });
+  }
+  const state = _gatewayStateByProfile.get(profile.name);
+  return (state && state.phase) || seedPhase;
+}
+
+function _profileCardGatewayLabel(phase){
+  const normalized = phase || 'stopped';
+  if (normalized === 'running') return t('profile_gateway_running');
+  if (normalized === 'stopped') return t('profile_gateway_stopped');
+  return `Gateway ${_gatewayLabelForPhase(normalized).toLowerCase()}`;
+}
+
+function _repaintProfileCardGateway(profileName, phase){
+  if (!profileName) return;
+  const label = _profileCardGatewayLabel(phase);
+  document.querySelectorAll(`.profile-card-gateway[data-profile-name="${CSS.escape(profileName)}"]`).forEach(icon => {
+    icon.setAttribute('data-state', phase || 'stopped');
+    icon.setAttribute('title', label);
+    const sr = icon.nextElementSibling;
+    if (sr && sr.classList && sr.classList.contains('sr-only')) sr.textContent = label;
+  });
+}
+
 function _repaintGatewayTile(profileName){
   const state = _gatewayStateByProfile.get(profileName);
   if (!state) return;
   const tile = document.querySelector(`.profile-gateway-tile[data-profile-name="${CSS.escape(profileName)}"]`);
-  if (!tile) return;  // tile not currently rendered for this profile
   const phase = state.phase || 'stopped';
+  _repaintProfileCardGateway(profileName, phase);
+  if (!tile) return;  // tile not currently rendered for this profile
   const controlUnavailable = state.control_available === false || phase === 'unavailable';
   const infoVisible = _gatewayInfoVisible(phase);
   const summary = _gatewayInfoSummary(state);
@@ -7462,18 +7486,22 @@ function _bindProfileOpsConsole(p, isActive, isDefault){
   // Make active (only present when profile is inactive)
   const makeActive = $('opsMakeActive');
   if (makeActive && !isActive) {
-    makeActive.onclick = async () => {
+    makeActive.addEventListener('click', async (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (makeActive.disabled) return;
       makeActive.disabled = true;
       makeActive.setAttribute('aria-disabled', 'true');
+      makeActive.setAttribute('aria-busy', 'true');
       try {
-        await switchToProfile(profileName);
-        await loadProfilesPanel();
+        await _activateProfileFromPanel(profileName);
       } catch (e) {
         makeActive.disabled = false;
         makeActive.removeAttribute('aria-disabled');
+        makeActive.removeAttribute('aria-busy');
         showToast('Failed to activate: ' + (e.message || e));
       }
-    };
+    });
   }
 
   // Hero overflow menu (top-right "⋯") — owns Rename / Change description /
@@ -8040,22 +8068,16 @@ async function _saveProfileFile(profileName, filename) {
 }
 
 function _setProfileHeaderButtons(mode, p, activeName){
-  const actBtn = $('btnActivateProfileDetail');
-  const delBtn = $('btnDeleteProfileDetail');
   const cancelBtn = $('btnCancelProfileDetail');
   const saveBtn = $('btnSaveProfileDetail');
   const show = b => b && (b.style.display = '');
   const hide = b => b && (b.style.display = 'none');
   if (mode === 'read') {
-    const isActive = p && p.name === activeName;
-    const isDefault = !!(p && p.is_default);
-    if (isActive) hide(actBtn); else show(actBtn);
-    if (isDefault) hide(delBtn); else show(delBtn);
     hide(cancelBtn); hide(saveBtn);
   } else if (mode === 'create') {
-    hide(actBtn); hide(delBtn); show(cancelBtn); show(saveBtn);
+    show(cancelBtn); show(saveBtn);
   } else {
-    [actBtn, delBtn, cancelBtn, saveBtn].forEach(hide);
+    [cancelBtn, saveBtn].forEach(hide);
   }
 }
 
@@ -8085,7 +8107,27 @@ function _clearProfileDetail(){
 
 async function activateCurrentProfile(){
   if (!_currentProfileDetail) return;
-  await switchToProfile(_currentProfileDetail.name);
+  await _activateProfileFromPanel(_currentProfileDetail.name);
+}
+
+async function _activateProfileFromPanel(profileName){
+  if (!profileName) return null;
+  const data = await api('/api/profile/switch', {
+    method: 'POST',
+    body: JSON.stringify({ name: profileName }),
+  });
+  S.activeProfile = (data && data.active) || profileName;
+  if (data) _syncProfileAvatarState(data);
+  const chipLabel = $('profileChipLabel');
+  if (chipLabel) chipLabel.textContent = S.activeProfile;
+  if (typeof applyBotName === 'function') applyBotName();
+  if (typeof syncTopbar === 'function') syncTopbar();
+  await loadProfilesPanel();
+  if (typeof renderSessionList === 'function') {
+    Promise.resolve(renderSessionList()).catch(() => {});
+  }
+  showToast(t('profile_switched', S.activeProfile));
+  return data;
 }
 
 async function deleteCurrentProfile(){

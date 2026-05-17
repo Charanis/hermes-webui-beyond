@@ -13,6 +13,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).parent.parent.resolve()
 PANELS_JS = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 STYLE_CSS = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
+INDEX_HTML = (REPO_ROOT / "static" / "index.html").read_text(encoding="utf-8")
 ICONS_JS = (REPO_ROOT / "static" / "icons.js").read_text(encoding="utf-8")
 SESSIONS_JS = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 MESSAGES_JS = (REPO_ROOT / "static" / "messages.js").read_text(encoding="utf-8")
@@ -97,6 +98,63 @@ def test_profile_list_uses_active_as_default_signal_without_redundant_label():
         "profile name line should not include a redundant default label"
     assert "ariaLabelParts.push('(default)')" not in fn, \
         "profile card aria-label should not duplicate active/default state"
+
+
+def test_profile_list_gateway_status_uses_wifi_icon_not_dot():
+    fn = _extract_function(PANELS_JS, "loadProfilesPanel")
+    assert "profile-card-gateway" in fn, \
+        "left profile list should show gateway status with a named wifi affordance"
+    assert "li('wifi'" in fn or 'li("wifi"' in fn, \
+        "left profile list gateway status should use the shared Lucide wifi icon"
+    assert "profile-opt-badge running" not in fn, \
+        "left profile list should not reuse the ambiguous dot badge"
+
+
+def test_profile_list_gateway_icon_has_compact_state_styles():
+    assert ".profile-card-gateway" in STYLE_CSS, \
+        "left profile list gateway icon needs its own compact styles"
+    assert "profile-card-actions" in STYLE_CSS, \
+        "gateway and chat controls should share a right-aligned action cluster"
+    assert ".profile-card-gateway.profile-wifi" in STYLE_CSS, \
+        "left profile list gateway icon should reuse the gateway tile wifi state styles"
+    assert '.profile-wifi[data-state="running"]' in STYLE_CSS
+    assert '.profile-wifi[data-state="stopped"]' in STYLE_CSS
+
+
+def test_profile_list_gateway_icon_lives_next_to_chat_button():
+    fn = _extract_function(PANELS_JS, "loadProfilesPanel")
+    row_start = fn.find('class="profile-card-actions"')
+    assert row_start != -1, "profile rows should have a right-aligned actions cluster"
+    row = fn[row_start:row_start + 500]
+    assert "gatewaySignal" in row, \
+        "gateway status icon should live next to the chat bubble, not before the name"
+    assert "profile-card-chat-btn" in row
+    assert row.find("gatewaySignal") < row.find("profile-card-chat-btn"), \
+        "gateway status icon should sit immediately to the left of the chat bubble"
+    name_start = fn.find('class="profile-card-name')
+    assert "profile-card-gateway" not in fn[name_start:name_start + 260], \
+        "gateway status icon should not be embedded in the profile name text"
+
+
+def test_profile_list_gateway_icon_uses_cached_live_state():
+    fn = _extract_function(PANELS_JS, "loadProfilesPanel")
+    assert "_profileCardGatewayPhase(p)" in fn, \
+        "profile rows should reuse the live gateway state cache when available"
+    helper = _extract_function(PANELS_JS, "_profileCardGatewayPhase")
+    assert "_gatewayStateByProfile.get(profile.name)" in helper
+    label = _extract_function(PANELS_JS, "_profileCardGatewayLabel")
+    assert "_gatewayLabelForPhase" in label, \
+        "profile rows should expose the same gateway phase labels as the detail tile"
+
+
+def test_gateway_repaint_updates_left_profile_list_wifi_state():
+    fn = _extract_function(PANELS_JS, "_repaintGatewayTile")
+    assert "_repaintProfileCardGateway(profileName, phase)" in fn, \
+        "gateway repaint should update the left profile row indicator too"
+    helper = _extract_function(PANELS_JS, "_repaintProfileCardGateway")
+    assert ".profile-card-gateway" in helper
+    assert "querySelectorAll" in helper
+    assert "setAttribute('data-state', phase" in helper
 
 
 def test_hero_avatar_is_256px():
@@ -667,6 +725,51 @@ def test_inline_action_row_no_longer_holds_destructive_actions():
     for moved in ("rename", "duplicate", "remove"):
         assert f'data-ops-action="{moved}"' not in slice_, \
             f"action={moved!r} should live in the ⋯ menu, not the inline row"
+
+
+def test_make_active_lives_in_hero_name_slot_as_pill_action():
+    fn = _extract_function(PANELS_JS, "_profileHeroDossier")
+    assert 'id="opsMakeActive"' in fn, "inactive profiles must still expose Make Active"
+    assert "profile-active-pill--action" in fn, \
+        "Make Active should be styled as the inactive replacement for the Active pill"
+    assert fn.find('id="opsMakeActive"') < fn.find('class="profile-hero-actions"'), \
+        "Make Active should render in the title row before the lower action controls"
+    idx = fn.find('class="profile-hero-actions"')
+    assert 'id="opsMakeActive"' not in fn[idx:idx + 600], \
+        "Make Active must not remain in the lower hero action row"
+
+
+def test_make_active_uses_yellow_action_palette_not_success_green():
+    m = re.search(r"\.profile-active-pill--action\s*\{(?P<body>[^}]*)\}", STYLE_CSS)
+    assert m, "missing Make Active action pill styles"
+    body = m.group("body")
+    assert "var(--warning" in body or "var(--accent" in body or "var(--gold" in body, \
+        "Make Active should use a yellow/action palette so it stands out from Active"
+    assert "var(--success)" not in body, \
+        "Make Active should not look like the green Active state"
+
+
+def test_make_active_uses_lightweight_profile_panel_activation():
+    binder = _extract_function(PANELS_JS, "_bindProfileOpsConsole")
+    assert "_activateProfileFromPanel(profileName)" in binder, \
+        "Make Active should use the profile-panel activation path"
+    assert "switchToProfile(profileName)" not in binder, \
+        "Make Active should not run the full chat/session profile switch path"
+    activate = _extract_function(PANELS_JS, "_activateProfileFromPanel")
+    assert "/api/profile/switch" in activate
+    assert "newSession" not in activate
+    assert "populateModelDropdown" not in activate
+    assert "loadWorkspaceList" not in activate
+
+
+def test_profile_header_drops_redundant_activate_and_delete_icons():
+    assert "btnActivateProfileDetail" not in INDEX_HTML, \
+        "profile header should not render the redundant activate icon button"
+    assert "btnDeleteProfileDetail" not in INDEX_HTML, \
+        "profile header should not render the redundant delete icon button"
+    fn = _extract_function(PANELS_JS, "_setProfileHeaderButtons")
+    assert "btnActivateProfileDetail" not in fn
+    assert "btnDeleteProfileDetail" not in fn
 
 
 def test_bindings_wire_hero_overflow_menu():
