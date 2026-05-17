@@ -5,6 +5,7 @@
 ### Added
 
 - Expanded Profiles runtime controls: the former default-model tile is now a compact Runtime tile with default/fallback model pickers, reasoning, and an auxiliary tool model submenu that reuses the existing searchable provider-aware model picker. Profiles also now expose response mode, hero-level default space selection through the existing workspace picker, threshold-only context compression, work-step budget, and friendly tool access controls backed by `/api/profile/settings`.
+- Added a compact frontend validation playbook for UI contributors, covering reuse of existing controls, state boundaries, performance checks, visual QA, and durable lesson capture.
 
 ### Fixed
 
