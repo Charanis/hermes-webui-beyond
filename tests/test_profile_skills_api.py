@@ -344,3 +344,157 @@ def test_list_includes_skills_from_external_dirs(tmp_path, monkeypatch):
     assert "custom" in names, f"profile-local skill missing; names={names}"
     # External must appear.
     assert "shared" in names, f"external skill missing; names={names}"
+
+
+def test_profile_skill_totals_use_same_hermes_wide_universe(tmp_path, monkeypatch):
+    """Different profiles may disable different skills, but the denominator is shared."""
+    home = tmp_path / "hermes_home"
+    default_skills = home / "skills"
+    named_home = home / "profiles" / "researcher"
+    named_skills = named_home / "skills"
+    default_skills.mkdir(parents=True)
+    named_skills.mkdir(parents=True)
+    _write_skill(default_skills, "core", "summarize", "Summarize sources.")
+    _write_skill(default_skills, "ops", "deploy", "Run a deploy.")
+    _write_skill(named_skills, "research", "deep-dive", "Investigate deeply.")
+    (named_home / "config.yaml").write_text(
+        "skills:\n  disabled:\n    - deploy\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_BASE_HOME", str(home))
+
+    import importlib
+    import api.profiles as profiles_mod
+    importlib.reload(profiles_mod)
+
+    default = profiles_mod.list_profile_skills_api("default")
+    researcher = profiles_mod.list_profile_skills_api("researcher")
+
+    assert default["total_count"] == 3
+    assert researcher["total_count"] == 3
+    assert default["enabled_count"] == 3
+    assert researcher["enabled_count"] == 2
+    assert sorted(s["name"] for s in default["skills"]) == [
+        "deep-dive",
+        "deploy",
+        "summarize",
+    ]
+    by_name = {s["name"]: s for s in researcher["skills"]}
+    assert by_name["deploy"]["enabled"] is False
+    assert by_name["deep-dive"]["enabled"] is True
+
+
+def test_profiles_summary_exposes_enabled_out_of_shared_total(tmp_path, monkeypatch):
+    home = tmp_path / "hermes_home"
+    default_skills = home / "skills"
+    named_home = home / "profiles" / "researcher"
+    named_skills = named_home / "skills"
+    default_skills.mkdir(parents=True)
+    named_skills.mkdir(parents=True)
+    _write_skill(default_skills, "core", "summarize", "Summarize sources.")
+    _write_skill(default_skills, "ops", "deploy", "Run a deploy.")
+    _write_skill(named_skills, "research", "deep-dive", "Investigate deeply.")
+    (named_home / "config.yaml").write_text(
+        "skills:\n  disabled:\n    - deploy\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_BASE_HOME", str(home))
+
+    import importlib
+    import sys
+    import types
+    from types import SimpleNamespace
+
+    hermes_cli = types.ModuleType("hermes_cli")
+    profiles_pkg = types.ModuleType("hermes_cli.profiles")
+    profiles_pkg.list_profiles = lambda: [
+        SimpleNamespace(
+            name="default",
+            path=home,
+            is_default=True,
+            gateway_running=False,
+            model=None,
+            provider=None,
+            has_env=False,
+            skill_count=2,
+        ),
+        SimpleNamespace(
+            name="researcher",
+            path=named_home,
+            is_default=False,
+            gateway_running=False,
+            model=None,
+            provider=None,
+            has_env=False,
+            skill_count=1,
+        ),
+    ]
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.profiles", profiles_pkg)
+
+    import api.profiles as profiles_mod
+    importlib.reload(profiles_mod)
+
+    rows = {
+        row["name"]: row
+        for row in profiles_mod.list_profiles_api(include_skill_counts=True)
+    }
+    assert rows["default"]["skill_enabled_count"] == 3
+    assert rows["default"]["skill_total"] == 3
+    assert rows["researcher"]["skill_enabled_count"] == 2
+    assert rows["researcher"]["skill_total"] == 3
+
+
+def test_list_profiles_api_skips_expensive_skill_counts_by_default(tmp_path, monkeypatch):
+    home = tmp_path / "hermes"
+    named_home = home / "profiles" / "researcher"
+    named_home.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_BASE_HOME", str(home))
+
+    import importlib
+    import sys
+    import types
+    from types import SimpleNamespace
+
+    hermes_cli = types.ModuleType("hermes_cli")
+    profiles_pkg = types.ModuleType("hermes_cli.profiles")
+    profiles_pkg.list_profiles = lambda: [
+        SimpleNamespace(
+            name="default",
+            path=home,
+            is_default=True,
+            gateway_running=False,
+            model=None,
+            provider=None,
+            has_env=False,
+            skill_count=0,
+        ),
+        SimpleNamespace(
+            name="researcher",
+            path=named_home,
+            is_default=False,
+            gateway_running=False,
+            model=None,
+            provider=None,
+            has_env=False,
+            skill_count=0,
+        ),
+    ]
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.profiles", profiles_pkg)
+
+    import api.profiles as profiles_mod
+    importlib.reload(profiles_mod)
+
+    def fail_summary(*_args, **_kwargs):
+        raise AssertionError("skill summaries should be opt-in for profile listings")
+
+    monkeypatch.setattr(profiles_mod, "_profile_skill_counts_for_summary", fail_summary)
+
+    rows = profiles_mod.list_profiles_api()
+    assert [row["name"] for row in rows] == ["default", "researcher"]
+    assert all("skill_enabled_count" not in row for row in rows)
+    assert all("skill_total" not in row for row in rows)

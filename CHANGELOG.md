@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Added
+
+- Expanded Profiles runtime controls: the former default-model tile is now a compact Runtime tile with default/fallback model pickers, reasoning, and an auxiliary tool model submenu that reuses the existing searchable provider-aware model picker. Profiles also now expose response mode, hero-level default space selection through the existing workspace picker, threshold-only context compression, work-step budget, and friendly tool access controls backed by `/api/profile/settings`.
+
+### Fixed
+
+- Profile-row chat buttons now open a profile-scoped new conversation without making that profile the active/default profile, avoiding the extra profile-switch work and preserving the user's configured default profile.
+- Fresh app boot, New Chat, and first-send paths no longer wait on a full sidebar session refresh before focusing the composer or showing the sent turn; the session list refresh now runs in the background for these interaction-critical paths.
+- Kept the expanded Profiles runtime controls responsive immediately after opening or switching profiles by wiring handlers before async model/settings hydration and preventing late profile loads or save completions from overwriting in-progress edits.
+- Tightened the Profiles hero and Runtime tile layout: response mode now reads as "Response Style" with a "Soul-driven" baseline option, the response/default-space pickers share bottom alignment and matching chrome, and the Runtime tile stacks default/fallback model controls compactly with auxiliary model configuration pinned to the bottom.
+- Polished the Profiles left selection panel so profile rows are full-width and left-aligned, the active chip uses green success styling, and the active/default profile no longer repeats a `(default)` label.
+- Kept fresh Profiles loads lightweight by making Hermes-wide skill count summaries opt-in for `/api/profiles`, lazy-loading uploaded image avatars instead of embedding multi-MB data URLs in profile summaries, and preventing session/profile filtering from recursively scanning every profile's `SKILL.md` files before the selected profile settings can become interactive.
+- Fixed the selected Profiles Skills tile so enabled counts use the same Hermes-wide skill total while preserving per-profile disabled state.
+
 ## [v0.51.74] — 2026-05-16 — Release AX (stage-367 — 4-PR safe-lane batch — #2362 table-cell spacing + #2363 run-state-consistency RFC + #2365 custom_providers list-format + #2367 settings sidebar i18n)
 
 ### Added

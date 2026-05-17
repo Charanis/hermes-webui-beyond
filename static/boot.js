@@ -853,7 +853,9 @@ $('btnNewChat').onclick=async()=>{
      && !S.session.pending_user_message){
     $('msg').focus();closeMobileSidebar();return;
   }
-  await newSession();await renderSessionList();closeMobileSidebar();$('msg').focus();
+  await newSession();
+  closeMobileSidebar();$('msg').focus();
+  if(typeof renderSessionList==='function')void renderSessionList({deferWhileInteracting:true});
 };
 $('btnDownload').onclick=()=>{
   if(!S.session)return;
@@ -1056,7 +1058,9 @@ document.addEventListener('keydown',async e=>{
     // a long generation to finish before they could start something new — exactly
     // the moment they want to switch context. newSession() leaves the in-flight
     // stream running on its own session; the user just gets a fresh blank one.
-    await newSession();await renderSessionList();closeMobileSidebar();$('msg').focus();
+    await newSession();
+    closeMobileSidebar();$('msg').focus();
+    if(typeof renderSessionList==='function')void renderSessionList({deferWhileInteracting:true});
   }
   if(e.key==='Escape'){
     // Close onboarding overlay if open (skip/dismiss the wizard)
@@ -1519,11 +1523,11 @@ function applyBotName(){
   }).catch(()=>{});
   window._modelDropdownReady=_modelDropdownReady;
   // Pre-load workspace list so sidebar name is correct from first render.
-  // Render the session list before restoring the saved conversation so a stale
-  // saved-session/client-side boot error cannot leave the sidebar empty forever.
+  // Start the session-list refresh early, but don't make the chat surface wait
+  // for a potentially large history scan before the composer can be used.
   await loadWorkspaceList();
   await loadOnboardingWizard();
-  await renderSessionList();
+  if(typeof renderSessionList==='function')void renderSessionList({deferWhileInteracting:true});
   _initResizePanels();
   // Workspace panel restore happens AFTER loadSession so we know if
   // the session has a workspace — prevents the snap-open-then-closed flash (#576).
@@ -1544,7 +1548,8 @@ function applyBotName(){
         S._bootReady=true;
         syncTopbar();syncWorkspacePanelState();
         $('emptyState').style.display='';
-        await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();
+        if(typeof renderSessionList==='function')void renderSessionList({deferWhileInteracting:true});
+        if(typeof startGatewaySSE==='function')startGatewaySSE();
         return;
       }
       await loadSession(saved);
@@ -1569,7 +1574,8 @@ function applyBotName(){
         if(_ephPanelPref&&!_isCompactWorkspaceViewport()) _workspacePanelMode='browse';
         syncTopbar();syncWorkspacePanelState();
         $('emptyState').style.display='';
-        await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();
+        if(typeof renderSessionList==='function')void renderSessionList({deferWhileInteracting:true});
+        if(typeof startGatewaySSE==='function')startGatewaySSE();
         return;
       }
       // Restore the panel from localStorage when the session has a workspace.
@@ -1581,7 +1587,10 @@ function applyBotName(){
         _workspacePanelMode='browse';
       }
       S._bootReady=true;
-      syncTopbar();syncWorkspacePanelState();await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();await checkInflightOnBoot(saved);return;}
+      syncTopbar();syncWorkspacePanelState();
+      if(typeof renderSessionList==='function')void renderSessionList({deferWhileInteracting:true});
+      if(typeof startGatewaySSE==='function')startGatewaySSE();
+      await checkInflightOnBoot(saved);return;}
     catch(e){localStorage.removeItem('hermes-webui-session');}
   }
   // no saved session - show empty state, wait for user to hit +
@@ -1594,7 +1603,7 @@ function applyBotName(){
   if(_freshPanelPref&&!_isCompactWorkspaceViewport()) _workspacePanelMode='browse';
   syncWorkspacePanelState();
   $('emptyState').style.display='';
-  await renderSessionList();
+  if(typeof renderSessionList==='function')void renderSessionList({deferWhileInteracting:true});
   // Start real-time gateway session sync if setting is enabled
   if(typeof startGatewaySSE==='function') startGatewaySSE();
 })().catch(e=>{

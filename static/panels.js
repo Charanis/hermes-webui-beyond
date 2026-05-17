@@ -3884,8 +3884,14 @@ function _positionProfileDropdown(){
   dd.style.left=`${left}px`;
 }
 
-function renderWorkspaceDropdownInto(dd, workspaces, currentWs){
+function renderWorkspaceDropdownInto(dd, workspaces, currentWs, opts){
   if(!dd)return;
+  opts=opts||{};
+  const onSelect=typeof opts.onSelect==='function'
+    ? opts.onSelect
+    : (path,name)=>switchToWorkspace(path,name);
+  const includeSessionActions=opts.includeSessionActions!==false;
+  const includeManageAction=opts.includeManageAction!==false;
   dd.innerHTML='';
 
   // ── Search row ──────────────────────────────────────────────────────────
@@ -3931,7 +3937,7 @@ function renderWorkspaceDropdownInto(dd, workspaces, currentWs){
       opt.dataset.name=w.name||'';
       opt.dataset.path=w.path||'';
       opt.innerHTML=`<span class="ws-opt-name">${esc(w.name)}</span><span class="ws-opt-path">${esc(w.path)}</span>`;
-      opt.onclick=()=>switchToWorkspace(w.path,w.name);
+      opt.onclick=()=>onSelect(w.path,w.name,w);
       listContainer.appendChild(opt);
     }
     listContainer.appendChild(noResults);
@@ -3944,38 +3950,43 @@ function renderWorkspaceDropdownInto(dd, workspaces, currentWs){
   sc.addEventListener('click',()=>{ si.value=''; filterWs(''); si.focus(); });
 
   // ── Footer actions ────────────────────────────────────────────────────────
-  dd.appendChild(document.createElement('div')).className='ws-divider';
-  dd.appendChild(_renderWorkspaceAction(
-    t('workspace_new_worktree_conversation'),
-    t('workspace_new_worktree_conversation_meta'),
-    li('git-branch',12),
-    async()=>{
-      closeWsDropdown();
-      try{
-        await newSession(false,{worktree:true});
-        await renderSessionList();
-        const msg=$('msg');
-        if(msg)msg.focus();
-        showToast(t('workspace_worktree_created'));
-      }catch(e){
-        showToast(t('workspace_worktree_failed')+(e&&e.message?e.message:e),'error');
+  const appendDivider=()=>{const div=document.createElement('div');div.className='ws-divider';dd.appendChild(div);};
+  if(includeSessionActions){
+    appendDivider();
+    dd.appendChild(_renderWorkspaceAction(
+      t('workspace_new_worktree_conversation'),
+      t('workspace_new_worktree_conversation_meta'),
+      li('git-branch',12),
+      async()=>{
+        closeWsDropdown();
+        try{
+          await newSession(false,{worktree:true});
+          await renderSessionList();
+          const msg=$('msg');
+          if(msg)msg.focus();
+          showToast(t('workspace_worktree_created'));
+        }catch(e){
+          showToast(t('workspace_worktree_failed')+(e&&e.message?e.message:e),'error');
+        }
       }
-    }
-  ));
-  dd.appendChild(document.createElement('div')).className='ws-divider';
-  dd.appendChild(_renderWorkspaceAction(
-    t('workspace_choose_path'),
-    t('workspace_choose_path_meta'),
-    li('folder',12),
-    ()=>promptWorkspacePath()
-  ));
-  const div=document.createElement('div');div.className='ws-divider';dd.appendChild(div);
-  dd.appendChild(_renderWorkspaceAction(
-    t('workspace_manage'),
-    t('workspace_manage_meta'),
-    li('settings',12),
-    ()=>{closeWsDropdown();mobileSwitchPanel('workspaces');}
-  ));
+    ));
+    appendDivider();
+    dd.appendChild(_renderWorkspaceAction(
+      t('workspace_choose_path'),
+      t('workspace_choose_path_meta'),
+      li('folder',12),
+      ()=>promptWorkspacePath()
+    ));
+  }
+  if(includeManageAction){
+    appendDivider();
+    dd.appendChild(_renderWorkspaceAction(
+      t('workspace_manage'),
+      t('workspace_manage_meta'),
+      li('settings',12),
+      ()=>{closeWsDropdown();mobileSwitchPanel('workspaces');}
+    ));
+  }
 }
 
 function toggleWsDropdown(){
@@ -4018,23 +4029,32 @@ function toggleComposerWsDropdown(){
 function closeWsDropdown(){
   const dd=$('wsDropdown');
   const composerDd=$('composerWsDropdown');
+  const profileDd=$('profileDefaultWorkspaceDropdown');
   const composerChip=$('composerWorkspaceChip');
   const mobileAction=$('composerMobileWorkspaceAction');
+  const profileChip=$('profileDefaultWorkspaceChip');
   if(dd)dd.classList.remove('open');
   if(composerDd)composerDd.classList.remove('open');
+  if(profileDd)profileDd.classList.remove('open');
   if(composerChip)composerChip.classList.remove('active');
   if(mobileAction)mobileAction.classList.remove('active');
+  if(profileChip)profileChip.classList.remove('active');
 }
 document.addEventListener('click',e=>{
   if(
     !e.target.closest('#composerWorkspaceChip') &&
     !e.target.closest('#composerMobileWorkspaceAction') &&
-    !e.target.closest('#composerWsDropdown')
+    !e.target.closest('#composerWsDropdown') &&
+    !e.target.closest('#profileDefaultWorkspaceChip') &&
+    !e.target.closest('#profileDefaultWorkspaceDropdown')
   ) closeWsDropdown();
 });
 window.addEventListener('resize',()=>{
   const dd=$('composerWsDropdown');
   if(dd&&dd.classList.contains('open')) _positionComposerWsDropdown();
+  const profileDd=$('profileDefaultWorkspaceDropdown');
+  const profileChip=$('profileDefaultWorkspaceChip');
+  if(profileDd&&profileDd.classList.contains('open')) _positionProfileDefaultWorkspaceDropdown(profileChip, profileDd);
 });
 
 async function loadWorkspacesPanel(){
@@ -4480,6 +4500,12 @@ async function switchToWorkspace(path,name){
 // ── Profile panel + dropdown ──
 let _profilesCache = null;
 
+function _profileSkillsCountMeta(p){
+  if (!p) return '';
+  if (typeof p.skill_enabled_count !== 'number' || typeof p.skill_total !== 'number') return '';
+  return `${p.skill_enabled_count} / ${p.skill_total} skills`;
+}
+
 function _syncProfileAvatarState(data){
   if(!data||!Array.isArray(data.profiles)||typeof setProfileAvatarMap!=='function') return;
   const active=(S.activeProfile&&data.profiles.some(p=>p.name===S.activeProfile))?S.activeProfile:(data.active||'default');
@@ -4522,7 +4548,7 @@ function _profileProviderForModel(modelValue, groups){
 
 // Legacy v2 identity-controls hydrator + its save path (_hydrateProfileIdentityControls,
 // _saveProfileModelSettings, _profileMarkModelDirty, _profileSetInlineStatus) were removed
-// on 2026-05-15 as part of the Default-model tile rework. The v3 layout never
+// on 2026-05-15 as part of the Runtime tile rework. The v3 layout never
 // renders #profileInlineProvider/#profileInlineModel/#profileInlineReasoning, so the
 // helpers had no live callers; the new _hydrateProfileDefaultModel + _persistProfileDefaultModel
 // pair (further below) covers the same /api/profile/settings POST contract with auto-save.
@@ -4712,36 +4738,52 @@ async function loadProfilesPanel() {
       : (data.active || 'default');
     _syncProfileAvatarState(data);
     for (const p of data.profiles) {
-      const card = document.createElement('button');
-      card.type = 'button';
+      const card = document.createElement('div');
       card.className = 'profile-card';
       card.dataset.name = p.name;
+      card.setAttribute('role', 'button');
+      card.tabIndex = 0;
       const meta = [];
       if (p.model) meta.push(p.model.split('/').pop());
       if (p.provider) meta.push(p.provider);
-      if (p.skill_count) meta.push(t('profile_skill_count', p.skill_count));
+      const skillsMeta = _profileSkillsCountMeta(p);
+      if (skillsMeta) meta.push(skillsMeta);
       const gatewayLabel = p.gateway_running ? t('profile_gateway_running') : t('profile_gateway_stopped');
       const gwDot = p.gateway_running
         ? `<span class="profile-opt-badge running" aria-hidden="true"></span><span class="sr-only">${esc(gatewayLabel)}</span>`
         : `<span class="profile-opt-badge stopped" aria-hidden="true"></span><span class="sr-only">${esc(gatewayLabel)}</span>`;
       const isActive = p.name === activeName;
       const activeBadge = isActive ? `<span class="profile-card-active-pill">${esc(t('profile_active'))}</span>` : '';
-      const defaultBadge = p.is_default ? ` <span style="opacity:.5">${esc(t('profile_default_label'))}</span>` : '';
       const ariaLabelParts = [p.name];
       if (isActive) ariaLabelParts.push('(active)');
-      if (p.is_default) ariaLabelParts.push('(default)');
       ariaLabelParts.push(gatewayLabel);
       card.setAttribute('aria-label', ariaLabelParts.join(' '));
       if (isActive) card.setAttribute('aria-current', 'true');
       card.innerHTML = `
         <div class="profile-card-header">
           ${_profileAvatarForUi(p,'profile-avatar--card')}
-          <div style="min-width:0;flex:1">
-            <div class="profile-card-name${isActive ? ' is-active' : ''}">${gwDot}${esc(p.name)}${defaultBadge}${activeBadge}</div>
+          <div class="profile-card-copy">
+            <div class="profile-card-name${isActive ? ' is-active' : ''}">${gwDot}<span class="profile-card-name-text">${esc(p.name)}</span>${activeBadge}</div>
             ${meta.length ? `<div class="profile-card-meta">${esc(meta.join(' \u00b7 '))}</div>` : `<div class="profile-card-meta">${esc(t('profile_no_configuration'))}</div>`}
           </div>
+          <button type="button" class="profile-card-chat-btn" aria-label="Start chat with ${esc(p.name)}" title="Start chat">${li('message-square',15)}</button>
         </div>`;
-      card.onclick = () => openProfileDetail(p.name, card);
+      card.onclick = (ev) => {
+        if (ev.target && ev.target.closest && ev.target.closest('.profile-card-chat-btn')) return;
+        openProfileDetail(p.name, card);
+      };
+      card.onkeydown = (ev) => {
+        if (ev.key !== 'Enter' && ev.key !== ' ') return;
+        if (ev.target && ev.target.closest && ev.target.closest('.profile-card-chat-btn')) return;
+        ev.preventDefault();
+        openProfileDetail(p.name, card);
+      };
+      const chatBtn = card.querySelector('.profile-card-chat-btn');
+      if (chatBtn) chatBtn.onclick = (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        startChatWithProfile(p.name);
+      };
       if (_currentProfileDetail && _currentProfileDetail.name === p.name) card.classList.add('active');
       panel.appendChild(card);
     }
@@ -4814,6 +4856,9 @@ function _renderProfileDetail(p, activeName){
         ${_profileRuntimePanel(p, isActive)}
         ${_profileGatewayTile(p)}
         ${_profileSkillsTile(p, isActive)}
+        ${_profileContextCompressionTile(p)}
+        ${_profileWorkstepBudgetTile(p)}
+        ${_profileToolAccessTile(p)}
       </div>
       ${_profileFilesSection(p)}
     </div>`;
@@ -4821,9 +4866,10 @@ function _renderProfileDetail(p, activeName){
   if (empty) empty.style.display = 'none';
   _profileMode = 'read';
   _setProfileHeaderButtons('read', p, activeName);
+  const runtimeHydrationSeq = _primeProfileRuntimeControls(p);
   _hydrateProfileDescription(p).catch(e=>console.warn('profile description failed',e));
   _hydrateProfileActivity(p).catch(e=>console.warn('profile activity failed',e));
-  _hydrateProfileDefaultModel(p).catch(e=>console.warn('profile default model failed',e));
+  _hydrateProfileRuntimeSettings(p, runtimeHydrationSeq).catch(e=>console.warn('profile runtime settings failed',e));
   _loadProfileSkillsTile(p).catch(e=>console.warn('profile skills tile failed',e));
   _bindProfileOpsConsole(p, isActive, isDefault);
 }
@@ -4841,7 +4887,7 @@ function _profileHeroDossier(p, isActive, isDefault){
     ? `<span class="profile-active-pill"><span class="profile-active-pill__dot" aria-hidden="true"></span>Active</span>`
     : '';
   // When inactive, "Make active" takes the primary slot.
-  // "Start chat" / "New Chat" has been relocated to the Default Model tile.
+  // Starting a chat is available directly from each profile in the left list.
   const makeActiveBtn = isActive
     ? ''
     : `<button id="opsMakeActive" class="profile-ops-button primary" type="button">Make active</button>`;
@@ -4865,6 +4911,29 @@ function _profileHeroDossier(p, isActive, isDefault){
           <button id="profileHeroDescriptionEdit" type="button" class="profile-hero-description-edit" aria-label="Edit description" title="Edit description">✎</button>
         </div>
         <div class="profile-hero-actions" aria-label="Primary actions for ${name}">
+          <label class="profile-response-mode-control">
+            <span>Response Style</span>
+            <select id="profileResponseModeSelect" class="profile-ops-select" aria-label="Response style for ${name}">
+              <option value="">Soul-driven</option>
+              <option value="concise">concise</option>
+              <option value="technical">technical</option>
+              <option value="teacher">teacher</option>
+              <option value="kawaii">kawaii</option>
+              <option value="hype">hype</option>
+            </select>
+          </label>
+          <label class="profile-default-workspace-control">
+            <span>Default space</span>
+            <div class="profile-default-workspace-wrap">
+              <button class="composer-workspace-chip profile-default-workspace-chip" id="profileDefaultWorkspaceChip" type="button" title="Choose default space for ${name}">
+                <span class="composer-workspace-icon" aria-hidden="true">${li('folder',14)}</span>
+                <span class="composer-workspace-label profile-default-workspace-value" id="profileDefaultWorkspaceValue">Loading…</span>
+                <span class="composer-workspace-chevron" aria-hidden="true">${li('chevron-down',10)}</span>
+              </button>
+              <button type="button" id="profileDefaultWorkspaceClear" class="profile-runtime-icon-btn profile-default-workspace-clear" title="Clear default space" aria-label="Clear default space">${li('x',14)}</button>
+              <div class="ws-dropdown profile-default-workspace-dropdown" id="profileDefaultWorkspaceDropdown"></div>
+            </div>
+          </label>
           ${makeActiveBtn}
         </div>
       </div>
@@ -5053,46 +5122,110 @@ async function _hydrateProfileActivity(profile){
   }
 }
 function _profileRuntimePanel(p, isActive){
-  // Default-model tile (rework 2026-05-15):
-  //   - Title "Default model" with explanatory subtitle.
-  //   - Two chips: Model + Reasoning. Both share the chat composer's chrome
-  //     (.composer-model-chip + .model-dropdown) AND the same renderer
-  //     (renderModelDropdown from ui.js, parameterised). Provider is inferred
-  //     from the chosen model — there is no separate provider chip.
-  //   - Auto-save on selection. No Apply button. No status pill. No
-  //     Diagnostics button. No "Saved" diode — this tile is always saved.
-  //   - A hidden <select id="profileDefaultModelSelect"> mirrors the chat
-  //     composer's #modelSelect so the parameterised renderer can read
-  //     optgroups out of it. _hydrateProfileDefaultModel populates it.
-  const newChatBtn = `<button type="button" id="opsStartChat" class="profile-new-chat-btn" data-ops-action="start-chat" aria-label="Start a new chat with this profile"><span class="profile-new-chat-btn__icon">${li('message-square', 16)}</span><span>New Chat</span></button>`;
+  // Runtime tile: compact profile-level model routing. All model controls
+  // reuse the chat composer's model picker through renderModelDropdown(opts).
   return `
-    <article class="profile-ops-tile profile-default-model-tile" aria-labelledby="opsDefaultModelTitle">
+    <article class="profile-ops-tile profile-default-model-tile profile-runtime-tile" aria-labelledby="opsRuntimeTitle">
       <div class="profile-ops-tile-head profile-default-model-head">
         <div class="profile-default-model-titles">
-          <span class="profile-ops-tile-label" id="opsDefaultModelTitle">Default model</span>
-          <span class="profile-default-model-subtitle">Used for new sessions only — existing chats keep their model</span>
+          <span class="profile-ops-tile-label" id="opsRuntimeTitle">Runtime</span>
         </div>
       </div>
-      <div class="profile-default-model-chiprow" aria-label="Default model controls for ${esc(p.name)}">
-        <div class="composer-model-wrap profile-default-model-wrap">
-          <button class="composer-model-chip" id="profileDefaultModelChip" type="button" title="Default model for new sessions in this profile">
-            <span class="composer-model-icon" aria-hidden="true">${li('cpu',14)}</span>
-            <span class="composer-model-label" id="profileDefaultModelLabel">Loading…</span>
-            <span class="composer-model-chevron" aria-hidden="true">${li('chevron-down',10)}</span>
-          </button>
-          <div class="model-dropdown profile-default-model-dropdown" id="profileDefaultModelDropdown"></div>
-          <select id="profileDefaultModelSelect" aria-hidden="true" tabindex="-1" style="position:absolute;width:1px;height:1px;clip:rect(0 0 0 0);overflow:hidden;"></select>
+      <div class="profile-runtime-rows" aria-label="Runtime controls for ${esc(p.name)}">
+        <div class="profile-runtime-group">
+          <span class="profile-runtime-row-label">Default Model</span>
+          <div class="profile-default-model-chiprow">
+            <div class="composer-model-wrap profile-default-model-wrap">
+              <button class="composer-model-chip" id="profileDefaultModelChip" type="button" title="Default model for new sessions in this profile">
+                <span class="composer-model-icon" aria-hidden="true">${li('cpu',14)}</span>
+                <span class="composer-model-label" id="profileDefaultModelLabel">Loading…</span>
+                <span class="composer-model-chevron" aria-hidden="true">${li('chevron-down',10)}</span>
+              </button>
+              <div class="model-dropdown profile-default-model-dropdown" id="profileDefaultModelDropdown"></div>
+              <select id="profileDefaultModelSelect" aria-hidden="true" tabindex="-1" style="position:absolute;width:1px;height:1px;clip:rect(0 0 0 0);overflow:hidden;"></select>
+            </div>
+            <div class="composer-model-wrap profile-default-model-wrap profile-reasoning-wrap">
+              <button class="composer-model-chip composer-reasoning-chip" id="profileDefaultReasoningChip" type="button" title="Reasoning effort for new sessions in this profile">
+                <span class="composer-model-icon" aria-hidden="true">${li('brain',14)}</span>
+                <span class="composer-model-label" id="profileDefaultReasoningLabel">Default</span>
+                <span class="composer-model-chevron" aria-hidden="true">${li('chevron-down',10)}</span>
+              </button>
+              <div class="composer-reasoning-dropdown profile-default-reasoning-dropdown" id="profileDefaultReasoningDropdown"></div>
+            </div>
+          </div>
         </div>
-        <div class="composer-model-wrap profile-default-model-wrap">
-          <button class="composer-model-chip composer-reasoning-chip" id="profileDefaultReasoningChip" type="button" title="Reasoning effort for new sessions in this profile">
-            <span class="composer-model-icon" aria-hidden="true">${li('brain',14)}</span>
-            <span class="composer-model-label" id="profileDefaultReasoningLabel">Default</span>
-            <span class="composer-model-chevron" aria-hidden="true">${li('chevron-down',10)}</span>
-          </button>
-          <div class="composer-reasoning-dropdown profile-default-reasoning-dropdown" id="profileDefaultReasoningDropdown"></div>
+        <div class="profile-runtime-group">
+          <span class="profile-runtime-row-label">Fallback Model</span>
+          <div class="profile-default-model-chiprow profile-fallback-chiprow">
+            <div class="composer-model-wrap profile-default-model-wrap">
+              <button class="composer-model-chip" id="profileFallbackModelChip" type="button" title="Fallback model for this profile">
+                <span class="composer-model-icon" aria-hidden="true">${li('corner-down-right',14)}</span>
+                <span class="composer-model-label" id="profileFallbackModelLabel">None</span>
+                <span class="composer-model-chevron" aria-hidden="true">${li('chevron-down',10)}</span>
+              </button>
+              <div class="model-dropdown profile-default-model-dropdown" id="profileFallbackModelDropdown"></div>
+              <select id="profileFallbackModelSelect" aria-hidden="true" tabindex="-1" style="position:absolute;width:1px;height:1px;clip:rect(0 0 0 0);overflow:hidden;"></select>
+            </div>
+            <button type="button" id="profileFallbackClear" class="profile-runtime-icon-btn" title="Clear fallback model" aria-label="Clear fallback model">${li('x',14)}</button>
+          </div>
         </div>
-        ${newChatBtn}
+        <button type="button" id="profileAuxModelsButton" class="profile-ops-button profile-aux-models-button profile-runtime-footer-action">
+          ${li('sliders-horizontal',14)}<span>Configure auxiliary tool models</span>
+        </button>
       </div>
+    </article>`;
+}
+
+function _profileContextCompressionTile(p){
+  return `
+    <article class="profile-ops-tile profile-context-compression-tile" aria-labelledby="profileCompressionTitle">
+      <div class="profile-ops-tile-head">
+        <span class="profile-ops-tile-label" id="profileCompressionTitle">Context compression</span>
+        <span class="profile-ops-status-pill">compression.*</span>
+      </div>
+      <span class="profile-ops-tile-note">Auto-compress long chats</span>
+      <input id="profileCompressionThreshold" class="profile-range" type="range" min="10" max="95" step="5" value="50" aria-label="Compression threshold">
+      <div class="profile-compression-detail-row">
+        <span id="profileCompressionSummary">Threshold 50%, protect last 20 messages.</span>
+        <label class="profile-mini-number">Protect <input id="profileCompressionProtectLast" type="number" min="0" max="200" step="1" value="20"></label>
+      </div>
+    </article>`;
+}
+
+function _profileWorkstepBudgetTile(p){
+  return `
+    <article class="profile-ops-tile profile-workstep-budget-tile" aria-labelledby="profileWorkstepTitle">
+      <div class="profile-ops-tile-head">
+        <span class="profile-ops-tile-label" id="profileWorkstepTitle">Work-step budget</span>
+        <span class="profile-ops-status-pill">agent.max_turns</span>
+      </div>
+      <input id="profileMaxTurnsSlider" class="profile-range" type="range" min="10" max="1000" step="10" value="150" aria-label="Work-step budget">
+      <input id="profileMaxTurnsInput" class="profile-number-input" type="number" min="1" max="1000" step="1" value="150" aria-label="Work-step budget value">
+      <span class="profile-ops-tile-note">agent/tool iterations per user turn</span>
+    </article>`;
+}
+
+const _PROFILE_TOOLSET_GROUPS = [
+  ['terminal', 'Terminal'],
+  ['file', 'Files'],
+  ['web', 'Web'],
+  ['browser', 'Browser'],
+  ['cronjob', 'Cron'],
+  ['image_gen', 'Image'],
+];
+
+function _profileToolAccessTile(p){
+  const buttons = _PROFILE_TOOLSET_GROUPS.map(([id,label]) =>
+    `<button type="button" class="profile-toolset-pill" data-toolset="${esc(id)}" aria-pressed="false">${esc(label)}</button>`
+  ).join('');
+  return `
+    <article class="profile-ops-tile profile-tool-access-tile" aria-labelledby="profileToolAccessTitle">
+      <div class="profile-ops-tile-head">
+        <span class="profile-ops-tile-label" id="profileToolAccessTitle">Tool access</span>
+        <span class="profile-ops-status-pill">toolsets</span>
+      </div>
+      <span class="profile-ops-tile-note">Friendly capability groups instead of raw toolset IDs by default.</span>
+      <div class="profile-toolset-pills">${buttons}</div>
     </article>`;
 }
 
@@ -5612,22 +5745,20 @@ function _profileGatewayTile(p){
 }
 
 function _profileSkillsTile(p, isActive){
-  // Skill count comes from list_profiles cache; the chip detail is filled
-  // by _loadProfileSkillsTile after render. Empty placeholder while async.
-  const enabled = typeof p.skill_count === 'number' ? p.skill_count : 0;
-  const total = typeof p.skill_total === 'number' ? p.skill_total : Math.max(enabled, 0);
-  const dot = enabled > 0 ? 'ok' : 'off';
+  // Counts must come from /api/profile/skills, which knows the full visible
+  // skill universe and this profile's disabled set. /api/profiles skill_count
+  // is row metadata and can vary per profile before hydration.
   return `
     <article class="profile-ops-tile" aria-labelledby="opsSkillsTitle">
       <div class="profile-ops-tile-head">
         <span class="profile-ops-tile-label" id="opsSkillsTitle">Skills</span>
         <span class="profile-ops-status-pill" id="opsSkillsPill">
-          <span id="opsSkillsDot" class="profile-status-dot ${dot}" aria-hidden="true"></span>
-          <span id="opsSkillsPillLabel">${esc(enabled)} / ${esc(total)} enabled</span>
+          <span id="opsSkillsDot" class="profile-status-dot off" aria-hidden="true"></span>
+          <span id="opsSkillsPillLabel">Loading skills…</span>
         </span>
       </div>
       <div>
-        <span class="profile-ops-tile-value" id="opsSkillsValue">${enabled === 0 ? 'No skills enabled' : 'Top in this profile'}</span>
+        <span class="profile-ops-tile-value" id="opsSkillsValue">Loading skills…</span>
         <div id="opsSkillsTopChips" class="profile-skill-top" role="list"></div>
       </div>
       <div class="profile-ops-control-row">
@@ -5648,8 +5779,79 @@ function _profileSkillsTile(p, isActive){
 // minimal · low · medium · high · xhigh); the chip label reads "Default"
 // when no override is set (matches the composer's empty-state label).
 
-async function _hydrateProfileDefaultModel(profile){
+let _profileRuntimeSettings = null;
+let _profileRuntimeHydrationSeq = 0;
+let _profileRuntimeDirty = null;
+const _PROFILE_COMPRESSION_DEFAULTS = {
+  enabled: true,
+  threshold: 0.5,
+  target_ratio: 0.5,
+  protect_last_n: 20,
+  protect_first_n: 0,
+};
+
+function _freshProfileRuntimeDirty(){
+  return {
+    default_model: false,
+    default_reasoning: false,
+    fallback_model: false,
+    response_mode: false,
+    compression: false,
+    max_turns: false,
+    default_workspace: false,
+    toolsets: false,
+    auxiliary_models: false,
+  };
+}
+
+function _markProfileRuntimeDirty(key){
+  if (!_profileRuntimeDirty) _profileRuntimeDirty = _freshProfileRuntimeDirty();
+  if (Object.prototype.hasOwnProperty.call(_profileRuntimeDirty, key)) {
+    _profileRuntimeDirty[key] = true;
+  }
+}
+
+function _isCurrentProfileRuntimeHydration(profileName, seq){
+  return Number.isFinite(seq)
+    && seq === _profileRuntimeHydrationSeq
+    && _currentProfileDetail
+    && _currentProfileDetail.name === profileName;
+}
+
+function _primeProfileRuntimeControls(profile){
+  const seq = ++_profileRuntimeHydrationSeq;
+  _profileRuntimeDirty = _freshProfileRuntimeDirty();
+  if (!profile || !profile.name) return seq;
+
+  _profileRuntimeSettings = {
+    fallback_model: {},
+    response_mode: '',
+    compression: Object.assign({}, _PROFILE_COMPRESSION_DEFAULTS),
+    max_turns: null,
+    default_workspace: profile.default_workspace || '',
+    toolsets: [],
+    toolsets_configured: false,
+    auxiliary_models: [],
+  };
+  _populateProfileDefaultModelSelect(profile);
+  _populateProfileModelSelect('profileFallbackModelSelect', '', null);
+  _applyProfileDefaultModelChip(profile.model || '');
+  _applyProfileDefaultReasoningChip('');
+  _applyProfileFallbackModelChip('');
+  _applyProfileResponseMode('');
+  _applyProfileCompression(_PROFILE_COMPRESSION_DEFAULTS);
+  _applyProfileMaxTurns(undefined);
+  _applyProfileDefaultWorkspace(profile.default_workspace || '');
+  _applyProfileToolsets([], false);
+  _wireProfileDefaultModelHandlers(profile.name);
+  _wireProfileRuntimeSettingHandlers(profile.name);
+  return seq;
+}
+
+async function _hydrateProfileRuntimeSettings(profile, seq){
   if (!profile || !profile.name) return;
+  const token = Number.isFinite(seq) ? seq : _profileRuntimeHydrationSeq;
+  if (!_isCurrentProfileRuntimeHydration(profile.name, token)) return;
   // Wait for the composer's model catalog before mirroring it into the
   // profile's hidden select. Without this, the picker can paint empty
   // immediately after a profile switch.
@@ -5657,29 +5859,74 @@ async function _hydrateProfileDefaultModel(profile){
   if (ready && typeof ready.then === 'function') {
     try { await ready; } catch (_) {}
   }
+  if (!_isCurrentProfileRuntimeHydration(profile.name, token)) return;
   if (!_profileModelGroupsFromComposer().length && typeof populateModelDropdown === 'function') {
     try { await populateModelDropdown(); } catch (_) {}
   }
+  if (!_isCurrentProfileRuntimeHydration(profile.name, token)) return;
 
-  // Fetch the per-profile reasoning_effort (the rest of the settings live
-  // on the profile row already from /api/profiles).
-  let reasoning = '';
+  let settings = {};
   try {
-    const settings = await api('/api/profile/settings?name=' + encodeURIComponent(profile.name));
-    if (settings && typeof settings.reasoning_effort === 'string') reasoning = settings.reasoning_effort;
-  } catch (_) { /* keep default empty */ }
+    settings = await api('/api/profile/settings?name=' + encodeURIComponent(profile.name) + '&include_avatar=0');
+  } catch (_) { settings = {}; }
+  if (!_isCurrentProfileRuntimeHydration(profile.name, token)) return;
 
-  _populateProfileDefaultModelSelect(profile);
-  _applyProfileDefaultModelChip(profile.model || '');
-  _applyProfileDefaultReasoningChip(reasoning);
+  const dirty = _profileRuntimeDirty || _freshProfileRuntimeDirty();
+  const prior = _profileRuntimeSettings || {};
+  const next = Object.assign({}, prior, settings || {});
+  if (dirty.default_reasoning) next.reasoning_effort = prior.reasoning_effort || '';
+  if (dirty.fallback_model) next.fallback_model = prior.fallback_model || {};
+  if (dirty.response_mode) next.response_mode = prior.response_mode || '';
+  if (dirty.compression) next.compression = prior.compression || _profileCompressionPayload();
+  if (dirty.max_turns) next.max_turns = prior.max_turns;
+  if (dirty.default_workspace) next.default_workspace = prior.default_workspace || profile.default_workspace || '';
+  if (dirty.toolsets) {
+    next.toolsets = prior.toolsets || [];
+    next.toolsets_configured = !!prior.toolsets_configured;
+  }
+  if (dirty.auxiliary_models) next.auxiliary_models = prior.auxiliary_models || [];
+  _profileRuntimeSettings = next;
+
+  const fallback = (_profileRuntimeSettings && _profileRuntimeSettings.fallback_model) || {};
+  const defaultModelChip = $('profileDefaultModelChip');
+  const fallbackModelChip = $('profileFallbackModelChip');
+  const currentDefaultModel = defaultModelChip ? (defaultModelChip.dataset.modelValue || '') : '';
+  const currentFallbackModel = fallbackModelChip ? (fallbackModelChip.dataset.modelValue || '') : '';
+  _populateProfileModelSelect(
+    'profileDefaultModelSelect',
+    dirty.default_model ? currentDefaultModel : (profile.model || ''),
+    profile.provider || null
+  );
+  _populateProfileModelSelect(
+    'profileFallbackModelSelect',
+    dirty.fallback_model ? currentFallbackModel : (fallback.model || ''),
+    fallback.provider || null
+  );
+  if (!dirty.default_model) _applyProfileDefaultModelChip(profile.model || '');
+  if (!dirty.default_reasoning) {
+    _applyProfileDefaultReasoningChip(typeof _profileRuntimeSettings.reasoning_effort === 'string' ? _profileRuntimeSettings.reasoning_effort : '');
+  }
+  if (!dirty.fallback_model) _applyProfileFallbackModelChip(fallback.model || '');
+  if (!dirty.response_mode) _applyProfileResponseMode(_profileRuntimeSettings.response_mode || '');
+  if (!dirty.compression) _applyProfileCompression(_profileRuntimeSettings.compression || {});
+  if (!dirty.max_turns) _applyProfileMaxTurns(_profileRuntimeSettings.max_turns);
+  if (!dirty.default_workspace) _applyProfileDefaultWorkspace(_profileRuntimeSettings.default_workspace || profile.default_workspace || '');
+  if (!dirty.toolsets) _applyProfileToolsets(_profileRuntimeSettings.toolsets || [], !!_profileRuntimeSettings.toolsets_configured);
   _wireProfileDefaultModelHandlers(profile.name);
+  _wireProfileRuntimeSettingHandlers(profile.name);
 }
 
+async function _hydrateProfileDefaultModel(profile){ return _hydrateProfileRuntimeSettings(profile); }
+
 function _populateProfileDefaultModelSelect(profile){
+  _populateProfileModelSelect('profileDefaultModelSelect', profile && profile.model || '', profile && profile.provider || null);
+}
+
+function _populateProfileModelSelect(selectId, currentModel, preferredProvider){
   // Mirror #modelSelect's optgroups into the profile's hidden select so the
   // composer's renderer (renderModelDropdown) sees the same catalog when
   // called with opts pointing at this select.
-  const sel = $('profileDefaultModelSelect');
+  const sel = $(selectId);
   const composerSel = $('modelSelect');
   if (!sel || !composerSel) return;
   sel.innerHTML = '';
@@ -5704,9 +5951,9 @@ function _populateProfileDefaultModelSelect(profile){
   }
   // Seed the value to the profile's current model so renderModelDropdown's
   // .active row highlight lands on the right row.
-  const current = profile.model || '';
+  const current = currentModel || '';
   if (current && typeof _applyModelToDropdown === 'function') {
-    _applyModelToDropdown(current, sel, profile.provider || null);
+    _applyModelToDropdown(current, sel, preferredProvider || null);
   } else if (current) {
     sel.value = current;
   }
@@ -5723,6 +5970,22 @@ function _applyProfileDefaultModelChip(modelValue){
     chip.dataset.modelValue = modelValue || '';
     chip.title = 'Default model: ' + text;
   }
+}
+
+function _applyProfileFallbackModelChip(modelValue){
+  const label = $('profileFallbackModelLabel');
+  const chip = $('profileFallbackModelChip');
+  const text = modelValue
+    ? (typeof getModelLabel === 'function' ? getModelLabel(modelValue) : modelValue)
+    : 'None';
+  if (label) label.textContent = text;
+  if (chip) {
+    chip.dataset.modelValue = modelValue || '';
+    chip.classList.toggle('inactive', !modelValue);
+    chip.title = modelValue ? ('Fallback model: ' + text) : 'No profile-specific fallback model';
+  }
+  const clear = $('profileFallbackClear');
+  if (clear) clear.disabled = !modelValue;
 }
 
 function _applyProfileDefaultReasoningChip(effort){
@@ -5742,11 +6005,96 @@ function _applyProfileDefaultReasoningChip(effort){
   chip.classList.toggle('inactive', inactive);
 }
 
+function _applyProfileResponseMode(mode){
+  const sel = $('profileResponseModeSelect');
+  if (!sel) return;
+  const value = String(mode || '').trim().toLowerCase();
+  sel.value = ['concise','technical','teacher','kawaii','hype'].includes(value) ? value : '';
+}
+
+function _profileCompressionState(){
+  const current = (_profileRuntimeSettings && _profileRuntimeSettings.compression) || {};
+  return Object.assign({}, _PROFILE_COMPRESSION_DEFAULTS, current || {});
+}
+
+function _applyProfileCompression(raw){
+  const c = Object.assign({}, _PROFILE_COMPRESSION_DEFAULTS, raw || {});
+  const threshold = $('profileCompressionThreshold');
+  const protect = $('profileCompressionProtectLast');
+  if (threshold) threshold.value = String(Math.round((Number(c.threshold) || 0.5) * 100));
+  if (protect) protect.value = String(Number.isFinite(Number(c.protect_last_n)) ? Number(c.protect_last_n) : 20);
+  _syncProfileCompressionSummary();
+}
+
+function _syncProfileCompressionSummary(){
+  const threshold = $('profileCompressionThreshold');
+  const protect = $('profileCompressionProtectLast');
+  const summary = $('profileCompressionSummary');
+  if (!summary) return;
+  const pct = Math.max(10, Math.min(95, parseInt(threshold && threshold.value || '50', 10) || 50));
+  const last = Math.max(0, Math.min(200, parseInt(protect && protect.value || '20', 10) || 0));
+  summary.textContent = `Threshold ${pct}%, protect last ${last} messages.`;
+}
+
+function _applyProfileMaxTurns(value){
+  const n = Math.max(1, Math.min(1000, parseInt(value || '150', 10) || 150));
+  const slider = $('profileMaxTurnsSlider');
+  const input = $('profileMaxTurnsInput');
+  if (slider) slider.value = String(Math.max(10, Math.min(1000, Math.round(n / 10) * 10)));
+  if (input) input.value = String(n);
+}
+
+function _applyProfileDefaultWorkspace(value){
+  const path = String(value || '').trim();
+  const el = $('profileDefaultWorkspaceValue');
+  const chip = $('profileDefaultWorkspaceChip');
+  const clear = $('profileDefaultWorkspaceClear');
+  const label = path ? getWorkspaceFriendlyName(path) : 'No default space set';
+  if (el) el.textContent = label;
+  if (chip) {
+    chip.dataset.workspace = path;
+    chip.classList.toggle('inactive', !path);
+    chip.title = path || 'No default space set';
+  }
+  if (clear) {
+    clear.disabled = !path;
+    clear.hidden = !path;
+  }
+}
+
+function _refreshProfileCardRuntimeMeta(profileName){
+  const p = (_profilesCache && Array.isArray(_profilesCache.profiles))
+    ? _profilesCache.profiles.find(x => x.name === profileName)
+    : null;
+  if (!p) return;
+  const card = document.querySelector(`.profile-card[data-name="${CSS.escape(profileName)}"]`);
+  const metaEl = card ? card.querySelector('.profile-card-meta') : null;
+  if (!metaEl) return;
+  const meta = [];
+  if (p.model) meta.push(p.model.split('/').pop());
+  if (p.provider) meta.push(p.provider);
+  metaEl.textContent = meta.length ? meta.join(' · ') : t('profile_no_configuration');
+}
+
+function _applyProfileToolsets(toolsets, configured){
+  const defaultToolsets = _PROFILE_TOOLSET_GROUPS.map(([id]) => id);
+  const selected = new Set(Array.isArray(toolsets) && (configured || toolsets.length) ? toolsets : defaultToolsets);
+  document.querySelectorAll('.profile-toolset-pill[data-toolset]').forEach(btn => {
+    const on = selected.has(btn.dataset.toolset);
+    btn.classList.toggle('active', on);
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+  });
+}
+
 function _wireProfileDefaultModelHandlers(profileName){
   const modelChip = $('profileDefaultModelChip');
+  const fallbackChip = $('profileFallbackModelChip');
   const reasoningChip = $('profileDefaultReasoningChip');
   if (modelChip) {
     modelChip.onclick = (ev) => { ev.stopPropagation(); _toggleProfileDefaultModelDropdown(profileName); };
+  }
+  if (fallbackChip) {
+    fallbackChip.onclick = (ev) => { ev.stopPropagation(); _toggleProfileFallbackModelDropdown(profileName); };
   }
   if (reasoningChip) {
     reasoningChip.onclick = (ev) => { ev.stopPropagation(); _toggleProfileDefaultReasoningDropdown(profileName); };
@@ -5754,10 +6102,10 @@ function _wireProfileDefaultModelHandlers(profileName){
 }
 
 function _closeProfileDefaultDropdowns(){
-  ['profileDefaultModelDropdown', 'profileDefaultReasoningDropdown'].forEach(id => {
+  ['profileDefaultModelDropdown', 'profileFallbackModelDropdown', 'profileDefaultReasoningDropdown'].forEach(id => {
     const el = $(id); if (el) el.classList.remove('open');
   });
-  ['profileDefaultModelChip', 'profileDefaultReasoningChip'].forEach(id => {
+  ['profileDefaultModelChip', 'profileFallbackModelChip', 'profileDefaultReasoningChip'].forEach(id => {
     const el = $(id); if (el) el.classList.remove('active');
   });
 }
@@ -5770,6 +6118,7 @@ function _toggleProfileDefaultModelDropdown(profileName){
   if (dd.classList.contains('open')) { _closeProfileDefaultDropdowns(); return; }
   // Close any other dropdowns in the page first so two pickers can't be
   // open simultaneously.
+  closeWsDropdown();
   if (typeof closeModelDropdown === 'function') closeModelDropdown();
   if (typeof closeReasoningDropdown === 'function') closeReasoningDropdown();
   _closeProfileDefaultDropdowns();
@@ -5783,6 +6132,28 @@ function _toggleProfileDefaultModelDropdown(profileName){
     onClose: () => _closeProfileDefaultDropdowns(),
     // The tile subtitle already states this scope; suppress the in-dropdown
     // duplicate scope-note for the profile case (composer keeps its default).
+    scopeNote: "",
+  });
+  dd.classList.add('open');
+  chip.classList.add('active');
+  _positionProfileDefaultDropdown(chip, dd);
+}
+
+function _toggleProfileFallbackModelDropdown(profileName){
+  const dd = $('profileFallbackModelDropdown');
+  const chip = $('profileFallbackModelChip');
+  const sel = $('profileFallbackModelSelect');
+  if (!dd || !chip || !sel) return;
+  if (dd.classList.contains('open')) { _closeProfileDefaultDropdowns(); return; }
+  closeWsDropdown();
+  if (typeof closeModelDropdown === 'function') closeModelDropdown();
+  if (typeof closeReasoningDropdown === 'function') closeReasoningDropdown();
+  _closeProfileDefaultDropdowns();
+  renderModelDropdown({
+    select: sel,
+    dropdown: dd,
+    onSelect: (value) => _onProfileFallbackModelPicked(profileName, value),
+    onClose: () => _closeProfileDefaultDropdowns(),
     scopeNote: "",
   });
   dd.classList.add('open');
@@ -5812,6 +6183,7 @@ function _positionProfileDefaultDropdown(chip, dd){
 }
 
 async function _onProfileDefaultModelPicked(profileName, value){
+  _markProfileRuntimeDirty('default_model');
   const sel = $('profileDefaultModelSelect');
   const modelChip = $('profileDefaultModelChip');
   const reasoningChip = $('profileDefaultReasoningChip');
@@ -5840,11 +6212,35 @@ async function _onProfileDefaultModelPicked(profileName, value){
   await _persistProfileDefaultModel(profileName, priors);
 }
 
+async function _onProfileFallbackModelPicked(profileName, value){
+  _markProfileRuntimeDirty('fallback_model');
+  const sel = $('profileFallbackModelSelect');
+  const chip = $('profileFallbackModelChip');
+  if (!sel) { _closeProfileDefaultDropdowns(); return; }
+  const priors = {
+    selValue: sel.value || '',
+    modelValue: chip ? (chip.dataset.modelValue || '') : '',
+  };
+  if (!Array.from(sel.options).some(o => o.value === value)) {
+    const opt = document.createElement('option');
+    opt.value = value;
+    opt.textContent = getModelLabel(value);
+    opt.dataset.custom = '1';
+    sel.querySelectorAll('option[data-custom]').forEach(o => o.remove());
+    sel.appendChild(opt);
+  }
+  sel.value = value;
+  _applyProfileFallbackModelChip(value);
+  _closeProfileDefaultDropdowns();
+  await _persistProfileFallbackModel(profileName, priors);
+}
+
 function _toggleProfileDefaultReasoningDropdown(profileName){
   const dd = $('profileDefaultReasoningDropdown');
   const chip = $('profileDefaultReasoningChip');
   if (!dd || !chip) return;
   if (dd.classList.contains('open')) { _closeProfileDefaultDropdowns(); return; }
+  closeWsDropdown();
   if (typeof closeModelDropdown === 'function') closeModelDropdown();
   if (typeof closeReasoningDropdown === 'function') closeReasoningDropdown();
   _closeProfileDefaultDropdowns();
@@ -5864,6 +6260,7 @@ function _toggleProfileDefaultReasoningDropdown(profileName){
 }
 
 function _onProfileDefaultReasoningPicked(profileName, value){
+  _markProfileRuntimeDirty('default_reasoning');
   // Capture prior values BEFORE optimistic UI update so a failed POST can
   // revert without re-fetching from the server.
   const modelChip = $('profileDefaultModelChip');
@@ -5880,6 +6277,7 @@ function _onProfileDefaultReasoningPicked(profileName, value){
 }
 
 async function _persistProfileDefaultModel(profileName, priors){
+  const token = _profileRuntimeHydrationSeq;
   const modelChip = $('profileDefaultModelChip');
   const reasoningChip = $('profileDefaultReasoningChip');
   const sel = $('profileDefaultModelSelect');
@@ -5916,7 +6314,7 @@ async function _persistProfileDefaultModel(profileName, priors){
     const p = (_profilesCache && Array.isArray(_profilesCache.profiles))
       ? _profilesCache.profiles.find(x => x.name === profileName) : null;
     if (p) Object.assign(p, updated);
-    if (_currentProfileDetail && _currentProfileDetail.name === profileName) {
+    if (_isCurrentProfileRuntimeHydration(profileName, token)) {
       Object.assign(_currentProfileDetail, updated);
     }
     // If we're editing the active profile and no chat session has been
@@ -5936,35 +6334,523 @@ async function _persistProfileDefaultModel(profileName, priors){
         if (typeof syncTopbar === 'function') syncTopbar();
       }
     }
-    if (typeof loadProfilesPanel === 'function') await loadProfilesPanel();
+    _refreshProfileCardRuntimeMeta(profileName);
   } catch (e) {
     // Revert the optimistic chip + select-mirror state so the UI no longer
     // claims a value the server doesn't have. Toast the failure (no inline
     // "Saved" diode by design — failure is the only state worth surfacing).
-    try {
-      if (sel) {
-        if (priorSelValue && Array.from(sel.options).some(o => o.value === priorSelValue)) {
-          sel.value = priorSelValue;
-        } else if (priorModel && typeof _applyModelToDropdown === 'function') {
-          _applyModelToDropdown(priorModel, sel, priorProvider);
+    if (_isCurrentProfileRuntimeHydration(profileName, token)) {
+      try {
+        if (sel) {
+          if (priorSelValue && Array.from(sel.options).some(o => o.value === priorSelValue)) {
+            sel.value = priorSelValue;
+          } else if (priorModel && typeof _applyModelToDropdown === 'function') {
+            _applyModelToDropdown(priorModel, sel, priorProvider);
+          }
         }
+        _applyProfileDefaultModelChip(priorModel);
+        _applyProfileDefaultReasoningChip(priorReasoning);
+      } catch (revertErr) {
+        console.warn('Default model revert failed:', revertErr);
       }
-      _applyProfileDefaultModelChip(priorModel);
-      _applyProfileDefaultReasoningChip(priorReasoning);
-    } catch (revertErr) {
-      console.warn('Default model revert failed:', revertErr);
+      showToast('Default model save failed: ' + (e && e.message ? e.message : e));
     }
     console.warn('Default model save failed:', e);
-    showToast('Default model save failed: ' + (e && e.message ? e.message : e));
+  }
+}
+
+async function _persistProfileFallbackModel(profileName, priors){
+  const token = _profileRuntimeHydrationSeq;
+  const chip = $('profileFallbackModelChip');
+  const sel = $('profileFallbackModelSelect');
+  const modelValue = chip ? (chip.dataset.modelValue || '') : '';
+  const priorModel = (priors && typeof priors.modelValue === 'string') ? priors.modelValue : '';
+  const priorSelValue = (priors && typeof priors.selValue === 'string') ? priors.selValue : '';
+  const modelState = (sel && modelValue && typeof _modelStateForSelect === 'function')
+    ? _modelStateForSelect(sel, modelValue)
+    : { model: modelValue, model_provider: null };
+  const provider = _profileProviderForPickerValue(sel, modelValue, modelState);
+  if (modelValue && !provider) {
+    if (sel) {
+      if (priorSelValue && Array.from(sel.options).some(o => o.value === priorSelValue)) sel.value = priorSelValue;
+      else sel.value = '';
+    }
+    _applyProfileFallbackModelChip(priorModel);
+    showToast('Pick a fallback model from a configured provider.', 4000, 'error');
+    return;
+  }
+  const fallback_model = modelValue ? {
+    provider,
+    model: modelState.model || modelValue,
+  } : {};
+  try {
+    const updated = await api('/api/profile/settings', {
+      method: 'POST',
+      body: JSON.stringify({ name: profileName, fallback_model }),
+    });
+    if (_isCurrentProfileRuntimeHydration(profileName, token)) {
+      _profileRuntimeSettings = Object.assign({}, _profileRuntimeSettings || {}, updated || {});
+      Object.assign(_currentProfileDetail, updated);
+    }
+  } catch (e) {
+    if (_isCurrentProfileRuntimeHydration(profileName, token)) {
+      if (sel) {
+        if (priorSelValue && Array.from(sel.options).some(o => o.value === priorSelValue)) sel.value = priorSelValue;
+        else sel.value = '';
+      }
+      _applyProfileFallbackModelChip(priorModel);
+      showToast('Fallback model save failed: ' + (e && e.message ? e.message : e), 4000, 'error');
+    }
+    console.warn('Fallback model save failed:', e);
+  }
+}
+
+async function _persistProfileSetting(profileName, patch, onFailure){
+  const token = _profileRuntimeHydrationSeq;
+  try {
+    const updated = await api('/api/profile/settings', {
+      method: 'POST',
+      body: JSON.stringify(Object.assign({ name: profileName }, patch || {})),
+    });
+    if (_isCurrentProfileRuntimeHydration(profileName, token)) {
+      _profileRuntimeSettings = Object.assign({}, _profileRuntimeSettings || {}, updated || {});
+      Object.assign(_currentProfileDetail, updated);
+    }
+    return updated;
+  } catch (e) {
+    if (_isCurrentProfileRuntimeHydration(profileName, token) && typeof onFailure === 'function') onFailure(e);
+    console.warn('Profile setting save failed:', e);
+    if (_isCurrentProfileRuntimeHydration(profileName, token)) {
+      showToast('Profile setting save failed: ' + (e && e.message ? e.message : e), 4000, 'error');
+    }
+    throw e;
+  }
+}
+
+function _positionProfileDefaultWorkspaceDropdown(chip, dd){
+  if(!chip || !dd) return;
+  const chipRect = chip.getBoundingClientRect();
+  const vh = window.innerHeight || document.documentElement.clientHeight || 0;
+  const spaceBelow = vh - chipRect.bottom;
+  const spaceAbove = chipRect.top;
+  const ddHeight = dd.offsetHeight || 320;
+  dd.classList.toggle('flipped', (spaceBelow < ddHeight + 12) && (spaceAbove > spaceBelow));
+}
+
+function _toggleProfileDefaultWorkspaceDropdown(profileName){
+  const dd = $('profileDefaultWorkspaceDropdown');
+  const chip = $('profileDefaultWorkspaceChip');
+  if (!dd || !chip) return;
+  if (dd.classList.contains('open')) { closeWsDropdown(); return; }
+  closeProfileDropdown();
+  if (typeof closeModelDropdown === 'function') closeModelDropdown();
+  if (typeof closeReasoningDropdown === 'function') closeReasoningDropdown();
+  _closeProfileDefaultDropdowns();
+  closeWsDropdown();
+  const token = _profileRuntimeHydrationSeq;
+  loadWorkspaceList().then(data => {
+    if (!_isCurrentProfileRuntimeHydration(profileName, token)) return;
+    const current = (_profileRuntimeSettings && _profileRuntimeSettings.default_workspace)
+      || (chip.dataset.workspace || '');
+    _applyProfileDefaultWorkspace(current);
+    renderWorkspaceDropdownInto(dd, data.workspaces, current, {
+      includeSessionActions: false,
+      onSelect: (path) => {
+        _markProfileRuntimeDirty('default_workspace');
+        const prior = (_profileRuntimeSettings && _profileRuntimeSettings.default_workspace) || '';
+        const next = String(path || '').trim();
+        closeWsDropdown();
+        _applyProfileDefaultWorkspace(next);
+        _persistProfileDefaultWorkspace(profileName, next, prior).catch(()=>{});
+      },
+    });
+    dd.classList.add('open');
+    chip.classList.add('active');
+    _positionProfileDefaultWorkspaceDropdown(chip, dd);
+  });
+}
+
+async function _persistProfileDefaultWorkspace(profileName, next, prior){
+  const token = _profileRuntimeHydrationSeq;
+  const updated = await _persistProfileSetting(
+    profileName,
+    { default_workspace: String(next || '').trim() },
+    () => {
+      if (_isCurrentProfileRuntimeHydration(profileName, token)) _applyProfileDefaultWorkspace(prior || '');
+    }
+  );
+  const saved = updated && typeof updated.default_workspace === 'string'
+    ? updated.default_workspace
+    : String(next || '').trim();
+  if (_isCurrentProfileRuntimeHydration(profileName, token)) _applyProfileDefaultWorkspace(saved);
+  const active = S.activeProfile || (_profilesCache && _profilesCache.active) || 'default';
+  if (active === profileName) {
+    S._profileDefaultWorkspace = saved;
+    if (typeof syncWorkspaceDisplays === 'function') syncWorkspaceDisplays();
+  }
+  return updated;
+}
+
+function _profileCompressionPayload(){
+  const current = _profileCompressionState();
+  const threshold = $('profileCompressionThreshold');
+  const protect = $('profileCompressionProtectLast');
+  return Object.assign({}, current, {
+    enabled: true,
+    threshold: (Math.max(10, Math.min(95, parseInt(threshold && threshold.value || '50', 10) || 50)) / 100),
+    protect_last_n: Math.max(0, Math.min(200, parseInt(protect && protect.value || '20', 10) || 0)),
+  });
+}
+
+function _selectedProfileToolsets(){
+  return Array.from(document.querySelectorAll('.profile-toolset-pill.active[data-toolset]'))
+    .map(btn => btn.dataset.toolset)
+    .filter(Boolean);
+}
+
+function _profileProviderForPickerValue(sel, modelValue, modelState){
+  const stateProvider = modelState && modelState.model_provider ? String(modelState.model_provider).trim() : '';
+  if (stateProvider) return stateProvider;
+  const value = String(modelValue || '').trim();
+  const slashProvider = value.includes('/') ? value.split('/')[0].trim() : '';
+  if (!slashProvider || !sel) return '';
+  for (const group of Array.from(sel.querySelectorAll('optgroup[data-provider]'))) {
+    if (String(group.dataset.provider || '').trim() === slashProvider) return slashProvider;
+  }
+  return '';
+}
+
+function _wireProfileRuntimeSettingHandlers(profileName){
+  const fallbackClear = $('profileFallbackClear');
+  if (fallbackClear) fallbackClear.onclick = async (ev) => {
+    ev.stopPropagation();
+    _markProfileRuntimeDirty('fallback_model');
+    const chip = $('profileFallbackModelChip');
+    const sel = $('profileFallbackModelSelect');
+    const priors = {
+      selValue: sel ? (sel.value || '') : '',
+      modelValue: chip ? (chip.dataset.modelValue || '') : '',
+    };
+    if (sel) sel.value = '';
+    _applyProfileFallbackModelChip('');
+    await _persistProfileFallbackModel(profileName, priors);
+  };
+
+  const auxBtn = $('profileAuxModelsButton');
+  if (auxBtn) auxBtn.onclick = () => _openProfileAuxModels(profileName);
+
+  const response = $('profileResponseModeSelect');
+  if (response) response.onchange = () => {
+    _markProfileRuntimeDirty('response_mode');
+    const prior = (_profileRuntimeSettings && _profileRuntimeSettings.response_mode) || '';
+    _persistProfileSetting(profileName, { response_mode: response.value }, () => _applyProfileResponseMode(prior)).catch(()=>{});
+  };
+
+  [$('profileCompressionThreshold'), $('profileCompressionProtectLast')]
+    .filter(Boolean)
+    .forEach(el => {
+      el.oninput = () => {
+        _markProfileRuntimeDirty('compression');
+        _syncProfileCompressionSummary();
+      };
+      el.onchange = () => {
+        _markProfileRuntimeDirty('compression');
+        _syncProfileCompressionSummary();
+        const prior = (_profileRuntimeSettings && _profileRuntimeSettings.compression) || {};
+        _persistProfileSetting(profileName, { compression: _profileCompressionPayload() }, () => _applyProfileCompression(prior)).catch(()=>{});
+      };
+    });
+
+  const maxSlider = $('profileMaxTurnsSlider');
+  const maxInput = $('profileMaxTurnsInput');
+  const saveMaxTurns = (value, prior) => {
+    _markProfileRuntimeDirty('max_turns');
+    const n = Math.max(1, Math.min(1000, parseInt(value || '150', 10) || 150));
+    _applyProfileMaxTurns(n);
+    _persistProfileSetting(profileName, { max_turns: n }, () => _applyProfileMaxTurns(prior)).catch(()=>{});
+  };
+  if (maxSlider) {
+    maxSlider.oninput = () => {
+      _markProfileRuntimeDirty('max_turns');
+      if (maxInput) maxInput.value = maxSlider.value;
+    };
+    maxSlider.onchange = () => saveMaxTurns(maxSlider.value, _profileRuntimeSettings && _profileRuntimeSettings.max_turns);
+  }
+  if (maxInput) maxInput.onchange = () => saveMaxTurns(maxInput.value, _profileRuntimeSettings && _profileRuntimeSettings.max_turns);
+
+  const workspaceChip = $('profileDefaultWorkspaceChip');
+  if (workspaceChip) {
+    workspaceChip.onclick = (ev) => {
+      ev.stopPropagation();
+      _toggleProfileDefaultWorkspaceDropdown(profileName);
+    };
+  }
+  const workspaceClear = $('profileDefaultWorkspaceClear');
+  if (workspaceClear) workspaceClear.onclick = async (ev) => {
+    ev.stopPropagation();
+    _markProfileRuntimeDirty('default_workspace');
+    const current = (_profileRuntimeSettings && _profileRuntimeSettings.default_workspace) || '';
+    _applyProfileDefaultWorkspace('');
+    closeWsDropdown();
+    _persistProfileDefaultWorkspace(profileName, '', current).catch(()=>{});
+  };
+
+  document.querySelectorAll('.profile-toolset-pill[data-toolset]').forEach(btn => {
+    btn.onclick = () => {
+      _markProfileRuntimeDirty('toolsets');
+      btn.classList.toggle('active');
+      btn.setAttribute('aria-pressed', btn.classList.contains('active') ? 'true' : 'false');
+      const prior = (_profileRuntimeSettings && _profileRuntimeSettings.toolsets) || [];
+      const priorConfigured = !!(_profileRuntimeSettings && _profileRuntimeSettings.toolsets_configured);
+      _persistProfileSetting(profileName, { toolsets: _selectedProfileToolsets() }, () => _applyProfileToolsets(prior, priorConfigured)).catch(()=>{});
+    };
+  });
+}
+
+function _profileAuxiliaryModels(){
+  const models = _profileRuntimeSettings && Array.isArray(_profileRuntimeSettings.auxiliary_models)
+    ? _profileRuntimeSettings.auxiliary_models
+    : [];
+  return models.length ? models : [
+    { task: 'vision', label: 'Vision', description: 'Image and multimodal interpretation.', provider: '', model: '' },
+    { task: 'web_extract', label: 'Web extraction', description: 'Extract and summarize web page content.', provider: '', model: '' },
+    { task: 'compression', label: 'Compression', description: 'Summarize long session context.', provider: '', model: '' },
+    { task: 'session_search', label: 'Session search', description: 'Search and synthesize prior sessions.', provider: '', model: '' },
+    { task: 'skills_hub', label: 'Skills hub', description: 'Skill discovery and routing support.', provider: '', model: '' },
+    { task: 'approval', label: 'Approval', description: 'Policy and approval helper calls.', provider: '', model: '' },
+    { task: 'mcp', label: 'MCP', description: 'MCP tool routing helper calls.', provider: '', model: '' },
+    { task: 'title_generation', label: 'Title generation', description: 'Short chat and session titles.', provider: '', model: '' },
+    { task: 'triage_specifier', label: 'Triage specifier', description: 'Clarify routing and task specification.', provider: '', model: '' },
+    { task: 'curator', label: 'Curator', description: 'Curated summaries and organization.', provider: '', model: '' },
+  ];
+}
+
+function _profileAuxDomId(task, suffix){
+  return 'profileAux_' + String(task || '').replace(/[^a-z0-9_-]/gi, '_') + '_' + suffix;
+}
+
+function _openProfileAuxModels(profileName){
+  _closeProfileAuxModels();
+  const tasks = _profileAuxiliaryModels();
+  const rows = tasks.map(item => {
+    const task = esc(item.task || '');
+    const label = esc(item.label || item.task || '');
+    const desc = esc(item.description || '');
+    const chipId = _profileAuxDomId(item.task, 'chip');
+    const labelId = _profileAuxDomId(item.task, 'label');
+    const ddId = _profileAuxDomId(item.task, 'dropdown');
+    const selectId = _profileAuxDomId(item.task, 'select');
+    return `
+      <div class="profile-aux-model-row" data-aux-task="${task}">
+        <div class="profile-aux-model-text">
+          <span class="profile-aux-model-name">${label}</span>
+          <span class="profile-aux-model-desc">${desc}</span>
+        </div>
+        <div class="profile-aux-model-control">
+          <div class="composer-model-wrap profile-default-model-wrap profile-aux-model-wrap">
+            <button class="composer-model-chip profile-aux-model-chip" id="${chipId}" type="button" title="Auxiliary model for ${label}">
+              <span class="composer-model-icon" aria-hidden="true">${li('cpu',14)}</span>
+              <span class="composer-model-label" id="${labelId}">Auto</span>
+              <span class="composer-model-chevron" aria-hidden="true">${li('chevron-down',10)}</span>
+            </button>
+            <div class="model-dropdown profile-default-model-dropdown profile-aux-model-dropdown" id="${ddId}"></div>
+            <select id="${selectId}" aria-hidden="true" tabindex="-1" style="position:absolute;width:1px;height:1px;clip:rect(0 0 0 0);overflow:hidden;"></select>
+          </div>
+          <button type="button" class="profile-runtime-icon-btn profile-aux-clear" data-aux-clear="${task}" title="Clear auxiliary model" aria-label="Clear ${label} auxiliary model">${li('x',14)}</button>
+        </div>
+      </div>`;
+  }).join('');
+  const overlay = document.createElement('div');
+  overlay.id = 'profileAuxModelsOverlay';
+  overlay.className = 'profile-skills-manager-overlay';
+  overlay.innerHTML = `
+    <div class="profile-skills-manager-card profile-aux-models-card" role="dialog" aria-modal="true" aria-labelledby="profileAuxModelsTitle">
+      <div class="profile-skills-manager-head">
+        <div class="profile-skills-manager-head-text">
+          <div class="profile-skills-manager-kicker">Runtime</div>
+          <h3 class="profile-skills-manager-title" id="profileAuxModelsTitle">Auxiliary tool models</h3>
+          <div class="profile-skills-manager-subtitle">Set cheaper or specialized models for profile helper tasks.</div>
+        </div>
+        <button type="button" class="profile-skills-manager-close" data-aux-close aria-label="Close">×</button>
+      </div>
+      <div class="profile-skills-manager-body profile-aux-models-body">
+        ${rows}
+      </div>
+      <div class="profile-skills-manager-footer">
+        <span class="profile-skills-manager-note">Clear a row to let Hermes resolve that auxiliary task from its normal runtime defaults.</span>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', (ev) => {
+    if (ev.target === overlay) _closeProfileAuxModels();
+  });
+  const closeBtn = overlay.querySelector('[data-aux-close]');
+  if (closeBtn) closeBtn.onclick = _closeProfileAuxModels;
+  tasks.forEach(item => {
+    const selectId = _profileAuxDomId(item.task, 'select');
+    _populateProfileModelSelect(selectId, item.model || '', item.provider || null);
+    _applyProfileAuxModelChip(item.task, item.model || '');
+  });
+  _wireProfileAuxModelHandlers(profileName);
+}
+
+function _closeProfileAuxModels(){
+  const overlay = $('profileAuxModelsOverlay');
+  if (overlay) overlay.remove();
+}
+
+function _closeProfileAuxDropdowns(){
+  document.querySelectorAll('.profile-aux-model-dropdown.open').forEach(el => {
+    el.classList.remove('open');
+    el.classList.remove('flipped');
+  });
+  document.querySelectorAll('.profile-aux-model-chip.active').forEach(el => el.classList.remove('active'));
+}
+
+function _findProfileAuxModel(task){
+  return _profileAuxiliaryModels().find(item => item.task === task) || { task, provider: '', model: '' };
+}
+
+function _applyProfileAuxModelChip(task, modelValue){
+  const label = $(_profileAuxDomId(task, 'label'));
+  const chip = $(_profileAuxDomId(task, 'chip'));
+  const clear = document.querySelector(`[data-aux-clear="${CSS.escape(task)}"]`);
+  const text = modelValue
+    ? (typeof getModelLabel === 'function' ? getModelLabel(modelValue) : modelValue)
+    : 'Auto';
+  if (label) label.textContent = text;
+  if (chip) {
+    chip.dataset.modelValue = modelValue || '';
+    chip.classList.toggle('inactive', !modelValue);
+    chip.title = modelValue ? ('Auxiliary model: ' + text) : 'Use Hermes default for this auxiliary task';
+  }
+  if (clear) clear.disabled = !modelValue;
+}
+
+function _wireProfileAuxModelHandlers(profileName){
+  _profileAuxiliaryModels().forEach(item => {
+    const task = item.task;
+    const chip = $(_profileAuxDomId(task, 'chip'));
+    if (chip) {
+      chip.onclick = (ev) => {
+        ev.stopPropagation();
+        _toggleProfileAuxModelDropdown(profileName, task);
+      };
+    }
+  });
+  document.querySelectorAll('[data-aux-clear]').forEach(btn => {
+    btn.onclick = async (ev) => {
+      ev.stopPropagation();
+      _markProfileRuntimeDirty('auxiliary_models');
+      const task = btn.dataset.auxClear || '';
+      const chip = $(_profileAuxDomId(task, 'chip'));
+      const sel = $(_profileAuxDomId(task, 'select'));
+      const priors = {
+        selValue: sel ? (sel.value || '') : '',
+        modelValue: chip ? (chip.dataset.modelValue || '') : '',
+      };
+      if (sel) sel.value = '';
+      _applyProfileAuxModelChip(task, '');
+      await _persistProfileAuxModel(profileName, task, '', priors);
+    };
+  });
+}
+
+function _toggleProfileAuxModelDropdown(profileName, task){
+  const dd = $(_profileAuxDomId(task, 'dropdown'));
+  const chip = $(_profileAuxDomId(task, 'chip'));
+  const sel = $(_profileAuxDomId(task, 'select'));
+  if (!dd || !chip || !sel) return;
+  if (dd.classList.contains('open')) { _closeProfileAuxDropdowns(); return; }
+  if (typeof closeModelDropdown === 'function') closeModelDropdown();
+  if (typeof closeReasoningDropdown === 'function') closeReasoningDropdown();
+  _closeProfileDefaultDropdowns();
+  _closeProfileAuxDropdowns();
+  renderModelDropdown({
+    select: sel,
+    dropdown: dd,
+    onSelect: (value) => _onProfileAuxModelPicked(profileName, task, value),
+    onClose: () => _closeProfileAuxDropdowns(),
+    scopeNote: "",
+  });
+  dd.classList.add('open');
+  chip.classList.add('active');
+  _positionProfileDefaultDropdown(chip, dd);
+}
+
+async function _onProfileAuxModelPicked(profileName, task, value){
+  _markProfileRuntimeDirty('auxiliary_models');
+  const sel = $(_profileAuxDomId(task, 'select'));
+  const chip = $(_profileAuxDomId(task, 'chip'));
+  if (!sel) { _closeProfileAuxDropdowns(); return; }
+  const priors = {
+    selValue: sel.value || '',
+    modelValue: chip ? (chip.dataset.modelValue || '') : '',
+  };
+  if (!Array.from(sel.options).some(o => o.value === value)) {
+    const opt = document.createElement('option');
+    opt.value = value;
+    opt.textContent = getModelLabel(value);
+    opt.dataset.custom = '1';
+    sel.querySelectorAll('option[data-custom]').forEach(o => o.remove());
+    sel.appendChild(opt);
+  }
+  sel.value = value;
+  _applyProfileAuxModelChip(task, value);
+  _closeProfileAuxDropdowns();
+  await _persistProfileAuxModel(profileName, task, value, priors);
+}
+
+async function _persistProfileAuxModel(profileName, task, modelValue, priors){
+  const token = _profileRuntimeHydrationSeq;
+  const sel = $(_profileAuxDomId(task, 'select'));
+  const priorModel = (priors && typeof priors.modelValue === 'string') ? priors.modelValue : '';
+  const priorSelValue = (priors && typeof priors.selValue === 'string') ? priors.selValue : '';
+  const modelState = (sel && modelValue && typeof _modelStateForSelect === 'function')
+    ? _modelStateForSelect(sel, modelValue)
+    : { model: modelValue || '', model_provider: null };
+  const provider = _profileProviderForPickerValue(sel, modelValue, modelState);
+  if (modelValue && !provider) {
+    if (sel) {
+      if (priorSelValue && Array.from(sel.options).some(o => o.value === priorSelValue)) sel.value = priorSelValue;
+      else sel.value = '';
+    }
+    _applyProfileAuxModelChip(task, priorModel);
+    showToast('Pick an auxiliary model from a configured provider.', 4000, 'error');
+    return;
+  }
+  const patch = {};
+  patch[task] = modelValue ? {
+    provider,
+    model: modelState.model || modelValue,
+  } : { provider: '', model: '' };
+  try {
+    const updated = await _persistProfileSetting(profileName, { auxiliary_models: patch });
+    if (_isCurrentProfileRuntimeHydration(profileName, token) && updated && Array.isArray(updated.auxiliary_models)) {
+      updated.auxiliary_models.forEach(item => _applyProfileAuxModelChip(item.task, item.model || ''));
+    }
+  } catch (_) {
+    if (_isCurrentProfileRuntimeHydration(profileName, token)) {
+      if (sel) {
+        if (priorSelValue && Array.from(sel.options).some(o => o.value === priorSelValue)) sel.value = priorSelValue;
+        else sel.value = '';
+      }
+      _applyProfileAuxModelChip(task, priorModel);
+    }
   }
 }
 
 // Click-outside / Escape closes the default-model dropdowns.
 document.addEventListener('click', (ev) => {
   if (!ev.target.closest('.profile-default-model-wrap')) _closeProfileDefaultDropdowns();
+  if (!ev.target.closest('.profile-aux-model-wrap')) _closeProfileAuxDropdowns();
 });
 document.addEventListener('keydown', (ev) => {
   if (ev.key === 'Escape') _closeProfileDefaultDropdowns();
+  if (ev.key === 'Escape') {
+    _closeProfileAuxDropdowns();
+    if ($('profileAuxModelsOverlay')) _closeProfileAuxModels();
+  }
 });
 
 // ── Skills tile — top-3 enabled chips ──────────────────────────────────
@@ -6573,10 +7459,6 @@ function _bindProfileOpsConsole(p, isActive, isDefault){
   }
   if (heroDescEdit) heroDescEdit.onclick = (ev) => { ev.stopPropagation(); enterDescEdit(); };
 
-  // Start Chat
-  const startChat = $('opsStartChat');
-  if (startChat) startChat.onclick = () => startChatWithProfile(profileName);
-
   // Make active (only present when profile is inactive)
   const makeActive = $('opsMakeActive');
   if (makeActive && !isActive) {
@@ -6596,7 +7478,7 @@ function _bindProfileOpsConsole(p, isActive, isDefault){
 
   // Hero overflow menu (top-right "⋯") — owns Rename / Change description /
   // Duplicate / Remove. The action buttons inline beneath the description
-  // are reserved for Make Active + Start Chat.
+  // are reserved for Make Active.
   const body = $('profileDetailBody');
   const heroMenuBtn = $('profileHeroMenuButton');
   const heroMenu = $('profileHeroMenu');
@@ -6690,15 +7572,39 @@ function _bindProfileOpsConsole(p, isActive, isDefault){
 function _opsOverflowOutsideClick(ev){ /* v2 only — no-op in v3 */ }
 function _opsOverflowEscape(ev){ /* v2 only — no-op in v3 */ }
 
+async function _profileChatDefaults(profileName){
+  const summary = (_profilesCache && Array.isArray(_profilesCache.profiles))
+    ? _profilesCache.profiles.find(p => p && p.name === profileName)
+    : null;
+  let settings = null;
+  if (_currentProfileDetail && _currentProfileDetail.name === profileName && _profileRuntimeSettings) {
+    settings = Object.assign({}, _currentProfileDetail, _profileRuntimeSettings);
+  } else {
+    try {
+      settings = await api('/api/profile/settings?name=' + encodeURIComponent(profileName) + '&include_avatar=0');
+    } catch (_) {
+      settings = {};
+    }
+  }
+  settings = settings || {};
+  const hasWorkspace = Object.prototype.hasOwnProperty.call(settings, 'default_workspace');
+  return {
+    profile: profileName,
+    model: settings.model || (summary && summary.model) || '',
+    model_provider: settings.provider || (summary && summary.provider) || null,
+    workspace: hasWorkspace ? (settings.default_workspace || null) : null,
+  };
+}
+
 async function startChatWithProfile(profileName){
   if (!profileName) return;
   try {
-    const currentActive = (S.activeProfile) || (_profilesCache && _profilesCache.active) || 'default';
-    if (profileName !== currentActive) {
-      await switchToProfile(profileName);
-    }
-    await newSession(true);
+    const defaults = await _profileChatDefaults(profileName);
+    await newSession(true, defaults);
     if (typeof switchPanel === 'function') switchPanel('chat');
+    if (typeof closeMobileSidebar === 'function') closeMobileSidebar();
+    const msg = $('msg');
+    if (msg) msg.focus();
   } catch (e) {
     showToast('Start chat failed: ' + (e.message || e));
   }
@@ -7201,8 +8107,9 @@ function renderProfileDropdown(data) {
   if (!dd) return;
   dd.innerHTML = '';
   const profiles = data.profiles || [];
-  const active = (S.activeProfile && profiles.some(p => p.name === S.activeProfile))
-    ? S.activeProfile
+  const selectedProfile = (typeof currentSessionProfile === 'function') ? currentSessionProfile() : S.activeProfile;
+  const active = (selectedProfile && profiles.some(p => p.name === selectedProfile))
+    ? selectedProfile
     : (data.active || 'default');
   _syncProfileAvatarState(data);
   for (const p of profiles) {
@@ -7210,7 +8117,8 @@ function renderProfileDropdown(data) {
     opt.className = 'profile-opt' + (p.name === active ? ' active' : '');
     const meta = [];
     if (p.model) meta.push(p.model.split('/').pop());
-    if (p.skill_count) meta.push(t('profile_skill_count', p.skill_count));
+    const skillsMeta = _profileSkillsCountMeta(p);
+    if (skillsMeta) meta.push(skillsMeta);
     const gwDot = `<span class="profile-opt-badge ${p.gateway_running ? 'running' : 'stopped'}"></span>`;
     const checkmark = p.name === active ? ' <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--link)" stroke-width="3" style="vertical-align:-1px"><polyline points="20 6 9 17 4 12"/></svg>' : '';
     const defaultBadge = p.is_default ? ` <span style="opacity:.5;font-weight:400">${esc(t('profile_default_label'))}</span>` : '';

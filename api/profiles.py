@@ -8,6 +8,9 @@ Profile switches update os.environ['HERMES_HOME'] and monkey-patch module-level
 cached paths in hermes-agent modules (skills_tool, skill_manager_tool,
 cron/jobs) that snapshot HERMES_HOME at import time.
 """
+import base64
+import copy
+import hashlib
 import json
 import logging
 import os
@@ -18,6 +21,7 @@ import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
 
@@ -967,6 +971,7 @@ _AVATAR_TYPES = {'emoji', 'url', 'asset', 'image'}
 _MAX_AVATAR_VALUE_LEN = 4 * 1024 * 1024
 _MAX_EMOJI_AVATAR_LEN = 64
 _IMAGE_AVATAR_RE = re.compile(r'^data:image/(png|jpeg|jpg|gif|webp);base64,[A-Za-z0-9+/=\s]+$')
+_IMAGE_AVATAR_CAPTURE_RE = re.compile(r'^data:(image/(?:png|jpeg|jpg|gif|webp));base64,([A-Za-z0-9+/=\s]+)$')
 
 
 def _validate_profile_settings_name(name: str) -> str:
@@ -1027,6 +1032,29 @@ def _save_profile_config_for_settings(profile_home: Path, config_data: dict) -> 
 # Mirrors api.config.VALID_REASONING_EFFORTS without importing — keeps profile
 # settings independent of the active-profile reasoning helpers in api.config.
 _VALID_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
+_PROFILE_RESPONSE_MODES = ("", "concise", "technical", "teacher", "kawaii", "hype")
+_PROFILE_COMPRESSION_DEFAULTS = {
+    'enabled': True,
+    'threshold': 0.5,
+    'target_ratio': 0.5,
+    'protect_last_n': 20,
+    'protect_first_n': 0,
+}
+_PROFILE_AUXILIARY_TASKS = (
+    {'task': 'vision', 'label': 'Vision', 'description': 'Image and multimodal interpretation.'},
+    {'task': 'web_extract', 'label': 'Web extraction', 'description': 'Extract and summarize web page content.'},
+    {'task': 'compression', 'label': 'Compression', 'description': 'Summarize long session context.'},
+    {'task': 'session_search', 'label': 'Session search', 'description': 'Search and synthesize prior sessions.'},
+    {'task': 'skills_hub', 'label': 'Skills hub', 'description': 'Skill discovery and routing support.'},
+    {'task': 'approval', 'label': 'Approval', 'description': 'Policy and approval helper calls.'},
+    {'task': 'mcp', 'label': 'MCP', 'description': 'MCP tool routing helper calls.'},
+    {'task': 'title_generation', 'label': 'Title generation', 'description': 'Short chat and session titles.'},
+    {'task': 'triage_specifier', 'label': 'Triage specifier', 'description': 'Clarify routing and task specification.'},
+    {'task': 'curator', 'label': 'Curator', 'description': 'Curated summaries and organization.'},
+)
+_PROFILE_AUXILIARY_TASK_META = {
+    item['task']: item for item in _PROFILE_AUXILIARY_TASKS
+}
 
 
 def _extract_profile_reasoning_effort(config_data: dict) -> str:
@@ -1080,6 +1108,394 @@ def _merge_profile_reasoning_effort(config_data: dict, effort) -> bool:
         # Removed the last key from agent; collapse the empty section.
         config_data.pop('agent', None)
     return changed
+
+
+def _extract_profile_fallback_model(config_data: dict) -> dict:
+    fallback_providers = (
+        config_data.get('fallback_providers') if isinstance(config_data, dict) else None
+    )
+    if not isinstance(fallback_providers, list) or not fallback_providers:
+        return {}
+    first = fallback_providers[0]
+    if not isinstance(first, dict):
+        return {}
+    provider = first.get('provider')
+    model = first.get('model')
+    provider_s = str(provider).strip() if provider is not None else ''
+    model_s = str(model).strip() if model is not None else ''
+    if not provider_s or not model_s:
+        return {}
+    return {'provider': provider_s, 'model': model_s}
+
+
+def _merge_profile_fallback_model(config_data: dict, value) -> bool:
+    before = config_data.get('fallback_providers')
+    if value is None or value == {} or value == '':
+        if 'fallback_providers' in config_data:
+            config_data.pop('fallback_providers', None)
+            return True
+        return False
+    if not isinstance(value, dict):
+        raise ValueError('fallback_model must be an object')
+    provider = value.get('provider')
+    model = value.get('model')
+    if not isinstance(provider, str) or not provider.strip():
+        raise ValueError('fallback_model.provider is required')
+    if not isinstance(model, str) or not model.strip():
+        raise ValueError('fallback_model.model is required')
+    fallback_providers = [{
+        'provider': provider.strip(),
+        'model': model.strip(),
+    }]
+    config_data['fallback_providers'] = fallback_providers
+    return before != fallback_providers
+
+
+def _extract_profile_response_mode(config_data: dict) -> str:
+    agent_cfg = config_data.get('agent') if isinstance(config_data, dict) else None
+    if not isinstance(agent_cfg, dict):
+        return ''
+    raw = agent_cfg.get('personality')
+    return str(raw).strip().lower() if isinstance(raw, str) else ''
+
+
+def _merge_profile_response_mode(config_data: dict, value) -> bool:
+    if value is None:
+        value = ''
+    if not isinstance(value, str):
+        raise ValueError('response_mode must be a string')
+    mode = value.strip().lower()
+    if mode not in _PROFILE_RESPONSE_MODES:
+        raise ValueError(
+            f"Unknown response mode '{value}'. "
+            f"Valid: {', '.join(m or 'default' for m in _PROFILE_RESPONSE_MODES)}."
+        )
+    agent_cfg = config_data.get('agent')
+    if not isinstance(agent_cfg, dict):
+        agent_cfg = {}
+        had_agent = False
+    else:
+        agent_cfg = dict(agent_cfg)
+        had_agent = True
+    before = agent_cfg.get('personality')
+    if not mode:
+        if 'personality' in agent_cfg:
+            agent_cfg.pop('personality', None)
+            changed = True
+        else:
+            changed = False
+    else:
+        agent_cfg['personality'] = mode
+        changed = before != mode
+    if not changed and had_agent:
+        return False
+    if agent_cfg:
+        config_data['agent'] = agent_cfg
+    elif had_agent:
+        config_data.pop('agent', None)
+    return changed
+
+
+def _coerce_profile_unit_interval(value, field: str) -> float:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ValueError(f'compression.{field} must be a number')
+    return max(0.0, min(1.0, float(value)))
+
+
+def _coerce_profile_nonnegative_int(value, field: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f'compression.{field} must be an integer')
+    try:
+        result = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f'compression.{field} must be an integer') from exc
+    if result < 0:
+        raise ValueError(f'compression.{field} must be >= 0')
+    return result
+
+
+def _extract_profile_compression(config_data: dict) -> dict:
+    compression_cfg = config_data.get('compression') if isinstance(config_data, dict) else None
+    if not isinstance(compression_cfg, dict):
+        return dict(_PROFILE_COMPRESSION_DEFAULTS)
+    result = dict(_PROFILE_COMPRESSION_DEFAULTS)
+    for field in ('threshold', 'target_ratio'):
+        raw = compression_cfg.get(field)
+        if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+            result[field] = max(0.0, min(1.0, float(raw)))
+    for field in ('protect_last_n', 'protect_first_n'):
+        raw = compression_cfg.get(field)
+        if isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0:
+            result[field] = raw
+    return result
+
+
+def _merge_profile_compression(config_data: dict, value) -> bool:
+    if value is None:
+        if 'compression' in config_data:
+            config_data.pop('compression', None)
+            return True
+        return False
+    if not isinstance(value, dict):
+        raise ValueError('compression must be an object')
+    current = config_data.get('compression')
+    compression_cfg = dict(current) if isinstance(current, dict) else {}
+    before = dict(compression_cfg)
+    if 'enabled' in value:
+        if not isinstance(value['enabled'], bool):
+            raise ValueError('compression.enabled must be a boolean')
+    for field in ('threshold', 'target_ratio'):
+        if field in value:
+            compression_cfg[field] = _coerce_profile_unit_interval(value[field], field)
+    for field in ('protect_last_n', 'protect_first_n'):
+        if field in value:
+            compression_cfg[field] = _coerce_profile_nonnegative_int(value[field], field)
+    compression_cfg['enabled'] = True
+    if compression_cfg:
+        config_data['compression'] = compression_cfg
+    elif isinstance(current, dict):
+        config_data.pop('compression', None)
+    return before != compression_cfg
+
+
+def _extract_profile_max_turns(config_data: dict) -> int | None:
+    agent_cfg = config_data.get('agent') if isinstance(config_data, dict) else None
+    if not isinstance(agent_cfg, dict):
+        return None
+    raw = agent_cfg.get('max_turns')
+    if isinstance(raw, bool):
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if 1 <= value <= 1000 else None
+
+
+def _merge_profile_max_turns(config_data: dict, value) -> bool:
+    agent_cfg = config_data.get('agent')
+    if not isinstance(agent_cfg, dict):
+        agent_cfg = {}
+        had_agent = False
+    else:
+        agent_cfg = dict(agent_cfg)
+        had_agent = True
+    before = agent_cfg.get('max_turns')
+    if value is None or value == '':
+        if 'max_turns' in agent_cfg:
+            agent_cfg.pop('max_turns', None)
+            changed = True
+        else:
+            changed = False
+    else:
+        if isinstance(value, bool):
+            raise ValueError('max_turns must be an integer')
+        try:
+            turns = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError('max_turns must be an integer') from exc
+        if turns < 1 or turns > 1000:
+            raise ValueError('max_turns must be between 1 and 1000')
+        agent_cfg['max_turns'] = turns
+        changed = before != turns
+    if not changed and had_agent:
+        return False
+    if agent_cfg:
+        config_data['agent'] = agent_cfg
+    elif had_agent:
+        config_data.pop('agent', None)
+    return changed
+
+
+def _clean_profile_optional_string(value, field: str) -> str:
+    if value is None:
+        return ''
+    if not isinstance(value, str):
+        raise ValueError(f'{field} must be a string')
+    return value.strip()
+
+
+def _extract_profile_auxiliary_models(config_data: dict) -> list[dict]:
+    auxiliary_cfg = config_data.get('auxiliary') if isinstance(config_data, dict) else None
+    if not isinstance(auxiliary_cfg, dict):
+        auxiliary_cfg = {}
+    result = []
+    for meta in _PROFILE_AUXILIARY_TASKS:
+        task = meta['task']
+        task_cfg = auxiliary_cfg.get(task)
+        if not isinstance(task_cfg, dict):
+            task_cfg = {}
+        provider = task_cfg.get('provider')
+        model = task_cfg.get('model')
+        result.append({
+            'task': task,
+            'label': meta['label'],
+            'description': meta['description'],
+            'provider': provider.strip() if isinstance(provider, str) else '',
+            'model': model.strip() if isinstance(model, str) else '',
+        })
+    return result
+
+
+def _normalize_profile_auxiliary_model_updates(value) -> list[dict]:
+    if isinstance(value, dict):
+        raw_items = []
+        for task, task_value in value.items():
+            if task_value is None or task_value == '':
+                raw_items.append({'task': task, 'provider': '', 'model': ''})
+            elif isinstance(task_value, dict):
+                item = dict(task_value)
+                item['task'] = task
+                raw_items.append(item)
+            else:
+                raise ValueError('auxiliary_models entries must be objects')
+    elif isinstance(value, list):
+        raw_items = value
+    else:
+        raise ValueError('auxiliary_models must be a list or object')
+
+    normalized = []
+    seen = set()
+    for raw_item in raw_items:
+        if not isinstance(raw_item, dict):
+            raise ValueError('auxiliary_models entries must be objects')
+        task = _clean_profile_optional_string(raw_item.get('task'), 'auxiliary_models.task')
+        if task not in _PROFILE_AUXILIARY_TASK_META:
+            raise ValueError(f"Unknown auxiliary model task '{task}'")
+        provider = raw_item.get('provider', _MISSING)
+        model = raw_item.get('model', _MISSING)
+        if provider is not _MISSING:
+            provider = _clean_profile_optional_string(provider, f'auxiliary.{task}.provider')
+        if model is not _MISSING:
+            model = _clean_profile_optional_string(model, f'auxiliary.{task}.model')
+        normalized_item = {'task': task}
+        if provider is not _MISSING:
+            normalized_item['provider'] = provider
+        if model is not _MISSING:
+            normalized_item['model'] = model
+        if 'provider' not in normalized_item and 'model' not in normalized_item:
+            continue
+        if task in seen:
+            normalized = [item for item in normalized if item['task'] != task]
+        seen.add(task)
+        normalized.append(normalized_item)
+    return normalized
+
+
+def _merge_profile_auxiliary_models(config_data: dict, value) -> bool:
+    updates = _normalize_profile_auxiliary_model_updates(value)
+    current = config_data.get('auxiliary')
+    auxiliary_cfg = copy.deepcopy(current) if isinstance(current, dict) else {}
+    before = copy.deepcopy(auxiliary_cfg)
+    for update in updates:
+        task = update['task']
+        task_cfg = auxiliary_cfg.get(task)
+        task_cfg = dict(task_cfg) if isinstance(task_cfg, dict) else {}
+        provider = update.get('provider', _MISSING)
+        model = update.get('model', _MISSING)
+        should_clear = (
+            (provider is not _MISSING and provider == '')
+            or (model is not _MISSING and model == '')
+        )
+        if should_clear:
+            task_cfg.pop('provider', None)
+            task_cfg.pop('model', None)
+        else:
+            if provider is not _MISSING:
+                task_cfg['provider'] = provider
+            if model is not _MISSING:
+                task_cfg['model'] = model
+        if task_cfg:
+            auxiliary_cfg[task] = task_cfg
+        else:
+            auxiliary_cfg.pop(task, None)
+
+    if auxiliary_cfg:
+        config_data['auxiliary'] = auxiliary_cfg
+    elif isinstance(current, dict):
+        config_data.pop('auxiliary', None)
+    return before != auxiliary_cfg
+
+
+def _extract_profile_toolsets(config_data: dict) -> list[str]:
+    platform_cfg = config_data.get('platform_toolsets') if isinstance(config_data, dict) else None
+    cli_toolsets = platform_cfg.get('cli') if isinstance(platform_cfg, dict) else None
+    if not isinstance(cli_toolsets, list):
+        return []
+    result = []
+    seen = set()
+    for item in cli_toolsets:
+        if not isinstance(item, str):
+            continue
+        toolset = item.strip()
+        if toolset and toolset not in seen:
+            seen.add(toolset)
+            result.append(toolset)
+    return result
+
+
+def _profile_toolsets_configured(config_data: dict) -> bool:
+    platform_cfg = config_data.get('platform_toolsets') if isinstance(config_data, dict) else None
+    return isinstance(platform_cfg, dict) and isinstance(platform_cfg.get('cli'), list)
+
+
+def _normalize_profile_toolsets(value) -> list[str]:
+    if not isinstance(value, list):
+        raise ValueError('toolsets must be a list')
+    result = []
+    seen = set()
+    for item in value:
+        if not isinstance(item, str):
+            raise ValueError('toolsets entries must be strings')
+        toolset = item.strip()
+        if toolset and toolset not in seen:
+            seen.add(toolset)
+            result.append(toolset)
+    return result
+
+
+def _merge_profile_toolsets(config_data: dict, value) -> bool:
+    toolsets = _normalize_profile_toolsets(value)
+    current = config_data.get('platform_toolsets')
+    platform_cfg = dict(current) if isinstance(current, dict) else {}
+    before = list(platform_cfg.get('cli')) if isinstance(platform_cfg.get('cli'), list) else None
+    platform_cfg['cli'] = toolsets
+    config_data['platform_toolsets'] = platform_cfg
+    return before != toolsets
+
+
+def _extract_profile_default_workspace(config_data: dict) -> str:
+    if not isinstance(config_data, dict):
+        return ''
+    workspace = config_data.get('workspace')
+    if isinstance(workspace, str) and workspace.strip():
+        return workspace.strip()
+    default_workspace = config_data.get('default_workspace')
+    if isinstance(default_workspace, str) and default_workspace.strip():
+        return default_workspace.strip()
+    return ''
+
+
+def _merge_profile_default_workspace(config_data: dict, value) -> bool:
+    if value is None:
+        workspace = ''
+    elif isinstance(value, str):
+        workspace = value.strip()
+    else:
+        raise ValueError('default_workspace must be a string')
+
+    if not workspace:
+        changed = 'workspace' in config_data or 'default_workspace' in config_data
+        config_data.pop('workspace', None)
+        config_data.pop('default_workspace', None)
+        return changed
+
+    key = 'workspace'
+    if 'workspace' not in config_data and 'default_workspace' in config_data:
+        key = 'default_workspace'
+    before = config_data.get(key)
+    config_data[key] = workspace
+    return before != workspace
 
 
 def _extract_profile_model_settings(config_data: dict) -> tuple[str | None, str | None]:
@@ -1184,6 +1600,57 @@ def _read_profile_avatar_for_home(profile_home: Path):
     return avatar if isinstance(avatar, dict) else None
 
 
+def _profile_avatar_for_summary(name: str, profile_home: Path):
+    """Return avatar metadata suitable for profile list/dropdown payloads.
+
+    Uploaded avatars are persisted as data URLs and can be several MB. Summary
+    responses only need a renderable reference, so expose those images through
+    an authenticated lazy image route instead of embedding the full data URL in
+    every `/api/profiles` response.
+    """
+    avatar = _read_profile_avatar_for_home(profile_home)
+    if not isinstance(avatar, dict):
+        return None
+    avatar_type = str(avatar.get('type') or '').strip().lower()
+    value = avatar.get('value')
+    if avatar_type != 'image' or not isinstance(value, str) or not value:
+        return avatar
+    digest = hashlib.sha256(value.encode('utf-8')).hexdigest()[:16]
+    return {
+        'type': 'asset',
+        'value': f'api/profile/avatar-image?name={quote(name, safe="")}&v={digest}',
+    }
+
+
+def read_profile_avatar_image_api(name: str) -> tuple[bytes, str, str]:
+    """Return decoded uploaded avatar image bytes for *name*.
+
+    Returns ``(payload, content_type, etag)``. Only uploaded data-image avatars
+    are served here; emoji, URL, and asset avatars remain inline metadata.
+    """
+    name, profile_home = _require_profile_home_for_settings(name)
+    avatar = _read_profile_avatar_for_home(profile_home)
+    if not isinstance(avatar, dict) or str(avatar.get('type') or '').strip().lower() != 'image':
+        raise FileNotFoundError(f"Profile '{name}' has no uploaded avatar image.")
+    value = avatar.get('value')
+    if not isinstance(value, str):
+        raise FileNotFoundError(f"Profile '{name}' has no uploaded avatar image.")
+    match = _IMAGE_AVATAR_CAPTURE_RE.fullmatch(value)
+    if not match:
+        raise ValueError('Stored profile avatar image is invalid.')
+    content_type = match.group(1)
+    raw_b64 = ''.join(match.group(2).split())
+    payload = base64.b64decode(raw_b64, validate=True)
+    etag = hashlib.sha256(value.encode('utf-8')).hexdigest()[:16]
+    return payload, content_type, etag
+
+
+def get_profile_avatar_summary_api(name: str):
+    """Return lightweight avatar metadata for topbar/list style surfaces."""
+    name, profile_home = _require_profile_home_for_settings(name)
+    return _profile_avatar_for_summary(name, profile_home)
+
+
 def _normalize_avatar_payload(avatar):
     if avatar is None:
         return None
@@ -1218,7 +1685,7 @@ def _normalize_avatar_payload(avatar):
     return {'type': avatar_type, 'value': value}
 
 
-def get_profile_settings_api(name: str) -> dict:
+def get_profile_settings_api(name: str, *, include_avatar: bool = True) -> dict:
     """Return structured WebUI settings for a profile."""
     name, profile_home = _require_profile_home_for_settings(name)
     config_data = _load_profile_config_for_settings(profile_home)
@@ -1227,8 +1694,16 @@ def get_profile_settings_api(name: str) -> dict:
         'name': name,
         'provider': provider,
         'model': model,
-        'avatar': _read_profile_avatar_for_home(profile_home),
+        'avatar': _read_profile_avatar_for_home(profile_home) if include_avatar else None,
         'reasoning_effort': _extract_profile_reasoning_effort(config_data),
+        'fallback_model': _extract_profile_fallback_model(config_data),
+        'response_mode': _extract_profile_response_mode(config_data),
+        'compression': _extract_profile_compression(config_data),
+        'max_turns': _extract_profile_max_turns(config_data),
+        'auxiliary_models': _extract_profile_auxiliary_models(config_data),
+        'toolsets': _extract_profile_toolsets(config_data),
+        'toolsets_configured': _profile_toolsets_configured(config_data),
+        'default_workspace': _extract_profile_default_workspace(config_data),
         'description': _extract_profile_description(config_data),
     }
 
@@ -1548,19 +2023,29 @@ def read_profile_persona_api(name: str) -> dict:
 
 def update_profile_settings_api(name: str, *, provider=_MISSING, model=_MISSING,
                                 avatar=_MISSING, reasoning_effort=_MISSING,
-                                description=_MISSING) -> dict:
-    """Update model/provider, reasoning effort, description and/or WebUI avatar metadata."""
+                                description=_MISSING, fallback_model=_MISSING,
+                                response_mode=_MISSING, compression=_MISSING,
+                                max_turns=_MISSING, auxiliary_models=_MISSING,
+                                toolsets=_MISSING, default_workspace=_MISSING) -> dict:
+    """Update profile runtime settings and/or WebUI avatar metadata."""
     if (provider is _MISSING and model is _MISSING
             and avatar is _MISSING and reasoning_effort is _MISSING
-            and description is _MISSING):
+            and description is _MISSING and fallback_model is _MISSING
+            and response_mode is _MISSING and compression is _MISSING
+            and max_turns is _MISSING and auxiliary_models is _MISSING
+            and toolsets is _MISSING and default_workspace is _MISSING):
         raise ValueError(
-            'At least one of provider, model, avatar, reasoning_effort, or description is required'
+            'At least one profile setting is required'
         )
     name, profile_home = _require_profile_home_for_settings(name)
 
     needs_yaml_write = (
         provider is not _MISSING or model is not _MISSING
         or reasoning_effort is not _MISSING or description is not _MISSING
+        or fallback_model is not _MISSING or response_mode is not _MISSING
+        or compression is not _MISSING or max_turns is not _MISSING
+        or auxiliary_models is not _MISSING or toolsets is not _MISSING
+        or default_workspace is not _MISSING
     )
     invalidate_models = False
     if needs_yaml_write:
@@ -1572,6 +2057,27 @@ def update_profile_settings_api(name: str, *, provider=_MISSING, model=_MISSING,
                 invalidate_models = True
         if reasoning_effort is not _MISSING:
             if _merge_profile_reasoning_effort(config_data, reasoning_effort):
+                config_changed = True
+        if fallback_model is not _MISSING:
+            if _merge_profile_fallback_model(config_data, fallback_model):
+                config_changed = True
+        if response_mode is not _MISSING:
+            if _merge_profile_response_mode(config_data, response_mode):
+                config_changed = True
+        if compression is not _MISSING:
+            if _merge_profile_compression(config_data, compression):
+                config_changed = True
+        if max_turns is not _MISSING:
+            if _merge_profile_max_turns(config_data, max_turns):
+                config_changed = True
+        if auxiliary_models is not _MISSING:
+            if _merge_profile_auxiliary_models(config_data, auxiliary_models):
+                config_changed = True
+        if toolsets is not _MISSING:
+            if _merge_profile_toolsets(config_data, toolsets):
+                config_changed = True
+        if default_workspace is not _MISSING:
+            if _merge_profile_default_workspace(config_data, default_workspace):
                 config_changed = True
         if description is not _MISSING:
             if _merge_profile_description(config_data, description):
@@ -1594,19 +2100,23 @@ def update_profile_settings_api(name: str, *, provider=_MISSING, model=_MISSING,
     return get_profile_settings_api(name)
 
 
-def list_profiles_api() -> list:
+def list_profiles_api(include_skill_counts: bool = False,
+                      include_full_avatars: bool = False) -> list:
     """List all profiles with metadata, serialized for JSON response."""
     try:
         from hermes_cli.profiles import list_profiles
         infos = list_profiles()
     except ImportError:
         # hermes_cli not available -- return just the default
-        return [_default_profile_dict()]
+        return [_default_profile_dict(
+            include_skill_counts=include_skill_counts,
+            include_full_avatars=include_full_avatars,
+        )]
 
     active = get_active_profile_name()
     result = []
     for p in infos:
-        result.append({
+        row = {
             'name': p.name,
             'path': str(p.path),
             'is_default': p.is_default,
@@ -1614,16 +2124,29 @@ def list_profiles_api() -> list:
             'gateway_running': p.gateway_running,
             'model': p.model,
             'provider': p.provider,
-            'avatar': _read_profile_avatar_for_home(Path(p.path)),
+            'avatar': (
+                _read_profile_avatar_for_home(Path(p.path))
+                if include_full_avatars
+                else _profile_avatar_for_summary(p.name, Path(p.path))
+            ),
             'has_env': p.has_env,
             'skill_count': p.skill_count,
-        })
+        }
+        if include_skill_counts:
+            enabled_count, total_count = _profile_skill_counts_for_summary(
+                p.name,
+                Path(p.path),
+            )
+            row['skill_enabled_count'] = enabled_count
+            row['skill_total'] = total_count
+        result.append(row)
     return result
 
 
-def _default_profile_dict() -> dict:
+def _default_profile_dict(include_skill_counts: bool = False,
+                          include_full_avatars: bool = False) -> dict:
     """Fallback profile dict when hermes_cli is not importable."""
-    return {
+    row = {
         'name': 'default',
         'path': str(_DEFAULT_HERMES_HOME),
         'is_default': True,
@@ -1631,10 +2154,22 @@ def _default_profile_dict() -> dict:
         'gateway_running': False,
         'model': None,
         'provider': None,
-        'avatar': _read_profile_avatar_for_home(_DEFAULT_HERMES_HOME),
+        'avatar': (
+            _read_profile_avatar_for_home(_DEFAULT_HERMES_HOME)
+            if include_full_avatars
+            else _profile_avatar_for_summary('default', _DEFAULT_HERMES_HOME)
+        ),
         'has_env': (_DEFAULT_HERMES_HOME / '.env').exists(),
         'skill_count': 0,
     }
+    if include_skill_counts:
+        enabled_count, total_count = _profile_skill_counts_for_summary(
+            'default',
+            _DEFAULT_HERMES_HOME,
+        )
+        row['skill_enabled_count'] = enabled_count
+        row['skill_total'] = total_count
+    return row
 
 
 def _validate_profile_name(name: str):
@@ -2181,14 +2716,61 @@ def _get_external_skills_dirs() -> list:
         return []
 
 
-def list_profile_skills_api(name: str) -> dict:
-    """Return the skills installed for *name*, including external skill dirs.
+def _append_existing_skill_dir(dirs: list[Path], path: Path) -> None:
+    """Append *path* once when it is an existing skill directory."""
+    if path.is_dir() and path not in dirs:
+        dirs.append(path)
 
-    Scans both the per-profile ``skills/`` directory AND the external skill
-    roots returned by :func:`_get_external_skills_dirs` (typically the
-    hermes-agent's bundled skill dir).  Real deployments install most skills
-    in the agent's bundled dir, not the per-profile dir, so the old
-    profile-only scan returned 0 skills on almost every installation.
+
+def _all_profile_skill_search_dirs(profile_home: Path) -> list[Path]:
+    """Return the Hermes-wide skill universe with selected-profile precedence.
+
+    The UI lets every profile enable/disable skills from the same available
+    skill set. A profile's local ``skills/`` directory can override metadata
+    for duplicate names, but the denominator must come from every skill root
+    Hermes can see, not only the selected profile's local folder.
+    """
+    dirs: list[Path] = []
+    _append_existing_skill_dir(dirs, profile_home / "skills")
+    _append_existing_skill_dir(dirs, _DEFAULT_HERMES_HOME / "skills")
+
+    profiles_root = _DEFAULT_HERMES_HOME / "profiles"
+    if profiles_root.is_dir():
+        for child in sorted(profiles_root.iterdir(), key=lambda p: p.name.lower()):
+            if child.is_dir():
+                _append_existing_skill_dir(dirs, child / "skills")
+
+    for ext in _get_external_skills_dirs():
+        try:
+            ext_path = Path(ext)
+        except Exception:
+            continue
+        _append_existing_skill_dir(dirs, ext_path)
+    return dirs
+
+
+def _profile_skill_counts_for_summary(name: str, profile_home: Path | None = None) -> tuple[int, int]:
+    """Return (enabled_count, total_count) for lightweight profile summaries."""
+    try:
+        if profile_home is None:
+            if _is_root_profile(name):
+                profile_home = _DEFAULT_HERMES_HOME
+            else:
+                profile_home = _resolve_named_profile_home(name)
+        data = _list_profile_skills_for_home(name, Path(profile_home))
+        return int(data.get("enabled_count") or 0), int(data.get("total_count") or 0)
+    except Exception:
+        logger.debug("Failed to compute profile skill summary for %s", name, exc_info=True)
+        return 0, 0
+
+
+def list_profile_skills_api(name: str) -> dict:
+    """Return the Hermes-wide skills available to *name*.
+
+    The denominator is shared across profiles: it scans every visible Hermes
+    skill root (selected profile first for duplicate-name precedence, default
+    profile, named profile folders, and external/bundled dirs). The selected
+    profile's ``skills.disabled`` config is the only per-profile count input.
 
     The disabled set is read from ``<profile-home>/config.yaml`` (key
     ``skills.disabled``).  Disabled skills are INCLUDED in the response list
@@ -2202,8 +2784,6 @@ def list_profile_skills_api(name: str) -> dict:
         FileNotFoundError: profile home directory does not exist.
         ValueError: *name* fails basic validation.
     """
-    import yaml as _yaml
-
     _validate_profile_settings_name(name)
     if _is_root_profile(name):
         profile_home = _DEFAULT_HERMES_HOME
@@ -2212,6 +2792,12 @@ def list_profile_skills_api(name: str) -> dict:
 
     if not profile_home.is_dir():
         raise FileNotFoundError(f"Profile '{name}' not found.")
+
+    return _list_profile_skills_for_home(name, profile_home)
+
+
+def _list_profile_skills_for_home(name: str, profile_home: Path) -> dict:
+    import yaml as _yaml
 
     # --- Read disabled set from config.yaml ---
     disabled_set: set[str] = set()
@@ -2226,20 +2812,7 @@ def list_profile_skills_api(name: str) -> dict:
         except Exception:
             disabled_set = set()
 
-    # --- Build ordered list of skill search roots ---
-    # Profile-local dir first (takes precedence for deduplication), then
-    # external dirs from the agent's bundled location.
-    search_dirs: list[Path] = []
-    profile_skills_dir = profile_home / "skills"
-    if profile_skills_dir.is_dir():
-        search_dirs.append(profile_skills_dir)
-    for ext in _get_external_skills_dirs():
-        try:
-            ext_path = Path(ext)
-        except Exception:
-            continue
-        if ext_path.is_dir() and ext_path not in search_dirs:
-            search_dirs.append(ext_path)
+    search_dirs = _all_profile_skill_search_dirs(profile_home)
 
     if not search_dirs:
         return {
@@ -2509,11 +3082,9 @@ def set_profile_disabled_skills_api(name: str, disabled_list: list) -> dict:
 def resolve_profile_skill_file(name: str, skill: str):
     """Return the ``Path`` to the SKILL.md for *skill* visible to *name*.
 
-    Searches the same ordered set of skill roots that ``list_profile_skills_api``
-    uses: the profile-local ``skills/`` directory first, then external dirs
-    from ``_get_external_skills_dirs()``.  A match is found when the containing
-    directory name equals *skill*, OR when the frontmatter ``name:`` field
-    equals *skill*.
+    Searches the same Hermes-wide skill roots that ``list_profile_skills_api``
+    uses. A match is found when the containing directory name equals *skill*,
+    OR when the frontmatter ``name:`` field equals *skill*.
 
     Args:
         name:  Profile name.
@@ -2538,18 +3109,7 @@ def resolve_profile_skill_file(name: str, skill: str):
     if not profile_home.is_dir():
         raise FileNotFoundError(f"Profile '{name}' not found.")
 
-    # Build the same ordered search-root list as list_profile_skills_api.
-    search_dirs: list[Path] = []
-    profile_skills_dir = profile_home / "skills"
-    if profile_skills_dir.is_dir():
-        search_dirs.append(profile_skills_dir)
-    for ext in _get_external_skills_dirs():
-        try:
-            ext_path = Path(ext)
-        except Exception:
-            continue
-        if ext_path.is_dir() and ext_path not in search_dirs:
-            search_dirs.append(ext_path)
+    search_dirs = _all_profile_skill_search_dirs(profile_home)
 
     if not search_dirs:
         raise FileNotFoundError(f"Skill '{skill}' not found in profile '{name}'.")

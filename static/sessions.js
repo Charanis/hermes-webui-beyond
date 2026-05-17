@@ -379,6 +379,10 @@ function _markPollingCompletionUnreadTransitions(sessions) {
   }
 }
 
+function currentSessionProfile(){
+  return (S.session&&S.session.profile)||S.activeProfile||'default';
+}
+
 async function newSession(flash, options={}){
   updateQueueBadge();
   S.toolCalls=[];
@@ -387,28 +391,37 @@ async function newSession(flash, options={}){
   // switch, then cleared.  Use a dedicated flag so S._profileDefaultWorkspace (the
   // persistent boot/settings default) is not consumed and remains available for the
   // blank-page display on all subsequent returns to the empty state (#823).
-  const switchWs=S._profileSwitchWorkspace;
-  S._profileSwitchWorkspace=null;
-  const inheritWs=switchWs||(S.session?S.session.workspace:null)||(S._profileDefaultWorkspace||null);
+  const hasOption=(key)=>options&&Object.prototype.hasOwnProperty.call(options,key);
+  const explicitWorkspace=hasOption('workspace');
+  const switchWs=explicitWorkspace?null:S._profileSwitchWorkspace;
+  if(!explicitWorkspace) S._profileSwitchWorkspace=null;
+  const inheritWs=explicitWorkspace
+    ? (options.workspace||null)
+    : (switchWs||(S.session?S.session.workspace:null)||(S._profileDefaultWorkspace||null));
+  const targetProfile=String(hasOption('profile')?options.profile:(S.activeProfile||'default')).trim()||'default';
   // Use the saved default model for new sessions (#872). The user's saved
   // default_model (from Settings) takes priority over the chat-header dropdown
   // value, which reflects the *previous* session's model. Fall back to the
   // dropdown value only when no default_model is configured.
   const modelSel=$('modelSelect');
-  const selectedDefaultModel=window._defaultModel||(modelSel&&modelSel.value)||'';
+  const explicitModel=hasOption('model')&&String(options.model||'').trim();
+  const explicitProvider=hasOption('model_provider')?options.model_provider:null;
+  const selectedDefaultModel=explicitModel?String(options.model||'').trim():(window._defaultModel||(modelSel&&modelSel.value)||'');
   let defaultApplied=false;
-  if(window._defaultModel&&modelSel&&typeof _applyModelToDropdown==='function'){
+  if(!explicitModel&&window._defaultModel&&modelSel&&typeof _applyModelToDropdown==='function'){
     defaultApplied=!!_applyModelToDropdown(window._defaultModel,modelSel,window._activeProvider||null);
   }
-  const canQualify=!window._defaultModel||defaultApplied||(modelSel&&modelSel.value===selectedDefaultModel);
-  const newModelState=(canQualify&&typeof _modelStateForSelect==='function')
+  const canQualify=explicitModel||!window._defaultModel||defaultApplied||(modelSel&&modelSel.value===selectedDefaultModel);
+  const newModelState=explicitModel
+    ? {model:selectedDefaultModel,model_provider:explicitProvider||null}
+    : (canQualify&&typeof _modelStateForSelect==='function')
     ? _modelStateForSelect(modelSel,selectedDefaultModel)
     : {model:selectedDefaultModel,model_provider:null};
   const reqBody={
     model:newModelState.model,
     model_provider:newModelState.model_provider||null,
     workspace:inheritWs,
-    profile:S.activeProfile||'default',
+    profile:targetProfile,
   };
   if(options&&options.worktree) reqBody.worktree=true;
   if(_activeProject&&_activeProject!==NO_PROJECT_FILTER) reqBody.project_id=_activeProject;
@@ -1846,7 +1859,9 @@ async function renderSessionList(opts={}){
   if(!deferWhileInteracting) _pendingSessionListPayload=null;
   try{
     if(!($('sessionSearch').value||'').trim()) _contentSearchResults = [];
-    const allProfilesQS = _showAllProfiles ? '?all_profiles=1' : '';
+    const sessionProfile=S.session&&S.session.profile;
+    const needsCurrentProfile=Boolean(sessionProfile&&S.activeProfile&&sessionProfile!==S.activeProfile);
+    const allProfilesQS = (_showAllProfiles||needsCurrentProfile) ? '?all_profiles=1' : '';
     const [sessData, projData] = await Promise.all([
       api('/api/sessions' + allProfilesQS),
       api('/api/projects' + allProfilesQS),

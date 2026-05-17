@@ -4086,6 +4086,34 @@ def handle_get(handler, parsed) -> bool:
         except ValueError as exc:
             return bad(handler, str(exc), status=400)
 
+    if parsed.path == "/api/profile/avatar-image":
+        qs = parse_qs(parsed.query)
+        name = qs.get("name", [""])[0]
+        if not name:
+            return bad(handler, "name is required")
+        try:
+            from api.profiles import read_profile_avatar_image_api
+            payload, content_type, etag = read_profile_avatar_image_api(name)
+        except FileNotFoundError as e:
+            return bad(handler, _sanitize_error(e), 404)
+        except ValueError as e:
+            return bad(handler, _sanitize_error(e), 400)
+        if handler.headers.get("If-None-Match") == etag:
+            handler.send_response(304)
+            handler.send_header("ETag", etag)
+            handler.send_header("Cache-Control", "private, max-age=86400")
+            handler.end_headers()
+            return True
+        handler.send_response(200)
+        handler.send_header("Content-Type", content_type)
+        handler.send_header("Content-Length", str(len(payload)))
+        handler.send_header("Cache-Control", "private, max-age=86400")
+        handler.send_header("ETag", etag)
+        _security_headers(handler)
+        handler.end_headers()
+        handler.wfile.write(payload)
+        return True
+
     if parsed.path == "/api/profile/skill_content":
         from api.profiles import resolve_profile_skill_file
         qs = parse_qs(parsed.query)
@@ -4188,19 +4216,38 @@ def handle_get(handler, parsed) -> bool:
     # ── Profile API (GET) ──
     if parsed.path == "/api/profiles":
         from api.profiles import list_profiles_api, get_active_profile_name
+        qs = parse_qs(parsed.query)
+        include_skill_counts = (qs.get("include_skill_counts", ["0"])[0] or "").lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        include_full_avatars = (qs.get("include_full_avatars", ["0"])[0] or "").lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
 
         return j(
             handler,
-            {"profiles": list_profiles_api(), "active": get_active_profile_name()},
+            {
+                "profiles": list_profiles_api(
+                    include_skill_counts=include_skill_counts,
+                    include_full_avatars=include_full_avatars,
+                ),
+                "active": get_active_profile_name(),
+            },
         )
 
     if parsed.path == "/api/profile/active":
-        from api.profiles import get_active_profile_name, get_active_hermes_home, get_profile_settings_api
+        from api.profiles import get_active_profile_name, get_active_hermes_home, get_profile_avatar_summary_api
 
         name = get_active_profile_name()
         payload = {"name": name, "path": str(get_active_hermes_home())}
         try:
-            payload["avatar"] = get_profile_settings_api(name).get("avatar")
+            payload["avatar"] = get_profile_avatar_summary_api(name)
         except Exception:
             payload["avatar"] = None
         return j(handler, payload)
@@ -4212,8 +4259,14 @@ def handle_get(handler, parsed) -> bool:
         name = str(qs.get("name", [""])[0] or "").strip()
         if not name:
             return bad(handler, "name is required")
+        include_avatar = (qs.get("include_avatar", ["1"])[0] or "").lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }
         try:
-            return j(handler, get_profile_settings_api(name))
+            return j(handler, get_profile_settings_api(name, include_avatar=include_avatar))
         except FileNotFoundError as e:
             return bad(handler, _sanitize_error(e), 404)
         except ValueError as e:
@@ -5424,7 +5477,11 @@ def handle_post(handler, parsed) -> bool:
         if not name:
             return bad(handler, "name is required")
         updates = {}
-        for key in ("provider", "model", "avatar", "reasoning_effort", "description"):
+        for key in (
+            "provider", "model", "avatar", "reasoning_effort", "description",
+            "fallback_model", "response_mode", "compression", "max_turns",
+            "auxiliary_models", "toolsets", "default_workspace",
+        ):
             if key in body:
                 updates[key] = body.get(key)
         try:

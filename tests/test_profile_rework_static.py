@@ -3,7 +3,7 @@
 These grep the frontend source for structural contracts: the v3 helpers
 exist, the v2 helpers are gone, the files grid uses Lucide icons rather
 than single-letter badges, the gateway tile has the wifi indicator, and
-the runtime panel exposes the provider chip. A regression that silently
+the Runtime tile reuses the composer model picker. A regression that silently
 deletes one of these signals is caught here without needing a browser.
 """
 
@@ -14,11 +14,15 @@ REPO_ROOT = Path(__file__).parent.parent.resolve()
 PANELS_JS = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 STYLE_CSS = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
 ICONS_JS = (REPO_ROOT / "static" / "icons.js").read_text(encoding="utf-8")
+SESSIONS_JS = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+MESSAGES_JS = (REPO_ROOT / "static" / "messages.js").read_text(encoding="utf-8")
+COMMANDS_JS = (REPO_ROOT / "static" / "commands.js").read_text(encoding="utf-8")
+BOOT_JS = (REPO_ROOT / "static" / "boot.js").read_text(encoding="utf-8")
 
 
 def _extract_function(src: str, name: str) -> str:
     """Return the body of the named function (including signature)."""
-    m = re.search(rf"function {re.escape(name)}\s*\([^)]*\)\s*\{{", src)
+    m = re.search(rf"(?:async\s+)?function {re.escape(name)}\s*\([^)]*\)\s*\{{", src)
     assert m, f"function {name} not found in source"
     i, depth = m.end(), 1
     while i < len(src) and depth > 0:
@@ -60,6 +64,39 @@ def test_v3_dropped_legacy_classes():
         "standalone activity-line CSS should be removed (folded into hero)"
     assert ".profile-hero-handle" not in STYLE_CSS, \
         "profile-hero-handle CSS should be removed"
+
+
+def test_profile_list_cards_are_full_width_left_aligned_tiles():
+    assert re.search(r"\.profile-card\s*\{[^}]*width:100%", STYLE_CSS), \
+        "profile cards in the left list should fill the panel width"
+    assert re.search(r"\.profile-card\s*\{[^}]*box-sizing:border-box", STYLE_CSS), \
+        "full-width profile cards must include border/padding in their width"
+    assert re.search(r"\.profile-card\s*\{[^}]*text-align:left", STYLE_CSS), \
+        "profile card button text must be left-aligned"
+    assert re.search(r"\.profile-card-header\s*\{[^}]*justify-content:flex-start", STYLE_CSS), \
+        "profile card contents should start from the left, not spread or center"
+
+
+def test_profile_list_active_pill_uses_success_palette():
+    m = re.search(r"\.profile-card-active-pill\s*\{(?P<body>[^}]*)\}", STYLE_CSS)
+    assert m, "missing .profile-card-active-pill styles"
+    body = m.group("body")
+    assert "var(--success)" in body, \
+        "active profile chip should use the green success palette"
+    assert "var(--accent" not in body, \
+        "active profile chip should not use the yellow/accent palette"
+
+
+def test_profile_list_uses_active_as_default_signal_without_redundant_label():
+    fn = _extract_function(PANELS_JS, "loadProfilesPanel")
+    assert "profile-card-active-pill" in fn, \
+        "left profile list should still render the Active chip"
+    assert "const defaultBadge" not in fn, \
+        "left profile list should not render a separate default badge"
+    assert "${defaultBadge}" not in fn, \
+        "profile name line should not include a redundant default label"
+    assert "ariaLabelParts.push('(default)')" not in fn, \
+        "profile card aria-label should not duplicate active/default state"
 
 
 def test_hero_avatar_is_256px():
@@ -191,27 +228,33 @@ def test_activity_hydrator_writes_into_hero_slot():
     assert "open-activity" not in fn
 
 
-# ── Default-model tile (rework 2026-05-15) ────────────────────────────────
+# ── Runtime tile (profile routing rework 2026-05-17) ─────────────────────
 
 
-def test_default_model_tile_title_and_subtitle():
+def test_runtime_tile_title_and_compact_rows():
     fn = _extract_function(PANELS_JS, "_profileRuntimePanel")
-    # New tile title is "Default model" (descriptive), subtitle explains scope.
-    assert ">Default model<" in fn, "tile title must be 'Default model'"
-    assert "Used for new sessions" in fn, \
-        "tile must surface a scope-clarifying subtitle"
-    assert "existing chats keep their model" in fn, \
-        "subtitle must use the clearer wording (validator pass 2 polish)"
-    assert "profile-default-model-subtitle" in fn, \
-        "subtitle must use the dedicated CSS class for muted styling"
+    assert ">Runtime<" in fn, "tile title must be 'Runtime'"
+    assert "profile-runtime-row-label\">Default Model" in fn
+    assert "profile-runtime-row-label\">Fallback Model" in fn
+    assert "Configure auxiliary tool models" in fn
+    assert "profile-runtime-footer-action" in fn, \
+        "auxiliary-models entry must be pinned to the bottom of the Runtime tile"
+    assert "Used for new sessions" not in fn, \
+        "scope explainer text was intentionally removed to keep the tile compact"
 
 
-def test_default_model_tile_has_two_composer_chips_only():
-    """Drop from 3 chips (provider/model/reasoning) to 2 (model/reasoning).
-    Provider is inferred from the chosen model — no separate provider chip."""
+def test_runtime_tile_keeps_single_tile_footprint():
+    assert not re.search(r"\.profile-runtime-tile\s*\{[^}]*grid-column\s*:\s*span\s+2", STYLE_CSS), \
+        "Runtime must not be forced to span two grid columns"
+
+
+def test_runtime_tile_reuses_composer_chips_and_adds_fallback():
+    """Runtime uses existing picker chrome: default model + reasoning,
+    fallback model, and no separate provider chip."""
     fn = _extract_function(PANELS_JS, "_profileRuntimePanel")
     assert "profileDefaultModelChip" in fn, "Model chip missing"
     assert "profileDefaultReasoningChip" in fn, "Reasoning chip missing"
+    assert "profileFallbackModelChip" in fn, "Fallback model chip missing"
     # No provider chip — was profileRuntimeProviderChip in v3.
     assert "profileRuntimeProviderChip" not in fn, \
         "Provider chip must be removed — provider is inferred from the chosen model"
@@ -227,9 +270,9 @@ def test_default_model_tile_has_two_composer_chips_only():
         "Reasoning dropdown must reuse the chat composer's .composer-reasoning-dropdown"
 
 
-def test_default_model_tile_drops_apply_diagnostics_and_status_pill():
+def test_runtime_tile_drops_apply_diagnostics_status_and_new_chat():
     """Auto-save flow — no Apply button, no Diagnostics, no status pill, no
-    'Saved' diode. The tile is always saved by construction."""
+    'Saved' diode. New-chat moved to the profile list."""
     fn = _extract_function(PANELS_JS, "_profileRuntimePanel")
     # No Apply button (was id="opsRuntimeApply").
     assert "opsRuntimeApply" not in fn
@@ -243,14 +286,17 @@ def test_default_model_tile_drops_apply_diagnostics_and_status_pill():
     assert "opsRuntimeState" not in fn
     # No "Saved" diode label.
     assert ">Saved<" not in fn
+    assert "opsStartChat" not in fn
+    assert "New Chat" not in fn
 
 
-def test_default_model_tile_includes_hidden_select_mirror():
+def test_runtime_tile_includes_hidden_select_mirrors():
     """The parameterised composer picker reads optgroups from a <select>
-    mirror. The tile must include #profileDefaultModelSelect so
+    mirror. The tile must include model selects so
     renderModelDropdown({select: …}) has a catalog to walk."""
     fn = _extract_function(PANELS_JS, "_profileRuntimePanel")
     assert 'id="profileDefaultModelSelect"' in fn
+    assert 'id="profileFallbackModelSelect"' in fn
 
 
 def test_default_model_dropdown_uses_parameterised_composer_renderer():
@@ -266,6 +312,14 @@ def test_default_model_dropdown_uses_parameterised_composer_renderer():
     assert "dropdown: dd" in fn or "dropdown:dd" in fn, \
         "renderModelDropdown opts must pass the tile's dropdown"
     assert "onSelect" in fn, "renderModelDropdown opts must wire onSelect to the auto-save path"
+
+
+def test_fallback_model_dropdown_uses_parameterised_composer_renderer():
+    fn = _extract_function(PANELS_JS, "_toggleProfileFallbackModelDropdown")
+    assert "renderModelDropdown({" in fn
+    assert "select: sel" in fn or "select:sel" in fn
+    assert "dropdown: dd" in fn or "dropdown:dd" in fn
+    assert "_onProfileFallbackModelPicked" in fn
 
 
 def test_render_model_dropdown_is_parameterised():
@@ -296,6 +350,208 @@ def test_persist_profile_default_model_posts_to_settings():
     # No status pill writes (the tile has no pill).
     assert "opsRuntimeDot" not in fn
     assert "Saving" not in fn  # no "Saving…" indicator
+
+
+def test_profile_list_has_right_aligned_chat_icon():
+    fn = _extract_function(PANELS_JS, "loadProfilesPanel")
+    assert "profile-card-chat-btn" in fn
+    assert "message-square" in fn
+    assert "startChatWithProfile(p.name)" in fn
+    assert "stopPropagation" in fn
+    assert ".profile-card-chat-btn" in STYLE_CSS
+
+
+def test_profile_chat_icon_starts_chat_without_switching_active_profile():
+    fn = _extract_function(PANELS_JS, "startChatWithProfile")
+    assert "switchToProfile" not in fn, \
+        "profile-row chat must not change the active/default profile"
+    assert "_profileChatDefaults(profileName)" in fn
+    assert "newSession(true, defaults)" in fn
+    defaults = _extract_function(PANELS_JS, "_profileChatDefaults")
+    assert "/api/profile/settings?name=" in defaults
+    assert "include_avatar=0" in defaults
+
+
+def test_profile_scoped_new_session_uses_requested_profile_without_consuming_active_defaults():
+    fn = _extract_function(SESSIONS_JS, "newSession")
+    assert "hasOption('profile')" in fn
+    assert "const targetProfile=" in fn
+    assert "profile:targetProfile" in fn
+    assert "explicitWorkspace" in fn, \
+        "profile-card chat must be able to pass a profile workspace without inheriting the active session workspace"
+
+
+def test_send_and_queue_use_session_profile_before_active_profile():
+    assert "function currentSessionProfile()" in SESSIONS_JS
+    assert "return (S.session&&S.session.profile)||S.activeProfile||'default';" in SESSIONS_JS
+    assert "profile:currentSessionProfile()" in MESSAGES_JS
+    assert "profile:currentSessionProfile()" in COMMANDS_JS
+    assert "profile:S.activeProfile||S.session.profile||'default'" not in MESSAGES_JS
+    assert "profile:S.activeProfile||'default'" not in MESSAGES_JS
+    assert "profile:S.activeProfile||S.session.profile||'default'" not in COMMANDS_JS
+    assert "profile:S.activeProfile||'default'" not in COMMANDS_JS
+
+
+def test_new_chat_and_no_session_send_do_not_wait_for_sidebar_refresh():
+    assert "await newSession();await renderSessionList()" not in BOOT_JS
+    assert "if(!S.session){await newSession();await renderSessionList();}" not in MESSAGES_JS
+    assert "if(!S.session){await newSession();await renderSessionList();}" not in COMMANDS_JS
+    assert "void renderSessionList({deferWhileInteracting:true})" in BOOT_JS
+    assert "void renderSessionList({deferWhileInteracting:true})" in MESSAGES_JS
+    assert "void renderSessionList({deferWhileInteracting:true})" in COMMANDS_JS
+
+
+def test_session_list_includes_current_non_active_profile_session():
+    fn = _extract_function(SESSIONS_JS, "renderSessionList")
+    assert "needsCurrentProfile" in fn
+    assert "sessionProfile!==S.activeProfile" in fn
+    assert "(_showAllProfiles||needsCurrentProfile) ? '?all_profiles=1' : ''" in fn
+
+
+def test_response_mode_and_default_space_live_in_hero_not_separate_tile():
+    hero = _extract_function(PANELS_JS, "_profileHeroDossier")
+    detail = _extract_function(PANELS_JS, "_renderProfileDetail")
+    assert "profileResponseModeSelect" in hero
+    assert "Response Style" in hero
+    assert '<option value="">Soul-driven</option>' in hero
+    assert ">none</option>" not in hero
+    assert "profileDefaultWorkspaceChip" in hero
+    assert "profileDefaultWorkspaceDropdown" in hero
+    assert "_profileDefaultSpaceTile" not in detail
+    assert "function _profileDefaultSpaceTile" not in PANELS_JS
+
+
+def test_response_style_and_default_space_are_bottom_aligned_and_matched():
+    assert re.search(
+        r"\.profile-hero-actions\s*\{[^}]*margin-top\s*:\s*auto[^}]*align-items\s*:\s*end",
+        STYLE_CSS,
+    ), "hero controls must sit on the bottom edge of the hero body"
+    assert re.search(
+        r"\.profile-response-mode-control,\s*\.profile-default-workspace-control\s*\{[^}]*grid-template-rows\s*:\s*auto\s+36px",
+        STYLE_CSS,
+    ), "response style and default space controls must share label/control row sizing"
+    assert re.search(
+        r"\.profile-response-mode-control\s+\.profile-ops-select\s*\{[^}]*border-radius\s*:\s*999px",
+        STYLE_CSS,
+    ), "response style select should visually match the workspace chip chrome"
+
+
+def test_compression_budget_and_tools_tiles_render():
+    detail = _extract_function(PANELS_JS, "_renderProfileDetail")
+    for helper in (
+        "_profileContextCompressionTile",
+        "_profileWorkstepBudgetTile",
+        "_profileToolAccessTile",
+    ):
+        assert helper in detail
+    assert "profileCompressionThreshold" in PANELS_JS
+    assert "profileMaxTurnsInput" in PANELS_JS
+    assert "profile-toolset-pill" in PANELS_JS
+
+
+def test_profile_default_space_reuses_workspace_dropdown_renderer():
+    renderer = _extract_function(PANELS_JS, "renderWorkspaceDropdownInto")
+    assert re.search(r"function renderWorkspaceDropdownInto\(\s*dd\s*,\s*workspaces\s*,\s*currentWs\s*,\s*opts", renderer), \
+        "workspace dropdown renderer must accept options for profile-default reuse"
+    assert "opts.onSelect" in renderer or "typeof onSelect" in renderer
+    assert "includeSessionActions" in renderer, \
+        "profile default picker must be able to omit new-chat-only footer actions"
+
+    toggle = _extract_function(PANELS_JS, "_toggleProfileDefaultWorkspaceDropdown")
+    assert "renderWorkspaceDropdownInto(dd, data.workspaces" in toggle
+    assert "includeSessionActions: false" in toggle
+    assert "_persistProfileDefaultWorkspace" in PANELS_JS
+
+    wiring = _extract_function(PANELS_JS, "_wireProfileRuntimeSettingHandlers")
+    assert "profileDefaultWorkspaceChange" not in wiring
+    assert "showInputDialog" not in wiring
+
+
+def test_context_compression_is_always_on_without_disable_switch():
+    tile = _extract_function(PANELS_JS, "_profileContextCompressionTile")
+    assert "profileCompressionEnabled" not in tile
+    assert "profile-switch" not in tile
+
+    payload = _extract_function(PANELS_JS, "_profileCompressionPayload")
+    assert "profileCompressionEnabled" not in payload
+    assert "enabled: true" in payload or "enabled:true" in payload
+
+    wiring = _extract_function(PANELS_JS, "_wireProfileRuntimeSettingHandlers")
+    assert "profileCompressionEnabled" not in wiring
+
+
+def test_profile_runtime_controls_wire_before_async_hydration():
+    detail = _extract_function(PANELS_JS, "_renderProfileDetail")
+    prime_idx = detail.find("_primeProfileRuntimeControls(p)")
+    hydrate_idx = detail.find("_hydrateProfileRuntimeSettings(p")
+    assert prime_idx >= 0, \
+        "profile render must synchronously prime runtime controls"
+    assert hydrate_idx >= 0, \
+        "profile render must still hydrate saved runtime settings"
+    assert prime_idx < hydrate_idx, \
+        "runtime handlers must be attached before async settings/model hydration"
+
+    prime = _extract_function(PANELS_JS, "_primeProfileRuntimeControls")
+    assert "_applyProfileCompression(_PROFILE_COMPRESSION_DEFAULTS)" in prime
+    assert "_wireProfileDefaultModelHandlers(profile.name)" in prime
+    assert "_wireProfileRuntimeSettingHandlers(profile.name)" in prime
+
+
+def test_profile_runtime_hydration_preserves_dirty_controls():
+    hydrate = _extract_function(PANELS_JS, "_hydrateProfileRuntimeSettings")
+    wiring = _extract_function(PANELS_JS, "_wireProfileRuntimeSettingHandlers")
+    assert "_isCurrentProfileRuntimeHydration" in hydrate, \
+        "stale profile hydration must not repaint after the user switches profiles"
+    assert "dirty.compression" in hydrate, \
+        "late settings fetch must not overwrite a compression edit already made in the UI"
+    assert "_markProfileRuntimeDirty('compression')" in wiring, \
+        "compression slider input must mark the field dirty before save/hydration races"
+
+
+def test_profile_runtime_hydration_omits_full_avatar_payload():
+    hydrate = _extract_function(PANELS_JS, "_hydrateProfileRuntimeSettings")
+
+    assert "include_avatar=0" in hydrate, \
+        "runtime settings hydration must not fetch full uploaded avatar data URLs"
+
+
+def test_profile_runtime_saves_ignore_stale_post_completions():
+    setting = _extract_function(PANELS_JS, "_persistProfileSetting")
+    assert "const token = _profileRuntimeHydrationSeq" in setting, \
+        "runtime setting saves must capture the rendered profile token before awaiting"
+    assert "_isCurrentProfileRuntimeHydration(profileName, token)" in setting, \
+        "runtime setting saves must gate success and failure DOM side effects"
+    assert re.search(r"if\s*\(\s*_isCurrentProfileRuntimeHydration\(profileName,\s*token\)\s*&&\s*typeof onFailure", setting), \
+        "failed stale runtime saves must not roll back the newly selected profile"
+
+    default_model = _extract_function(PANELS_JS, "_persistProfileDefaultModel")
+    assert "const token = _profileRuntimeHydrationSeq" in default_model
+    assert "loadProfilesPanel()" not in default_model, \
+        "default model saves must not re-render the profile detail after an async POST"
+    assert "_refreshProfileCardRuntimeMeta(profileName)" in default_model, \
+        "default model saves should refresh the left-list meta without repainting controls"
+
+    default_workspace = _extract_function(PANELS_JS, "_persistProfileDefaultWorkspace")
+    assert "const token = _profileRuntimeHydrationSeq" in default_workspace
+    assert "_isCurrentProfileRuntimeHydration(profileName, token)" in default_workspace, \
+        "late default-space saves must not repaint another profile's workspace chip"
+
+    auxiliary = _extract_function(PANELS_JS, "_persistProfileAuxModel")
+    assert "const token = _profileRuntimeHydrationSeq" in auxiliary
+    assert "_isCurrentProfileRuntimeHydration(profileName, token)" in auxiliary, \
+        "late auxiliary-model saves must not repaint a stale auxiliary model overlay"
+
+
+def test_auxiliary_models_screen_reuses_model_picker():
+    fn = _extract_function(PANELS_JS, "_openProfileAuxModels")
+    assert "profile-skills-manager-overlay" in fn
+    assert "profileAuxModelsTitle" in fn
+    assert "composer-model-chip" in fn
+    assert "model-dropdown profile-default-model-dropdown profile-aux-model-dropdown" in fn
+    toggle = _extract_function(PANELS_JS, "_toggleProfileAuxModelDropdown")
+    assert "renderModelDropdown({" in toggle
+    persist = _extract_function(PANELS_JS, "_persistProfileAuxModel")
+    assert "auxiliary_models" in persist
 
 
 # ── Gateway tile ──────────────────────────────────────────────────────────
