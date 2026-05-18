@@ -4250,6 +4250,11 @@ def handle_get(handler, parsed) -> bool:
             payload["avatar"] = get_profile_avatar_summary_api(name)
         except Exception:
             payload["avatar"] = None
+        try:
+            from api.profiles import _read_profile_avatar_shape_for_home
+            payload["avatar_shape"] = _read_profile_avatar_shape_for_home(get_active_hermes_home())
+        except Exception:
+            payload["avatar_shape"] = "circle"
         return j(handler, payload)
 
     if parsed.path == "/api/profile/settings":
@@ -5480,7 +5485,7 @@ def handle_post(handler, parsed) -> bool:
         for key in (
             "provider", "model", "avatar", "reasoning_effort", "description",
             "fallback_model", "response_mode", "compression", "max_turns",
-            "auxiliary_models", "toolsets", "default_workspace",
+            "auxiliary_models", "toolsets", "default_workspace", "avatar_shape",
         ):
             if key in body:
                 updates[key] = body.get(key)

@@ -19,6 +19,7 @@ SESSIONS_JS = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 MESSAGES_JS = (REPO_ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 COMMANDS_JS = (REPO_ROOT / "static" / "commands.js").read_text(encoding="utf-8")
 BOOT_JS = (REPO_ROOT / "static" / "boot.js").read_text(encoding="utf-8")
+UI_JS = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 
 
 def _extract_function(src: str, name: str) -> str:
@@ -165,6 +166,37 @@ def test_hero_avatar_is_256px():
         "profile-hero-avatar must declare height:256px"
 
 
+def test_avatar_shape_control_lives_in_change_avatar_dialog():
+    dialog = _extract_function(PANELS_JS, "_profileOpsAvatarDialog")
+    assert "profile-avatar-shape-row" in dialog
+    for shape in ("square", "circle"):
+        assert f'data-avatar-shape="{shape}"' in dialog
+    assert 'data-avatar-shape="diamond"' not in dialog
+
+
+def test_profile_avatar_save_posts_shape_setting():
+    save = _extract_function(PANELS_JS, "_saveProfileAvatar")
+    assert "_profileAvatarShapeFromDialog()" in save
+    assert "avatar_shape" in save
+    route = _extract_function(PANELS_JS, "_openProfileAvatarDialog")
+    assert "_setProfileAvatarDialogShape" in route
+
+
+def test_avatar_shape_classes_apply_to_inner_and_hero_frames():
+    assert ".profile-avatar-shape--square" in STYLE_CSS
+    assert ".profile-avatar-shape--circle" in STYLE_CSS
+    assert ".profile-avatar-shape--diamond" not in STYLE_CSS
+    assert ".profile-hero-avatar.profile-avatar-shape--diamond" not in STYLE_CSS
+    assert "profile-avatar-shape--" in UI_JS
+
+
+def test_circle_hero_avatar_keeps_change_button_visible():
+    hero_rule = re.search(r"\.profile-hero-avatar\s*\{[^}]*overflow:visible", STYLE_CSS)
+    assert hero_rule, "hero avatar frame should not clip the change-avatar button"
+    inner_rule = re.search(r"\.profile-hero-avatar \.profile-avatar\s*\{[^}]*overflow:hidden", STYLE_CSS)
+    assert inner_rule, "inner avatar should still clip the image to the selected shape"
+
+
 # ── v3 helpers present, v2 helpers gone ───────────────────────────────────
 
 
@@ -188,6 +220,18 @@ def test_v2_helpers_removed():
     # comments survive ("// _profileIdentityPlane: removed..." etc.).
     assert "function _profileIdentityPlane" not in PANELS_JS
     assert "function _profileOpsTiles" not in PANELS_JS
+
+
+def test_profile_ops_tiles_do_not_repeat_raw_config_keys():
+    """The visible tile titles are enough; raw config-key badges add noise."""
+    noisy_badges = {
+        "_profileContextCompressionTile": "compression.*",
+        "_profileWorkstepBudgetTile": "agent.max_turns",
+        "_profileToolAccessTile": "toolsets",
+    }
+    for helper, raw_key in noisy_badges.items():
+        fn = _extract_function(PANELS_JS, helper)
+        assert raw_key not in fn, f"{helper} should not render {raw_key!r}"
 
 
 def test_standalone_activity_line_helper_removed_in_v3_1():

@@ -637,6 +637,11 @@ setTimeout(_initMediaPlaybackObserver,0);
 // Profile avatars are lightweight WebUI-only metadata loaded from /api/profiles.
 window._profileAvatarMap=window._profileAvatarMap||{};
 window._activeProfileAvatar=window._activeProfileAvatar||null;
+window._activeProfileAvatarShape=window._activeProfileAvatarShape||'circle';
+function _normalizeProfileAvatarShape(shape){
+  const normalized=String(shape||'circle').trim().toLowerCase();
+  return ['square','circle'].includes(normalized)?normalized:'circle';
+}
 function _normalizeProfileAvatar(avatar){
   if(!avatar||typeof avatar!=='object') return null;
   const type=String(avatar.type||'').trim().toLowerCase();
@@ -644,40 +649,50 @@ function _normalizeProfileAvatar(avatar){
   if(!value||!['emoji','url','asset','image'].includes(type)) return null;
   if(type==='url'&&!/^https?:\/\//i.test(value)) return null;
   if(type==='asset'&&(value.startsWith('/')||value.includes('..')||value.includes('\\')||value.includes(':'))) return null;
-  return {type,value};
+  return {type,value,shape:_normalizeProfileAvatarShape(avatar.shape)};
 }
 function _profileAvatarMarkup(avatar, opts={}){
   const normalized=_normalizeProfileAvatar(avatar);
   const fallback=String(opts.fallback||'H').trim().slice(0,2).toUpperCase()||'H';
   const classes=String(opts.classes||'').trim();
+  const shape=_normalizeProfileAvatarShape(opts.shape||(normalized&&normalized.shape));
   const title=opts.title?` title="${esc(opts.title)}"`:'';
-  const cls=`profile-avatar ${classes}`.trim();
+  const cls=`profile-avatar profile-avatar-shape--${shape} ${classes}`.trim();
   if(normalized&&normalized.type==='emoji') return `<div class="${esc(cls)} profile-avatar--emoji"${title}>${esc(normalized.value)}</div>`;
   if(normalized&&(normalized.type==='url'||normalized.type==='asset'||normalized.type==='image')) return `<div class="${esc(cls)} profile-avatar--image"${title}><img src="${esc(normalized.value)}" alt="" loading="lazy" decoding="async"></div>`;
   return `<div class="${esc(cls)} profile-avatar--fallback"${title}>${esc(fallback)}</div>`;
 }
-function setActiveProfileAvatar(avatar){
+function setActiveProfileAvatar(avatar, shape){
   const normalized=_normalizeProfileAvatar(avatar);
+  const normalizedShape=_normalizeProfileAvatarShape(shape||(normalized&&normalized.shape));
   const before=JSON.stringify(window._activeProfileAvatar||null);
   const after=JSON.stringify(normalized||null);
+  const beforeShape=window._activeProfileAvatarShape||'circle';
   window._activeProfileAvatar=normalized;
-  if(before===after) return;
+  window._activeProfileAvatarShape=normalizedShape;
+  if(before===after&&beforeShape===normalizedShape) return;
   if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
   if(typeof refreshAssistantProfileAvatars==='function') refreshAssistantProfileAvatars();
 }
 function setProfileAvatarMap(profiles, activeName){
   const map={};
-  for(const p of profiles||[]) map[p.name]=_normalizeProfileAvatar(p.avatar);
+  for(const p of profiles||[]){
+    map[p.name]={
+      avatar:_normalizeProfileAvatar(p.avatar),
+      shape:_normalizeProfileAvatarShape(p.avatar_shape),
+    };
+  }
   window._profileAvatarMap=map;
   const active=activeName||S.activeProfile||'default';
-  setActiveProfileAvatar(map[active]||null);
+  const entry=map[active]||{};
+  setActiveProfileAvatar(entry.avatar||null, entry.shape);
 }
 function refreshAssistantProfileAvatars(){
   const label=window._botName||'Hermes';
   const fallback=label.charAt(0).toUpperCase()||'H';
   document.querySelectorAll('.msg-role.assistant .role-icon.assistant').forEach(node=>{
     const wrap=document.createElement('div');
-    wrap.innerHTML=_profileAvatarMarkup(window._activeProfileAvatar,{fallback,classes:'role-icon assistant profile-avatar--message',title:label});
+    wrap.innerHTML=_profileAvatarMarkup(window._activeProfileAvatar,{fallback,shape:window._activeProfileAvatarShape,classes:'role-icon assistant profile-avatar--message',title:label});
     const next=wrap.firstElementChild;
     if(next) node.replaceWith(next);
   });

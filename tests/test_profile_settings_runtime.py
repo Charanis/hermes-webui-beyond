@@ -228,6 +228,49 @@ def test_uploaded_avatar_summary_is_lazy_route_and_image_route_decodes():
         assert len(etag) == 16
 
 
+def test_profile_avatar_shape_round_trips_without_avatar_payload():
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        profile_dir = _seed_profile(base, "coder", {"model": {"default": "x"}})
+        profiles = _reload_profiles_module(base)
+
+        result = profiles.update_profile_settings_api("coder", avatar_shape="square")
+
+        assert result["avatar_shape"] == "square"
+        state = json.loads(
+            (profile_dir / "webui_state" / "profile_settings.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert state["avatar_shape"] == "square"
+        assert profiles.get_profile_settings_api("coder", include_avatar=False)[
+            "avatar_shape"
+        ] == "square"
+
+
+def test_profile_avatar_shape_rejects_unknown_values():
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        _seed_profile(base, "coder", {"model": {"default": "x"}})
+        profiles = _reload_profiles_module(base)
+
+        with pytest.raises(ValueError, match="avatar_shape"):
+            profiles.update_profile_settings_api("coder", avatar_shape="hexagon")
+
+
+def test_profile_avatar_shape_rejects_removed_diamond_value():
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        _seed_profile(base, "coder", {"model": {"default": "x"}})
+        profiles = _reload_profiles_module(base)
+
+        with pytest.raises(ValueError, match="square or circle"):
+            profiles.update_profile_settings_api("coder", avatar_shape="diamond")
+
+
 def test_profile_settings_default_compression_is_enabled():
     with tempfile.TemporaryDirectory() as td:
         base = Path(td) / ".hermes"
@@ -457,6 +500,7 @@ def test_profile_settings_post_passes_extended_runtime_fields(monkeypatch):
         },
         "toolsets": ["terminal", "file"],
         "default_workspace": "/workspace/coder",
+        "avatar_shape": "circle",
         "ignored": "nope",
     }
     handler = _FakeHandler(body)
@@ -473,6 +517,7 @@ def test_profile_settings_post_passes_extended_runtime_fields(monkeypatch):
             "auxiliary_models": body["auxiliary_models"],
             "toolsets": ["terminal", "file"],
             "default_workspace": "/workspace/coder",
+            "avatar_shape": "circle",
         },
     }
 

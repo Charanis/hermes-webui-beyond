@@ -968,6 +968,8 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
 _MISSING = object()
 _PROFILE_SETTINGS_FILE = 'profile_settings.json'
 _AVATAR_TYPES = {'emoji', 'url', 'asset', 'image'}
+_AVATAR_SHAPES = {'square', 'circle'}
+_DEFAULT_AVATAR_SHAPE = 'circle'
 _MAX_AVATAR_VALUE_LEN = 4 * 1024 * 1024
 _MAX_EMOJI_AVATAR_LEN = 64
 _IMAGE_AVATAR_RE = re.compile(r'^data:image/(png|jpeg|jpg|gif|webp);base64,[A-Za-z0-9+/=\s]+$')
@@ -1600,6 +1602,27 @@ def _read_profile_avatar_for_home(profile_home: Path):
     return avatar if isinstance(avatar, dict) else None
 
 
+def _normalize_avatar_shape_payload(shape):
+    if shape is None:
+        return _DEFAULT_AVATAR_SHAPE
+    if not isinstance(shape, str):
+        raise ValueError('avatar_shape must be a string')
+    normalized = shape.strip().lower()
+    if not normalized:
+        return _DEFAULT_AVATAR_SHAPE
+    if normalized not in _AVATAR_SHAPES:
+        raise ValueError('avatar_shape must be square or circle')
+    return normalized
+
+
+def _read_profile_avatar_shape_for_home(profile_home: Path):
+    state = _read_profile_settings_state(profile_home)
+    try:
+        return _normalize_avatar_shape_payload(state.get('avatar_shape'))
+    except ValueError:
+        return _DEFAULT_AVATAR_SHAPE
+
+
 def _profile_avatar_for_summary(name: str, profile_home: Path):
     """Return avatar metadata suitable for profile list/dropdown payloads.
 
@@ -1695,6 +1718,7 @@ def get_profile_settings_api(name: str, *, include_avatar: bool = True) -> dict:
         'provider': provider,
         'model': model,
         'avatar': _read_profile_avatar_for_home(profile_home) if include_avatar else None,
+        'avatar_shape': _read_profile_avatar_shape_for_home(profile_home),
         'reasoning_effort': _extract_profile_reasoning_effort(config_data),
         'fallback_model': _extract_profile_fallback_model(config_data),
         'response_mode': _extract_profile_response_mode(config_data),
@@ -2022,14 +2046,15 @@ def read_profile_persona_api(name: str) -> dict:
 
 
 def update_profile_settings_api(name: str, *, provider=_MISSING, model=_MISSING,
-                                avatar=_MISSING, reasoning_effort=_MISSING,
+                                avatar=_MISSING, avatar_shape=_MISSING, reasoning_effort=_MISSING,
                                 description=_MISSING, fallback_model=_MISSING,
                                 response_mode=_MISSING, compression=_MISSING,
                                 max_turns=_MISSING, auxiliary_models=_MISSING,
                                 toolsets=_MISSING, default_workspace=_MISSING) -> dict:
     """Update profile runtime settings and/or WebUI avatar metadata."""
     if (provider is _MISSING and model is _MISSING
-            and avatar is _MISSING and reasoning_effort is _MISSING
+            and avatar is _MISSING and avatar_shape is _MISSING
+            and reasoning_effort is _MISSING
             and description is _MISSING and fallback_model is _MISSING
             and response_mode is _MISSING and compression is _MISSING
             and max_turns is _MISSING and auxiliary_models is _MISSING
@@ -2088,13 +2113,16 @@ def update_profile_settings_api(name: str, *, provider=_MISSING, model=_MISSING,
             from api.config import invalidate_models_cache
             invalidate_models_cache()
 
-    if avatar is not _MISSING:
-        normalized_avatar = _normalize_avatar_payload(avatar)
+    if avatar is not _MISSING or avatar_shape is not _MISSING:
         state = _read_profile_settings_state(profile_home)
-        if normalized_avatar is None:
-            state.pop('avatar', None)
-        else:
-            state['avatar'] = normalized_avatar
+        if avatar is not _MISSING:
+            normalized_avatar = _normalize_avatar_payload(avatar)
+            if normalized_avatar is None:
+                state.pop('avatar', None)
+            else:
+                state['avatar'] = normalized_avatar
+        if avatar_shape is not _MISSING:
+            state['avatar_shape'] = _normalize_avatar_shape_payload(avatar_shape)
         _write_profile_settings_state(profile_home, state)
 
     return get_profile_settings_api(name)
@@ -2129,6 +2157,7 @@ def list_profiles_api(include_skill_counts: bool = False,
                 if include_full_avatars
                 else _profile_avatar_for_summary(p.name, Path(p.path))
             ),
+            'avatar_shape': _read_profile_avatar_shape_for_home(Path(p.path)),
             'has_env': p.has_env,
             'skill_count': p.skill_count,
         }
@@ -2159,6 +2188,7 @@ def _default_profile_dict(include_skill_counts: bool = False,
             if include_full_avatars
             else _profile_avatar_for_summary('default', _DEFAULT_HERMES_HOME)
         ),
+        'avatar_shape': _read_profile_avatar_shape_for_home(_DEFAULT_HERMES_HOME),
         'has_env': (_DEFAULT_HERMES_HOME / '.env').exists(),
         'skill_count': 0,
     }
@@ -2645,6 +2675,7 @@ def duplicate_profile_api(name: str, new_name: str, *, clone_all: bool = False) 
         'model': None,
         'provider': None,
         'avatar': _read_profile_avatar_for_home(dst_dir),
+        'avatar_shape': _read_profile_avatar_shape_for_home(dst_dir),
         'has_env': (dst_dir / '.env').exists(),
         'skill_count': 0,
     }

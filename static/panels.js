@@ -4515,7 +4515,8 @@ function _syncProfileAvatarState(data){
 function _profileAvatarForUi(profile, classes){
   const name=(profile&&profile.name)||'H';
   const fallback=name.charAt(0).toUpperCase()||'H';
-  if(typeof _profileAvatarMarkup==='function') return _profileAvatarMarkup(profile&&profile.avatar,{fallback,classes,title:name});
+  const shape=(typeof _normalizeProfileAvatarShape==='function')?_normalizeProfileAvatarShape(profile&&profile.avatar_shape):'circle';
+  if(typeof _profileAvatarMarkup==='function') return _profileAvatarMarkup(profile&&profile.avatar,{fallback,shape,classes,title:name});
   return `<div class="${esc(classes||'profile-avatar')}">${esc(fallback)}</div>`;
 }
 
@@ -4596,6 +4597,22 @@ function _setProfileAvatarDialogMode(mode){
   _refreshProfileAvatarDialogPreview();
 }
 
+function _profileAvatarShapeFromDialog(){
+  const active=document.querySelector('[data-avatar-shape].active');
+  const shape=(active&&active.dataset.avatarShape)||'circle';
+  return (typeof _normalizeProfileAvatarShape==='function')?_normalizeProfileAvatarShape(shape):shape;
+}
+
+function _setProfileAvatarDialogShape(shape){
+  const normalized=(typeof _normalizeProfileAvatarShape==='function')?_normalizeProfileAvatarShape(shape):'circle';
+  document.querySelectorAll('[data-avatar-shape]').forEach(btn=>{
+    const active=btn.dataset.avatarShape===normalized;
+    btn.classList.toggle('active',active);
+    btn.setAttribute('aria-pressed',active?'true':'false');
+  });
+  _refreshProfileAvatarDialogPreview();
+}
+
 function _profileAvatarPayloadFromDialog(){
   const active=document.querySelector('[data-avatar-mode].active');
   const mode=(active&&active.dataset.avatarMode)||'emoji';
@@ -4624,10 +4641,11 @@ function _refreshProfileAvatarDialogPreview(){
   const profileName=node.dataset.profileName||(_currentProfileDetail&&_currentProfileDetail.name)||'H';
   try{
     const avatar=_profileAvatarPayloadFromDialog();
-    node.innerHTML=_profileAvatarForUi({name:profileName,avatar},'profile-avatar--dialog');
+    node.innerHTML=_profileAvatarForUi({name:profileName,avatar,avatar_shape:_profileAvatarShapeFromDialog()},'profile-avatar--dialog');
   }catch(_){
     const current=_currentProfileDetail&&_currentProfileDetail.name===profileName?_currentProfileDetail:null;
-    node.innerHTML=_profileAvatarForUi(current||{name:profileName},'profile-avatar--dialog');
+    const shape=_profileAvatarShapeFromDialog();
+    node.innerHTML=_profileAvatarForUi(Object.assign({}, current||{name:profileName}, {avatar_shape:shape}),'profile-avatar--dialog');
   }
 }
 
@@ -4637,6 +4655,7 @@ function _openProfileAvatarDialog(profileName){
   const profile=_profilesCache&&Array.isArray(_profilesCache.profiles)?_profilesCache.profiles.find(p=>p.name===profileName):_currentProfileDetail;
   const avatar=(profile&&profile.avatar)||null;
   const normalized=(typeof _normalizeProfileAvatar==='function')?_normalizeProfileAvatar(avatar):null;
+  const shape=(profile&&profile.avatar_shape)||'circle';
   _profileAvatarUploadDataUrl=normalized&&normalized.type==='image'?normalized.value:'';
   if($('profileAvatarEmoji')) $('profileAvatarEmoji').value=normalized&&normalized.type==='emoji'?normalized.value:'🤖';
   if($('profileAvatarUrl')) $('profileAvatarUrl').value=normalized&&normalized.type==='url'?normalized.value:'';
@@ -4645,6 +4664,7 @@ function _openProfileAvatarDialog(profileName){
   const preview=$('profileAvatarDialogPreview');
   if(preview) preview.dataset.profileName=profileName;
   dialog.hidden=false;
+  _setProfileAvatarDialogShape(shape);
   _setProfileAvatarDialogMode(_profileAvatarDialogModeFromAvatar(avatar));
   const file=$('profileAvatarUpload');
   if(file) file.value='';
@@ -4687,14 +4707,15 @@ async function _saveProfileAvatar(profileName, clear){
   if(btn){btn.disabled=true;btn.style.opacity='0.55';}
   try{
     const avatar=clear?null:_profileAvatarPayloadFromDialog();
+    const avatar_shape=_profileAvatarShapeFromDialog();
     _setProfileAvatarDialogMessage(clear?'Clearing avatar…':'Saving avatar…','info');
-    const updated=await api('/api/profile/settings',{method:'POST',body:JSON.stringify({name:profileName,avatar})});
+    const updated=await api('/api/profile/settings',{method:'POST',body:JSON.stringify({name:profileName,avatar,avatar_shape})});
     const p=_profilesCache&&Array.isArray(_profilesCache.profiles)?_profilesCache.profiles.find(x=>x.name===profileName):null;
     if(p) Object.assign(p, updated);
     if(_currentProfileDetail&&_currentProfileDetail.name===profileName) Object.assign(_currentProfileDetail, updated);
     if(_profilesCache) _syncProfileAvatarState(_profilesCache);
     const isActive=(S.activeProfile||(_profilesCache&&_profilesCache.active)||'default')===profileName;
-    if(isActive&&typeof setActiveProfileAvatar==='function') setActiveProfileAvatar(updated.avatar||null);
+    if(isActive&&typeof setActiveProfileAvatar==='function') setActiveProfileAvatar(updated.avatar||null,updated.avatar_shape);
     _closeProfileAvatarDialog();
     await loadProfilesPanel();
     showToast(clear?'Profile avatar cleared':'Profile avatar saved');
@@ -4891,9 +4912,10 @@ function _profileHeroDossier(p, isActive, isDefault){
   const removeTitle = isDefault
     ? 'The default profile cannot be removed.'
     : 'Permanently delete this profile.';
+  const avatarShape = (typeof _normalizeProfileAvatarShape==='function') ? _normalizeProfileAvatarShape(p.avatar_shape) : 'circle';
   return `
     <section class="profile-hero" aria-labelledby="profileHeroName">
-      <div class="profile-hero-avatar" id="profileHeroAvatar" tabindex="0" role="button" aria-label="Avatar for ${name}. Activate to change.">
+      <div class="profile-hero-avatar profile-avatar-shape--${esc(avatarShape)}" id="profileHeroAvatar" tabindex="0" role="button" aria-label="Avatar for ${name}. Activate to change.">
         ${_profileAvatarForUi(p, 'profile-avatar--hero')}
         <button id="profileHeroAvatarEdit" type="button" class="profile-hero-avatar-edit" aria-label="Change avatar" title="Change avatar">✎</button>
       </div>
@@ -5174,7 +5196,6 @@ function _profileContextCompressionTile(p){
     <article class="profile-ops-tile profile-context-compression-tile" aria-labelledby="profileCompressionTitle">
       <div class="profile-ops-tile-head">
         <span class="profile-ops-tile-label" id="profileCompressionTitle">Context compression</span>
-        <span class="profile-ops-status-pill">compression.*</span>
       </div>
       <span class="profile-ops-tile-note">Auto-compress long chats</span>
       <input id="profileCompressionThreshold" class="profile-range" type="range" min="10" max="95" step="5" value="50" aria-label="Compression threshold">
@@ -5190,7 +5211,6 @@ function _profileWorkstepBudgetTile(p){
     <article class="profile-ops-tile profile-workstep-budget-tile" aria-labelledby="profileWorkstepTitle">
       <div class="profile-ops-tile-head">
         <span class="profile-ops-tile-label" id="profileWorkstepTitle">Work-step budget</span>
-        <span class="profile-ops-status-pill">agent.max_turns</span>
       </div>
       <input id="profileMaxTurnsSlider" class="profile-range" type="range" min="10" max="1000" step="10" value="150" aria-label="Work-step budget">
       <input id="profileMaxTurnsInput" class="profile-number-input" type="number" min="1" max="1000" step="1" value="150" aria-label="Work-step budget value">
@@ -5215,7 +5235,6 @@ function _profileToolAccessTile(p){
     <article class="profile-ops-tile profile-tool-access-tile" aria-labelledby="profileToolAccessTitle">
       <div class="profile-ops-tile-head">
         <span class="profile-ops-tile-label" id="profileToolAccessTitle">Tool access</span>
-        <span class="profile-ops-status-pill">toolsets</span>
       </div>
       <span class="profile-ops-tile-note">Friendly capability groups instead of raw toolset IDs by default.</span>
       <div class="profile-toolset-pills">${buttons}</div>
@@ -7399,7 +7418,7 @@ function _profileOpsAvatarDialog(p){
         <div class="profile-avatar-dialog-head">
           <div>
             <div class="profile-avatar-dialog-title">Change avatar</div>
-            <div class="profile-avatar-dialog-subtitle">Pick an emoji, upload an image/GIF/WebP up to 3 MB, or use an image URL.</div>
+            <div class="profile-avatar-dialog-subtitle">Pick the image source and frame shape for this profile.</div>
           </div>
           <button type="button" class="profile-avatar-dialog-close" onclick="_closeProfileAvatarDialog()" aria-label="Close">×</button>
         </div>
@@ -7408,6 +7427,10 @@ function _profileOpsAvatarDialog(p){
           <button type="button" data-avatar-mode="upload" onclick="_setProfileAvatarDialogMode('upload')">Upload</button>
           <button type="button" data-avatar-mode="url" onclick="_setProfileAvatarDialogMode('url')">Image URL</button>
           <button type="button" data-avatar-mode="asset" onclick="_setProfileAvatarDialogMode('asset')">Asset</button>
+        </div>
+        <div class="profile-avatar-shape-row" role="group" aria-label="Avatar shape">
+          <button type="button" data-avatar-shape="square" onclick="_setProfileAvatarDialogShape('square')">Square</button>
+          <button type="button" data-avatar-shape="circle" onclick="_setProfileAvatarDialogShape('circle')">Circle</button>
         </div>
         <div class="profile-avatar-dialog-body">
           <div id="profileAvatarDialogPreview" class="profile-avatar-dialog-preview" data-profile-name="${profileName}">${_profileAvatarForUi(p,'profile-avatar--dialog')}</div>

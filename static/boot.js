@@ -1491,7 +1491,7 @@ function applyBotName(){
   try{
     const p=await api('/api/profile/active');
     S.activeProfile=p.name||'default';
-    if(typeof setActiveProfileAvatar==='function') setActiveProfileAvatar(p.avatar||null);
+    if(typeof setActiveProfileAvatar==='function') setActiveProfileAvatar(p.avatar||null,p.avatar_shape);
   }catch(e){
     S.activeProfile='default';
     if(typeof setActiveProfileAvatar==='function') setActiveProfileAvatar(null);

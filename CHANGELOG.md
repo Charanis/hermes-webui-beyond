@@ -17,6 +17,8 @@
 - Refined Profiles actions so the redundant header activate/delete icons are gone, inactive profiles show a compact yellow `Make Active` pill in the same title slot as the `Active` tag, and gateway state in the left profile list uses a live Wi-Fi icon beside the chat action instead of an ambiguous dot.
 - Kept fresh Profiles loads lightweight by making Hermes-wide skill count summaries opt-in for `/api/profiles`, lazy-loading uploaded image avatars instead of embedding multi-MB data URLs in profile summaries, and preventing session/profile filtering from recursively scanning every profile's `SKILL.md` files before the selected profile settings can become interactive.
 - Fixed the selected Profiles Skills tile so enabled counts use the same Hermes-wide skill total while preserving per-profile disabled state.
+- Removed noisy raw config-key badges from the Profiles context compression, work-step budget, and tool access tiles.
+- Added square and circle avatar shape controls to the Profiles Change avatar dialog, with the selected shape applied consistently to profile cards and the hero avatar frame.
 
 ## [v0.51.74] — 2026-05-16 — Release AX (stage-367 — 4-PR safe-lane batch — #2362 table-cell spacing + #2363 run-state-consistency RFC + #2365 custom_providers list-format + #2367 settings sidebar i18n)
 
