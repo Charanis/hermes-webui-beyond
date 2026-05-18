@@ -12,7 +12,9 @@ import json
 import os
 import sys
 import tempfile
+import types
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import urlparse
 
 import pytest
@@ -62,6 +64,22 @@ def _write_profile_state(profile_dir: Path, state: dict) -> None:
     state_path = profile_dir / "webui_state" / "profile_settings.json"
     state_path.parent.mkdir(parents=True, exist_ok=True)
     state_path.write_text(json.dumps(state), encoding="utf-8")
+
+
+_GIF_1X1 = (
+    b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff"
+    b"!\xf9\x04\x00\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01"
+    b"\x00\x00\x02\x02D\x01\x00;"
+)
+
+_PNG_1X1 = (
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
+    b"\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89"
+    b"\x00\x00\x00\nIDATx\x9cc`\x00\x00\x00\x02\x00\x01"
+    b"\xe2!\xbc3\x00\x00\x00\x00IEND\xaeB`\x82"
+)
+
+_JPEG_1X1 = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xd9"
 
 
 class _FakeHandler:
@@ -269,6 +287,199 @@ def test_profile_avatar_shape_rejects_removed_diamond_value():
 
         with pytest.raises(ValueError, match="square or circle"):
             profiles.update_profile_settings_api("coder", avatar_shape="diamond")
+
+
+def test_reactive_avatar_settings_default_to_static_mode():
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        _seed_profile(base, "coder", {"model": {"default": "x"}})
+        profiles = _reload_profiles_module(base)
+
+        settings = profiles.get_profile_avatar_settings_api("coder")
+
+        assert settings["avatar_mode"] == "static"
+        assert settings["reactive_avatar"]["slots"] == {}
+        assert settings["effective_reactive_avatar"]["idle"]["type"] == "static"
+
+
+def test_reactive_avatar_pack_saves_incomplete_slots_as_files():
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        profile_dir = _seed_profile(base, "coder", {"model": {"default": "x"}})
+        profiles = _reload_profiles_module(base)
+
+        result = profiles.update_profile_avatar_settings_api(
+            {"name": "coder", "avatar_mode": "reactive", "avatar_shape": "square"},
+            {"slot_idle": ("idle.gif", _GIF_1X1)},
+        )
+
+        slot = result["reactive_avatar"]["slots"]["idle"]
+        assert result["avatar_mode"] == "reactive"
+        assert result["avatar_shape"] == "square"
+        assert slot["filename"] == "idle.gif"
+        assert slot["content_type"] == "image/gif"
+        assert slot["size"] == len(_GIF_1X1)
+        assert slot["url"].startswith("api/profile/avatar-asset?name=coder&asset=")
+        assert (profile_dir / "webui_state" / "avatar_assets" / f"{slot['asset_id']}.gif").read_bytes() == _GIF_1X1
+        assert result["effective_reactive_avatar"]["thinking"]["state"] == "idle"
+
+
+def test_reactive_avatar_replacing_one_slot_preserves_other_slots():
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        _seed_profile(base, "coder", {"model": {"default": "x"}})
+        profiles = _reload_profiles_module(base)
+
+        first = profiles.update_profile_avatar_settings_api(
+            {"name": "coder", "avatar_mode": "reactive"},
+            {
+                "slot_idle": ("idle.gif", _GIF_1X1),
+                "slot_talking": ("talking.png", _PNG_1X1),
+            },
+        )
+        talking_asset = first["reactive_avatar"]["slots"]["talking"]["asset_id"]
+
+        second = profiles.update_profile_avatar_settings_api(
+            {"name": "coder", "avatar_mode": "reactive"},
+            {"slot_idle": ("idle.jpg", _JPEG_1X1)},
+        )
+
+        assert second["reactive_avatar"]["slots"]["idle"]["content_type"] == "image/jpeg"
+        assert second["reactive_avatar"]["slots"]["talking"]["asset_id"] == talking_asset
+
+
+def test_static_and_reactive_avatar_modes_are_non_destructive():
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        _seed_profile(base, "coder", {"model": {"default": "x"}})
+        profiles = _reload_profiles_module(base)
+
+        profiles.update_profile_settings_api(
+            "coder",
+            avatar={"type": "emoji", "value": "A"},
+            avatar_shape="circle",
+        )
+        profiles.update_profile_avatar_settings_api(
+            {"name": "coder", "avatar_mode": "reactive"},
+            {"slot_idle": ("idle.gif", _GIF_1X1)},
+        )
+        profiles.update_profile_avatar_settings_api({"name": "coder", "avatar_mode": "static"}, {})
+
+        static_mode = profiles.get_profile_avatar_settings_api("coder")
+        assert static_mode["avatar_mode"] == "static"
+        assert static_mode["avatar"] == {"type": "emoji", "value": "A"}
+        assert "idle" in static_mode["reactive_avatar"]["slots"]
+
+        profiles.update_profile_settings_api("coder", avatar=None)
+        cleared_static = profiles.get_profile_avatar_settings_api("coder")
+        assert cleared_static["avatar"] is None
+        assert "idle" in cleared_static["reactive_avatar"]["slots"]
+
+        profiles.update_profile_settings_api("coder", avatar={"type": "emoji", "value": "B"})
+        profiles.update_profile_avatar_settings_api({"name": "coder", "clear_reactive_avatar": True}, {})
+        cleared_pack = profiles.get_profile_avatar_settings_api("coder")
+        assert cleared_pack["avatar"] == {"type": "emoji", "value": "B"}
+        assert cleared_pack["reactive_avatar"]["slots"] == {}
+
+
+def test_profile_summary_includes_reactive_idle_payload_for_mode_switching():
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        profile_dir = _seed_profile(base, "coder", {"model": {"default": "x"}})
+
+        hermes_cli_pkg = types.ModuleType("hermes_cli")
+        hermes_cli_profiles = types.ModuleType("hermes_cli.profiles")
+        hermes_cli_profiles.list_profiles = lambda: [
+            SimpleNamespace(
+                name="coder",
+                path=profile_dir,
+                is_default=False,
+                gateway_running=False,
+                model="x",
+                provider=None,
+                has_env=False,
+                skill_count=0,
+            )
+        ]
+        saved_hermes_cli = {
+            name: sys.modules[name]
+            for name in ("hermes_cli", "hermes_cli.profiles")
+            if name in sys.modules
+        }
+        sys.modules["hermes_cli"] = hermes_cli_pkg
+        sys.modules["hermes_cli.profiles"] = hermes_cli_profiles
+        try:
+            profiles = _reload_profiles_module(base)
+            profiles.update_profile_settings_api(
+                "coder",
+                avatar={"type": "emoji", "value": "S"},
+            )
+            profiles.update_profile_avatar_settings_api(
+                {"name": "coder", "avatar_mode": "reactive"},
+                {"slot_idle": ("idle.gif", _GIF_1X1)},
+            )
+
+            summary = profiles.list_profiles_api()[0]
+        finally:
+            for name in ("hermes_cli", "hermes_cli.profiles"):
+                if name in saved_hermes_cli:
+                    sys.modules[name] = saved_hermes_cli[name]
+                else:
+                    sys.modules.pop(name, None)
+
+        assert summary["avatar"] == {"type": "emoji", "value": "S"}
+        assert summary["avatar_mode"] == "reactive"
+        assert summary["reactive_avatar"]["slots"]["idle"]["url"].startswith(
+            "api/profile/avatar-asset?name=coder&asset=idle-"
+        )
+        assert summary["effective_reactive_avatar"]["idle"]["type"] == "reactive"
+        assert summary["effective_reactive_avatar"]["idle"]["avatar"]["value"].startswith(
+            "api/profile/avatar-asset?name=coder&asset=idle-"
+        )
+
+
+def test_reactive_avatar_upload_rejects_spoofed_webp_without_state_change():
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        profile_dir = _seed_profile(base, "coder", {"model": {"default": "x"}})
+        profiles = _reload_profiles_module(base)
+
+        with pytest.raises(ValueError, match="unsupported avatar image"):
+            profiles.update_profile_avatar_settings_api(
+                {"name": "coder", "avatar_mode": "reactive"},
+                {"slot_idle": ("idle.webp", b"not actually webp")},
+            )
+
+        state_path = profile_dir / "webui_state" / "profile_settings.json"
+        assert not state_path.exists()
+
+
+def test_read_profile_avatar_asset_api_serves_metadata_listed_file():
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        _seed_profile(base, "coder", {"model": {"default": "x"}})
+        profiles = _reload_profiles_module(base)
+
+        result = profiles.update_profile_avatar_settings_api(
+            {"name": "coder", "avatar_mode": "reactive"},
+            {"slot_idle": ("idle.gif", _GIF_1X1)},
+        )
+        slot = result["reactive_avatar"]["slots"]["idle"]
+
+        payload, content_type, etag = profiles.read_profile_avatar_asset_api("coder", slot["asset_id"])
+
+        assert payload == _GIF_1X1
+        assert content_type == "image/gif"
+        assert etag == slot["sha256"][:16]
+        with pytest.raises(FileNotFoundError):
+            profiles.read_profile_avatar_asset_api("coder", "idle-missing")
 
 
 def test_profile_settings_default_compression_is_enabled():

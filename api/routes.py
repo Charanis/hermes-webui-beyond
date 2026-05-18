@@ -4114,6 +4114,51 @@ def handle_get(handler, parsed) -> bool:
         handler.wfile.write(payload)
         return True
 
+    if parsed.path == "/api/profile/avatar-asset":
+        qs = parse_qs(parsed.query)
+        name = qs.get("name", [""])[0]
+        asset = qs.get("asset", [""])[0]
+        if not name:
+            return bad(handler, "name is required")
+        if not asset:
+            return bad(handler, "asset is required")
+        try:
+            from api.profiles import read_profile_avatar_asset_api
+            payload, content_type, etag = read_profile_avatar_asset_api(name, asset)
+        except FileNotFoundError as e:
+            return bad(handler, _sanitize_error(e), 404)
+        except ValueError as e:
+            return bad(handler, _sanitize_error(e), 400)
+        if handler.headers.get("If-None-Match") == etag:
+            handler.send_response(304)
+            handler.send_header("ETag", etag)
+            handler.send_header("Cache-Control", "private, max-age=31536000, immutable")
+            handler.end_headers()
+            return True
+        handler.send_response(200)
+        handler.send_header("Content-Type", content_type)
+        handler.send_header("Content-Length", str(len(payload)))
+        handler.send_header("Cache-Control", "private, max-age=31536000, immutable")
+        handler.send_header("ETag", etag)
+        _security_headers(handler)
+        handler.end_headers()
+        handler.wfile.write(payload)
+        return True
+
+    if parsed.path == "/api/profile/avatar-settings":
+        from api.profiles import get_profile_avatar_settings_api
+
+        qs = parse_qs(parsed.query)
+        name = str(qs.get("name", [""])[0] or "").strip()
+        if not name:
+            return bad(handler, "name is required")
+        try:
+            return j(handler, get_profile_avatar_settings_api(name))
+        except FileNotFoundError as e:
+            return bad(handler, _sanitize_error(e), 404)
+        except ValueError as e:
+            return bad(handler, _sanitize_error(e), 400)
+
     if parsed.path == "/api/profile/skill_content":
         from api.profiles import resolve_profile_skill_file
         qs = parse_qs(parsed.query)
@@ -4255,6 +4300,20 @@ def handle_get(handler, parsed) -> bool:
             payload["avatar_shape"] = _read_profile_avatar_shape_for_home(get_active_hermes_home())
         except Exception:
             payload["avatar_shape"] = "circle"
+        try:
+            from api.profiles import get_profile_avatar_settings_api
+            avatar_settings = get_profile_avatar_settings_api(name)
+            payload["avatar_mode"] = avatar_settings.get("avatar_mode", "static")
+            payload["reactive_avatar"] = avatar_settings.get("reactive_avatar")
+            effective = avatar_settings.get("effective_reactive_avatar") or {}
+            for state_meta in effective.values():
+                if isinstance(state_meta, dict) and state_meta.get("type") == "static":
+                    state_meta["avatar"] = payload.get("avatar")
+            payload["effective_reactive_avatar"] = effective
+        except Exception:
+            payload["avatar_mode"] = "static"
+            payload["reactive_avatar"] = {"version": 1, "updated_at": None, "slots": {}}
+            payload["effective_reactive_avatar"] = {}
         return j(handler, payload)
 
     if parsed.path == "/api/profile/settings":
@@ -4450,6 +4509,23 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/transcribe":
         return handle_transcribe(handler)
+
+    if parsed.path == "/api/profile/avatar-settings":
+        content_type = handler.headers.get("Content-Type", "")
+        if content_type.lower().startswith("multipart/form-data"):
+            try:
+                from api.upload import parse_multipart
+                from api.profiles import REACTIVE_AVATAR_MULTIPART_MAX_BYTES, update_profile_avatar_settings_api
+
+                content_length = int(handler.headers.get("Content-Length", "0") or 0)
+                if content_length > REACTIVE_AVATAR_MULTIPART_MAX_BYTES:
+                    return bad(handler, "reactive avatar uploads are too large", status=413)
+                fields, files = parse_multipart(handler.rfile, content_type, content_length)
+                return j(handler, update_profile_avatar_settings_api(fields, files))
+            except FileNotFoundError as e:
+                return bad(handler, _sanitize_error(e), 404)
+            except ValueError as e:
+                return bad(handler, _sanitize_error(e), 400)
 
     if diag:
         diag.stage("read_body")
@@ -5491,6 +5567,16 @@ def handle_post(handler, parsed) -> bool:
                 updates[key] = body.get(key)
         try:
             return j(handler, update_profile_settings_api(name, **updates))
+        except FileNotFoundError as e:
+            return bad(handler, _sanitize_error(e), 404)
+        except ValueError as e:
+            return bad(handler, _sanitize_error(e), 400)
+
+    if parsed.path == "/api/profile/avatar-settings":
+        from api.profiles import update_profile_avatar_settings_api
+
+        try:
+            return j(handler, update_profile_avatar_settings_api(body, {}))
         except FileNotFoundError as e:
             return bad(handler, _sanitize_error(e), 404)
         except ValueError as e:

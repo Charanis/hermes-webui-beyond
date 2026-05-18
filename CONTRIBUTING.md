@@ -113,6 +113,7 @@ This project is heavily UI-driven. If you change interaction flows, session beha
 - test the happy path
 - test reload behavior where relevant
 - test narrow/mobile layouts where relevant
+- verify unrelated visible state is preserved when the action is meant to be local, for example by setting a form control to an unusual value and confirming it survives the change
 - include before/after images in the PR
 
 ### Security and Safety Matter

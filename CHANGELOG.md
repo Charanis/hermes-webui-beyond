@@ -4,8 +4,10 @@
 
 ### Added
 
+- Added reactive profile avatars. The Profiles Change avatar dialog now supports a Static/Reactive mode switch plus per-state uploads for Idle, Thinking, Talking, Working, and Error avatars; live assistant turns switch avatar state as the session thinks, streams text, uses tools, or hits an error.
 - Expanded Profiles runtime controls: the former default-model tile is now a compact Runtime tile with default/fallback model pickers, reasoning, and an auxiliary tool model submenu that reuses the existing searchable provider-aware model picker. Profiles also now expose response mode, hero-level default space selection through the existing workspace picker, threshold-only context compression, work-step budget, and friendly tool access controls backed by `/api/profile/settings`.
 - Added a compact frontend validation playbook for UI contributors, covering reuse of existing controls, state boundaries, performance checks, visual QA, and durable lesson capture.
+- Documented a profile UI state-preservation gate so local profile actions prove unrelated controls and selection state do not remount or flash to defaults.
 
 ### Fixed
 
@@ -19,6 +21,11 @@
 - Fixed the selected Profiles Skills tile so enabled counts use the same Hermes-wide skill total while preserving per-profile disabled state.
 - Removed noisy raw config-key badges from the Profiles context compression, work-step budget, and tool access tiles.
 - Added square and circle avatar shape controls to the Profiles Change avatar dialog, with the selected shape applied consistently to profile cards and the hero avatar frame.
+- Kept static and reactive avatar assets non-destructive when switching modes: missing reactive slots fall back through saved Idle/static avatars, clearing static avatars does not delete animation slots, clearing animations does not delete the static fallback, and profile switches do not leak the previous profile's reactive avatar pack while the new settings load.
+- Polished the Profiles Change avatar dialog for reactive avatars with a side-by-side live preview, styled Static/Reactive selector cards, hidden native file inputs behind consistent upload buttons, per-state preview controls, and transparent-image rendering that no longer shows the fallback layer behind loaded avatars.
+- Fixed Profiles summary and detail rendering so a profile with both a static avatar and reactive animations shows the reactive Idle asset whenever Reactive mode is selected, instead of continuing to display the static image. Reduced-motion preferences still suppress extra CSS motion, but no longer silently override the user's Static/Reactive avatar choice.
+- Avatar saves now patch the profile card, hero avatar, and open profile dropdown in place instead of reloading the whole Profiles panel, preventing runtime controls from briefly jumping back to default values.
+- Profile switches no longer wait for a follow-up avatar-settings request, and background stream events no longer change the visible reactive avatar after the user has switched to another session.
 
 ## [v0.51.74] — 2026-05-16 — Release AX (stage-367 — 4-PR safe-lane batch — #2362 table-cell spacing + #2363 run-state-consistency RFC + #2365 custom_providers list-format + #2367 settings sidebar i18n)
 

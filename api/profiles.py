@@ -19,6 +19,7 @@ import shutil
 import sys
 import threading
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
@@ -969,9 +970,27 @@ _MISSING = object()
 _PROFILE_SETTINGS_FILE = 'profile_settings.json'
 _AVATAR_TYPES = {'emoji', 'url', 'asset', 'image'}
 _AVATAR_SHAPES = {'square', 'circle'}
+_AVATAR_MODES = {'static', 'reactive'}
 _DEFAULT_AVATAR_SHAPE = 'circle'
+_DEFAULT_AVATAR_MODE = 'static'
 _MAX_AVATAR_VALUE_LEN = 4 * 1024 * 1024
 _MAX_EMOJI_AVATAR_LEN = 64
+_MAX_REACTIVE_AVATAR_SLOT_BYTES = 5 * 1024 * 1024
+_MAX_REACTIVE_AVATAR_PACK_BYTES = 20 * 1024 * 1024
+REACTIVE_AVATAR_MULTIPART_MAX_BYTES = _MAX_REACTIVE_AVATAR_PACK_BYTES + 1024 * 1024
+_REACTIVE_AVATAR_ASSET_DIR = 'avatar_assets'
+_REACTIVE_AVATAR_STATES = ('idle', 'thinking', 'talking', 'working', 'error')
+_REACTIVE_AVATAR_FILE_FIELDS = {
+    f'slot_{state}': state for state in _REACTIVE_AVATAR_STATES
+}
+_REACTIVE_AVATAR_FALLBACKS = {
+    'idle': ('idle',),
+    'thinking': ('thinking', 'idle'),
+    'talking': ('talking', 'thinking', 'idle'),
+    'working': ('working', 'thinking', 'idle'),
+    'error': ('error', 'idle'),
+}
+_REACTIVE_AVATAR_ASSET_ID_RE = re.compile(r'^[a-z]+-[a-f0-9]{16}$')
 _IMAGE_AVATAR_RE = re.compile(r'^data:image/(png|jpeg|jpg|gif|webp);base64,[A-Za-z0-9+/=\s]+$')
 _IMAGE_AVATAR_CAPTURE_RE = re.compile(r'^data:(image/(?:png|jpeg|jpg|gif|webp));base64,([A-Za-z0-9+/=\s]+)$')
 
@@ -1596,6 +1615,10 @@ def _write_profile_settings_state(profile_home: Path, state: dict) -> None:
     tmp.replace(path)
 
 
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+
+
 def _read_profile_avatar_for_home(profile_home: Path):
     state = _read_profile_settings_state(profile_home)
     avatar = state.get('avatar')
@@ -1621,6 +1644,241 @@ def _read_profile_avatar_shape_for_home(profile_home: Path):
         return _normalize_avatar_shape_payload(state.get('avatar_shape'))
     except ValueError:
         return _DEFAULT_AVATAR_SHAPE
+
+
+def _normalize_avatar_mode_payload(mode):
+    if mode is None:
+        return _DEFAULT_AVATAR_MODE
+    if not isinstance(mode, str):
+        raise ValueError('avatar_mode must be a string')
+    normalized = mode.strip().lower()
+    if not normalized:
+        return _DEFAULT_AVATAR_MODE
+    if normalized not in _AVATAR_MODES:
+        raise ValueError('avatar_mode must be static or reactive')
+    return normalized
+
+
+def _read_profile_avatar_mode_for_home(profile_home: Path) -> str:
+    state = _read_profile_settings_state(profile_home)
+    try:
+        return _normalize_avatar_mode_payload(state.get('avatar_mode'))
+    except ValueError:
+        return _DEFAULT_AVATAR_MODE
+
+
+def _reactive_avatar_asset_root(profile_home: Path) -> Path:
+    return profile_home / 'webui_state' / _REACTIVE_AVATAR_ASSET_DIR
+
+
+def _avatar_content_ext(content_type: str) -> str:
+    if content_type == 'image/jpeg':
+        return 'jpg'
+    if content_type == 'image/png':
+        return 'png'
+    if content_type == 'image/gif':
+        return 'gif'
+    if content_type == 'image/webp':
+        return 'webp'
+    raise ValueError('unsupported avatar image')
+
+
+def _detect_reactive_avatar_upload(filename: str, payload: bytes) -> dict:
+    if not isinstance(payload, (bytes, bytearray)):
+        raise ValueError('avatar upload must be bytes')
+    payload = bytes(payload)
+    if not payload:
+        raise ValueError('avatar upload is empty')
+    if len(payload) > _MAX_REACTIVE_AVATAR_SLOT_BYTES:
+        raise ValueError('avatar upload is too large')
+
+    content_type = None
+    animated = False
+    if payload.startswith(b'GIF87a') or payload.startswith(b'GIF89a'):
+        content_type = 'image/gif'
+        animated = payload.count(b'\x2c') > 1
+    elif payload.startswith(b'\x89PNG\r\n\x1a\n'):
+        content_type = 'image/png'
+    elif payload.startswith(b'\xff\xd8'):
+        content_type = 'image/jpeg'
+    elif len(payload) >= 12 and payload[:4] == b'RIFF' and payload[8:12] == b'WEBP':
+        content_type = 'image/webp'
+        animated = b'ANIM' in payload[12:] or b'ANMF' in payload[12:]
+
+    if not content_type:
+        raise ValueError('unsupported avatar image')
+
+    digest = hashlib.sha256(payload).hexdigest()
+    raw_name = Path(str(filename or '')).name[:200]
+    return {
+        'filename': raw_name or f'avatar.{_avatar_content_ext(content_type)}',
+        'content_type': content_type,
+        'ext': _avatar_content_ext(content_type),
+        'size': len(payload),
+        'sha256': digest,
+        'animated': bool(animated),
+    }
+
+
+def _normalize_reactive_avatar_pack(raw) -> dict:
+    slots = {}
+    updated_at = None
+    if isinstance(raw, dict):
+        updated_at = raw.get('updated_at') if isinstance(raw.get('updated_at'), str) else None
+        raw_slots = raw.get('slots')
+        if isinstance(raw_slots, dict):
+            for state in _REACTIVE_AVATAR_STATES:
+                meta = raw_slots.get(state)
+                if not isinstance(meta, dict):
+                    continue
+                asset_id = str(meta.get('asset_id') or '').strip()
+                content_type = str(meta.get('content_type') or '').strip().lower()
+                if not _REACTIVE_AVATAR_ASSET_ID_RE.fullmatch(asset_id):
+                    continue
+                try:
+                    ext = str(meta.get('ext') or _avatar_content_ext(content_type)).strip().lower()
+                    if ext != _avatar_content_ext(content_type):
+                        continue
+                except ValueError:
+                    continue
+                sha256 = str(meta.get('sha256') or '').strip().lower()
+                if not re.fullmatch(r'[a-f0-9]{64}', sha256):
+                    continue
+                try:
+                    size = int(meta.get('size') or 0)
+                except (TypeError, ValueError):
+                    size = 0
+                if size <= 0:
+                    continue
+                filename = Path(str(meta.get('filename') or f'{state}.{ext}')).name[:200]
+                slots[state] = {
+                    'state': state,
+                    'asset_id': asset_id,
+                    'filename': filename or f'{state}.{ext}',
+                    'content_type': content_type,
+                    'ext': ext,
+                    'size': size,
+                    'sha256': sha256,
+                    'animated': bool(meta.get('animated')),
+                }
+    return {
+        'version': 1,
+        'updated_at': updated_at,
+        'slots': slots,
+    }
+
+
+def _reactive_avatar_slot_url(profile_name: str, meta: dict) -> str:
+    digest = str(meta.get('sha256') or '')[:16]
+    asset_id = str(meta.get('asset_id') or '')
+    return (
+        f'api/profile/avatar-asset?name={quote(profile_name, safe="")}'
+        f'&asset={quote(asset_id, safe="")}&v={quote(digest, safe="")}'
+    )
+
+
+def _reactive_avatar_pack_for_response(profile_name: str, raw) -> dict:
+    pack = _normalize_reactive_avatar_pack(raw)
+    slots = {}
+    for state, meta in pack['slots'].items():
+        response_meta = dict(meta)
+        response_meta['url'] = _reactive_avatar_slot_url(profile_name, meta)
+        slots[state] = response_meta
+    return {
+        'version': pack['version'],
+        'updated_at': pack['updated_at'],
+        'slots': slots,
+    }
+
+
+def _effective_reactive_avatar(profile_name: str, avatar, raw_pack) -> dict:
+    pack = _normalize_reactive_avatar_pack(raw_pack)
+    effective = {}
+    for state in _REACTIVE_AVATAR_STATES:
+        chosen_state = None
+        chosen_meta = None
+        for candidate in _REACTIVE_AVATAR_FALLBACKS[state]:
+            meta = pack['slots'].get(candidate)
+            if meta:
+                chosen_state = candidate
+                chosen_meta = meta
+                break
+        if chosen_meta is not None:
+            effective[state] = {
+                'type': 'reactive',
+                'state': chosen_state,
+                'avatar': {
+                    'type': 'asset',
+                    'value': _reactive_avatar_slot_url(profile_name, chosen_meta),
+                    'content_type': chosen_meta.get('content_type'),
+                    'animated': bool(chosen_meta.get('animated')),
+                },
+            }
+        else:
+            effective[state] = {
+                'type': 'static',
+                'state': 'static',
+                'avatar': avatar if isinstance(avatar, dict) else None,
+            }
+    return effective
+
+
+def _reactive_avatar_asset_path(profile_home: Path, meta: dict) -> Path:
+    asset_id = str(meta.get('asset_id') or '')
+    if not _REACTIVE_AVATAR_ASSET_ID_RE.fullmatch(asset_id):
+        raise FileNotFoundError('Avatar asset not found.')
+    return _reactive_avatar_asset_root(profile_home) / f'{asset_id}.{meta.get("ext")}'
+
+
+def _truthy_avatar_field(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return value != 0
+    return str(value).strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _avatar_payload_from_field(value):
+    if value is _MISSING:
+        return _MISSING
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped or stripped.lower() == 'null':
+            return None
+        try:
+            loaded = json.loads(stripped)
+        except json.JSONDecodeError as exc:
+            raise ValueError('avatar must be a JSON object') from exc
+        if loaded is None or isinstance(loaded, dict):
+            return loaded
+    raise ValueError('avatar must be an object')
+
+
+def _clear_reactive_slot_names(payload: dict) -> set[str]:
+    states = set()
+    raw = payload.get('clear_slots') if isinstance(payload, dict) else None
+    if isinstance(raw, str):
+        candidates = re.split(r'[\s,]+', raw)
+    elif isinstance(raw, (list, tuple, set)):
+        candidates = raw
+    else:
+        candidates = ()
+    for candidate in candidates:
+        state = str(candidate or '').strip().lower()
+        if state:
+            if state not in _REACTIVE_AVATAR_STATES:
+                raise ValueError('clear_slots contains an unknown avatar state')
+            states.add(state)
+    for state in _REACTIVE_AVATAR_STATES:
+        if _truthy_avatar_field(payload.get(f'clear_slot_{state}')):
+            states.add(state)
+    return states
 
 
 def _profile_avatar_for_summary(name: str, profile_home: Path):
@@ -1674,6 +1932,40 @@ def get_profile_avatar_summary_api(name: str):
     return _profile_avatar_for_summary(name, profile_home)
 
 
+def get_profile_avatar_settings_api(name: str) -> dict:
+    """Return static and reactive avatar settings for one profile."""
+    name, profile_home = _require_profile_home_for_settings(name)
+    state = _read_profile_settings_state(profile_home)
+    avatar = state.get('avatar') if isinstance(state.get('avatar'), dict) else None
+    pack = state.get('reactive_avatar')
+    return {
+        'name': name,
+        'avatar': avatar,
+        'avatar_shape': _read_profile_avatar_shape_for_home(profile_home),
+        'avatar_mode': _read_profile_avatar_mode_for_home(profile_home),
+        'reactive_avatar': _reactive_avatar_pack_for_response(name, pack),
+        'effective_reactive_avatar': _effective_reactive_avatar(name, avatar, pack),
+    }
+
+
+def read_profile_avatar_asset_api(name: str, asset_id: str) -> tuple[bytes, str, str]:
+    """Return a file-backed reactive avatar asset as ``(bytes, content_type, etag)``."""
+    name, profile_home = _require_profile_home_for_settings(name)
+    asset_id = str(asset_id or '').strip()
+    if not _REACTIVE_AVATAR_ASSET_ID_RE.fullmatch(asset_id):
+        raise FileNotFoundError('Avatar asset not found.')
+    state = _read_profile_settings_state(profile_home)
+    pack = _normalize_reactive_avatar_pack(state.get('reactive_avatar'))
+    for meta in pack['slots'].values():
+        if meta.get('asset_id') != asset_id:
+            continue
+        path = _reactive_avatar_asset_path(profile_home, meta)
+        if not path.is_file():
+            raise FileNotFoundError('Avatar asset not found.')
+        return path.read_bytes(), meta['content_type'], str(meta['sha256'])[:16]
+    raise FileNotFoundError('Avatar asset not found.')
+
+
 def _normalize_avatar_payload(avatar):
     if avatar is None:
         return None
@@ -1708,17 +2000,127 @@ def _normalize_avatar_payload(avatar):
     return {'type': avatar_type, 'value': value}
 
 
+def _remove_reactive_avatar_asset(profile_home: Path, meta: dict) -> None:
+    try:
+        path = _reactive_avatar_asset_path(profile_home, meta)
+        path.unlink(missing_ok=True)
+    except Exception:
+        logger.debug("Failed to remove reactive avatar asset", exc_info=True)
+
+
+def update_profile_avatar_settings_api(payload: dict, files: dict | None = None) -> dict:
+    """Update static/reactive avatar mode settings and uploaded reactive slots."""
+    if not isinstance(payload, dict):
+        raise ValueError('payload must be an object')
+    files = files or {}
+    name = str(payload.get('name') or '').strip()
+    if not name:
+        raise ValueError('name is required')
+    name, profile_home = _require_profile_home_for_settings(name)
+
+    state = _read_profile_settings_state(profile_home)
+    current_pack = _normalize_reactive_avatar_pack(state.get('reactive_avatar'))
+    current_slots = dict(current_pack['slots'])
+    current_asset_ids = {
+        str(meta.get('asset_id') or '')
+        for meta in current_slots.values()
+        if isinstance(meta, dict)
+    }
+
+    avatar_value = _avatar_payload_from_field(payload.get('avatar', _MISSING))
+    if avatar_value is not _MISSING:
+        normalized_avatar = _normalize_avatar_payload(avatar_value)
+        if normalized_avatar is None:
+            state.pop('avatar', None)
+        else:
+            state['avatar'] = normalized_avatar
+
+    if 'avatar_shape' in payload:
+        state['avatar_shape'] = _normalize_avatar_shape_payload(payload.get('avatar_shape'))
+    if 'avatar_mode' in payload:
+        state['avatar_mode'] = _normalize_avatar_mode_payload(payload.get('avatar_mode'))
+
+    clear_pack = _truthy_avatar_field(payload.get('clear_reactive_avatar'))
+    clear_slots = set(_REACTIVE_AVATAR_STATES) if clear_pack else _clear_reactive_slot_names(payload)
+
+    incoming = {}
+    for field, upload in files.items():
+        slot = _REACTIVE_AVATAR_FILE_FIELDS.get(str(field))
+        if not slot:
+            continue
+        if not isinstance(upload, (list, tuple)) or len(upload) < 2:
+            raise ValueError('avatar upload is invalid')
+        filename, body = upload[0], upload[1]
+        meta = _detect_reactive_avatar_upload(filename, body)
+        meta['state'] = slot
+        meta['asset_id'] = f'{slot}-{meta["sha256"][:16]}'
+        incoming[slot] = (meta, bytes(body))
+        clear_slots.discard(slot)
+
+    next_slots = {
+        slot: meta for slot, meta in current_slots.items()
+        if slot not in clear_slots and slot not in incoming
+    }
+    total_size = sum(int(meta.get('size') or 0) for meta in next_slots.values())
+    total_size += sum(meta['size'] for meta, _body in incoming.values())
+    if total_size > _MAX_REACTIVE_AVATAR_PACK_BYTES:
+        raise ValueError('reactive avatar uploads are too large')
+
+    asset_root = _reactive_avatar_asset_root(profile_home)
+    written = []
+    try:
+        for slot, (meta, body) in incoming.items():
+            path = asset_root / f'{meta["asset_id"]}.{meta["ext"]}'
+            asset_root.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(path.suffix + '.tmp')
+            tmp.write_bytes(body)
+            tmp.replace(path)
+            written.append(meta)
+            next_slots[slot] = meta
+
+        if clear_pack or clear_slots or incoming or 'reactive_avatar' in state:
+            state['reactive_avatar'] = {
+                'version': 1,
+                'updated_at': _utc_now_iso(),
+                'slots': next_slots,
+            }
+        _write_profile_settings_state(profile_home, state)
+    except Exception:
+        for meta in written:
+            if str(meta.get('asset_id') or '') not in current_asset_ids:
+                _remove_reactive_avatar_asset(profile_home, meta)
+        raise
+
+    referenced = {
+        str(meta.get('asset_id') or '')
+        for meta in next_slots.values()
+        if isinstance(meta, dict)
+    }
+    for slot, meta in current_slots.items():
+        if slot in clear_slots or slot in incoming:
+            if str(meta.get('asset_id') or '') not in referenced:
+                _remove_reactive_avatar_asset(profile_home, meta)
+
+    return get_profile_avatar_settings_api(name)
+
+
 def get_profile_settings_api(name: str, *, include_avatar: bool = True) -> dict:
     """Return structured WebUI settings for a profile."""
     name, profile_home = _require_profile_home_for_settings(name)
     config_data = _load_profile_config_for_settings(profile_home)
     model, provider = _extract_profile_model_settings(config_data)
+    state = _read_profile_settings_state(profile_home)
+    avatar = _read_profile_avatar_for_home(profile_home) if include_avatar else None
+    effective_avatar = avatar if include_avatar else _profile_avatar_for_summary(name, profile_home)
     return {
         'name': name,
         'provider': provider,
         'model': model,
-        'avatar': _read_profile_avatar_for_home(profile_home) if include_avatar else None,
+        'avatar': avatar,
         'avatar_shape': _read_profile_avatar_shape_for_home(profile_home),
+        'avatar_mode': _read_profile_avatar_mode_for_home(profile_home),
+        'reactive_avatar': _reactive_avatar_pack_for_response(name, state.get('reactive_avatar')),
+        'effective_reactive_avatar': _effective_reactive_avatar(name, effective_avatar, state.get('reactive_avatar')),
         'reasoning_effort': _extract_profile_reasoning_effort(config_data),
         'fallback_model': _extract_profile_fallback_model(config_data),
         'response_mode': _extract_profile_response_mode(config_data),
@@ -2144,6 +2546,14 @@ def list_profiles_api(include_skill_counts: bool = False,
     active = get_active_profile_name()
     result = []
     for p in infos:
+        profile_home = Path(p.path)
+        avatar = (
+            _read_profile_avatar_for_home(profile_home)
+            if include_full_avatars
+            else _profile_avatar_for_summary(p.name, profile_home)
+        )
+        state = _read_profile_settings_state(profile_home)
+        reactive_pack = state.get('reactive_avatar')
         row = {
             'name': p.name,
             'path': str(p.path),
@@ -2152,12 +2562,11 @@ def list_profiles_api(include_skill_counts: bool = False,
             'gateway_running': p.gateway_running,
             'model': p.model,
             'provider': p.provider,
-            'avatar': (
-                _read_profile_avatar_for_home(Path(p.path))
-                if include_full_avatars
-                else _profile_avatar_for_summary(p.name, Path(p.path))
-            ),
-            'avatar_shape': _read_profile_avatar_shape_for_home(Path(p.path)),
+            'avatar': avatar,
+            'avatar_shape': _read_profile_avatar_shape_for_home(profile_home),
+            'avatar_mode': _read_profile_avatar_mode_for_home(profile_home),
+            'reactive_avatar': _reactive_avatar_pack_for_response(p.name, reactive_pack),
+            'effective_reactive_avatar': _effective_reactive_avatar(p.name, avatar, reactive_pack),
             'has_env': p.has_env,
             'skill_count': p.skill_count,
         }
@@ -2175,6 +2584,13 @@ def list_profiles_api(include_skill_counts: bool = False,
 def _default_profile_dict(include_skill_counts: bool = False,
                           include_full_avatars: bool = False) -> dict:
     """Fallback profile dict when hermes_cli is not importable."""
+    avatar = (
+        _read_profile_avatar_for_home(_DEFAULT_HERMES_HOME)
+        if include_full_avatars
+        else _profile_avatar_for_summary('default', _DEFAULT_HERMES_HOME)
+    )
+    state = _read_profile_settings_state(_DEFAULT_HERMES_HOME)
+    reactive_pack = state.get('reactive_avatar')
     row = {
         'name': 'default',
         'path': str(_DEFAULT_HERMES_HOME),
@@ -2183,12 +2599,11 @@ def _default_profile_dict(include_skill_counts: bool = False,
         'gateway_running': False,
         'model': None,
         'provider': None,
-        'avatar': (
-            _read_profile_avatar_for_home(_DEFAULT_HERMES_HOME)
-            if include_full_avatars
-            else _profile_avatar_for_summary('default', _DEFAULT_HERMES_HOME)
-        ),
+        'avatar': avatar,
         'avatar_shape': _read_profile_avatar_shape_for_home(_DEFAULT_HERMES_HOME),
+        'avatar_mode': _read_profile_avatar_mode_for_home(_DEFAULT_HERMES_HOME),
+        'reactive_avatar': _reactive_avatar_pack_for_response('default', reactive_pack),
+        'effective_reactive_avatar': _effective_reactive_avatar('default', avatar, reactive_pack),
         'has_env': (_DEFAULT_HERMES_HOME / '.env').exists(),
         'skill_count': 0,
     }
@@ -2658,6 +3073,13 @@ def duplicate_profile_api(name: str, new_name: str, *, clone_all: bool = False) 
             dst_state = _profile_settings_state_path(dst_dir)
             dst_state.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src_state, dst_state)
+        src_assets = _reactive_avatar_asset_root(src_dir)
+        if src_assets.is_dir():
+            shutil.copytree(
+                src_assets,
+                _reactive_avatar_asset_root(dst_dir),
+                dirs_exist_ok=True,
+            )
     except OSError:
         logger.debug("Failed to copy WebUI state during duplicate", exc_info=True)
 
@@ -2676,6 +3098,7 @@ def duplicate_profile_api(name: str, new_name: str, *, clone_all: bool = False) 
         'provider': None,
         'avatar': _read_profile_avatar_for_home(dst_dir),
         'avatar_shape': _read_profile_avatar_shape_for_home(dst_dir),
+        'avatar_mode': _read_profile_avatar_mode_for_home(dst_dir),
         'has_env': (dst_dir / '.env').exists(),
         'skill_count': 0,
     }

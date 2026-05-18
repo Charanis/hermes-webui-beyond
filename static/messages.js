@@ -386,6 +386,7 @@ async function send(){
     // Only hide approval card if it belongs to the session that just finished
     if(!_approvalSessionId || _approvalSessionId===activeSid) hideApprovalCard(true);removeThinking();
     if(!_clarifySessionId || _clarifySessionId===activeSid) hideClarifyCard(true, 'terminal');
+    if(typeof setReactiveAvatarState==='function') setReactiveAvatarState('error',{liveOnly:true,holdMs:2600});
     S.messages.push({role:'assistant',content:`**Error:** ${errMsg}`});
     _queueDrainSid=activeSid;renderMessages();setBusy(false);setComposerStatus(`Error: ${errMsg}`);
     if(typeof clearOptimisticSessionStreaming==='function') clearOptimisticSessionStreaming(activeSid);
@@ -1198,6 +1199,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     source.addEventListener('token',e=>{
       if(_terminalStateReached||_streamFinalized) return;
       if(!S.session||S.session.session_id!==activeSid) return;
+      if(typeof setReactiveAvatarState==='function') setReactiveAvatarState('talking',{liveOnly:true});
       const d=JSON.parse(e.data);
       assistantText+=d.text;
       syncInflightAssistantMessage();
@@ -1216,6 +1218,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(!visible){
         return;
       }
+      if(typeof setReactiveAvatarState==='function') setReactiveAvatarState('talking',{liveOnly:true});
       if(alreadyStreamed){
         _resetAssistantSegment();
         return;
@@ -1240,6 +1243,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       liveReasoningText += d.text || '';
       syncInflightAssistantMessage();
       if(!S.session||S.session.session_id!==activeSid) return;
+      if(typeof setReactiveAvatarState==='function') setReactiveAvatarState('thinking',{liveOnly:true});
       // Render thinking card synchronously — not via rAF — so the DOM is
       // up-to-date before a 'tool' event in the same microtask batch calls
       // finalizeThinkingCard(). The old rAF-only path caused a race where
@@ -1266,6 +1270,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       persistInflightState();
 
       if(!S.session||S.session.session_id!==activeSid) return;
+      if(typeof setReactiveAvatarState==='function') setReactiveAvatarState('working',{liveOnly:true});
       // NOTE: don't removeThinking() here — keep the thinking card visible
       // above the tool card so the turn reads top-to-bottom as:
       // user → thinking → tool cards → response. Removing it caused the card
@@ -1309,6 +1314,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       S.toolCalls=inflight.toolCalls;
       persistInflightState();
       if(!S.session||S.session.session_id!==activeSid) return;
+      if(typeof setReactiveAvatarState==='function') setReactiveAvatarState('working',{liveOnly:true});
       appendLiveToolCard(tc);
       scrollIfPinned();
     });
@@ -1599,6 +1605,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // Context auto-compression is starting. Surface the same calm running
       // compression card as manual /compress while the summarizer LLM call runs.
       if(!S.session||S.session.session_id!==activeSid) return;
+      if(typeof setReactiveAvatarState==='function') setReactiveAvatarState('working',{liveOnly:true});
       let d={};
       try{ d=JSON.parse(e.data||'{}')||{}; }catch(_){ d={}; }
       if(d.session_id&&d.session_id!==activeSid) return;
@@ -1673,6 +1680,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _clearApprovalForOwner();
       _clearClarifyForOwner('terminal');
       if(S.session&&S.session.session_id===activeSid){
+        if(typeof setReactiveAvatarState==='function') setReactiveAvatarState('error',{liveOnly:true,holdMs:2600});
         S.activeStreamId=null;
         clearLiveToolCards();if(!assistantText)removeThinking();
         try{
@@ -1769,6 +1777,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _clearApprovalForOwner();
       _clearClarifyForOwner('cancelled');
       if(S.session&&S.session.session_id===activeSid){
+        if(typeof setReactiveAvatarState==='function') setReactiveAvatarState('idle',{liveOnly:true});
         S.activeStreamId=null;
       }
       // Fetch latest session from server to get accurate message list (includes cancel status)
@@ -1870,6 +1879,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _clearApprovalForOwner();
     _clearClarifyForOwner('terminal');
     if(S.session&&S.session.session_id===activeSid){
+      if(typeof setReactiveAvatarState==='function') setReactiveAvatarState('error',{liveOnly:true,holdMs:2600});
       S.activeStreamId=null;
       clearLiveToolCards();if(!assistantText)removeThinking();
       S.messages.push({role:'assistant',content:'**Error:** Connection lost'});renderMessages({preserveScroll:true});

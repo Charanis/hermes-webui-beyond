@@ -37,6 +37,21 @@ def _extract_function(src: str, name: str) -> str:
     return src[m.start():i]
 
 
+def _extract_event_listener(src: str, event_name: str) -> str:
+    marker = f"source.addEventListener('{event_name}',e=>{{"
+    start = src.find(marker)
+    assert start != -1, f"event listener {event_name} not found"
+    i, depth = src.find("{", start) + 1, 1
+    while i < len(src) and depth > 0:
+        c = src[i]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+        i += 1
+    return src[start:i]
+
+
 # ── Wiring of new icons + CSS ─────────────────────────────────────────────
 
 
@@ -182,6 +197,23 @@ def test_profile_avatar_save_posts_shape_setting():
     assert "_setProfileAvatarDialogShape" in route
 
 
+def test_profile_avatar_save_patches_surfaces_without_reloading_panel():
+    save = _extract_function(PANELS_JS, "_saveProfileAvatar")
+    assert "loadProfilesPanel()" not in save, \
+        "avatar saves must not rebuild Profiles detail and flicker runtime sliders back to defaults"
+    assert "_refreshProfileAvatarSurfaces(profileName)" in save, \
+        "avatar saves should patch profile card/hero/dropdown avatars in place"
+    refresh = _extract_function(PANELS_JS, "_refreshProfileAvatarSurfaces")
+    assert "profileHeroAvatar" in refresh
+    assert "profile-card" in refresh
+    assert "profileDropdown" in refresh
+    assert "_replaceProfileAvatarElement" in refresh
+    replace = _extract_function(PANELS_JS, "_replaceProfileAvatarElement")
+    assert "_profileAvatarForUi" in replace
+    assert "_renderProfileDetail" not in refresh, \
+        "avatar-only updates must not tear down the selected profile detail"
+
+
 def test_avatar_shape_classes_apply_to_inner_and_hero_frames():
     assert ".profile-avatar-shape--square" in STYLE_CSS
     assert ".profile-avatar-shape--circle" in STYLE_CSS
@@ -195,6 +227,127 @@ def test_circle_hero_avatar_keeps_change_button_visible():
     assert hero_rule, "hero avatar frame should not clip the change-avatar button"
     inner_rule = re.search(r"\.profile-hero-avatar \.profile-avatar\s*\{[^}]*overflow:hidden", STYLE_CSS)
     assert inner_rule, "inner avatar should still clip the image to the selected shape"
+
+
+def test_reactive_avatar_dialog_uses_polished_editor_chrome():
+    dialog = _extract_function(PANELS_JS, "_profileOpsAvatarDialog")
+    assert "profile-avatar-dialog-layout" in dialog, \
+        "avatar editor should use the two-column preview/editor layout"
+    assert "profile-avatar-mode-card" in dialog, \
+        "static/reactive choice should be a styled card selector, not raw buttons"
+    assert "profile-avatar-runtime-option-title" in dialog
+    assert "profile-avatar-runtime-option-copy" in dialog
+    assert "profile-avatar-preview-states" in dialog, \
+        "reactive editor must expose state preview buttons from day one"
+    assert "profile-avatar-preview-summary" in dialog
+
+
+def test_reactive_avatar_uploads_hide_native_file_inputs():
+    dialog = _extract_function(PANELS_JS, "_profileOpsAvatarDialog")
+    assert "profile-reactive-file-input" in dialog
+    assert "profile-reactive-slot-upload" in dialog
+    assert "profile-reactive-slot-actions" in dialog
+    assert "profile-static-upload-input" in dialog
+    assert "profile-static-upload-trigger" in dialog
+    assert 'class="profile-reactive-file-input" type="file"' in dialog
+    assert 'tabindex="-1" aria-hidden="true"' in dialog
+    assert ".profile-reactive-file-input" in STYLE_CSS
+    assert ".profile-static-upload-input" in STYLE_CSS
+    assert re.search(r"\.profile-reactive-file-input\s*\{[^}]*position:absolute", STYLE_CSS), \
+        "native reactive file inputs should be visually hidden"
+    assert re.search(r"\.profile-static-upload-input\s*\{[^}]*position:absolute", STYLE_CSS), \
+        "native static file input should be visually hidden"
+
+
+def test_reactive_avatar_dialog_has_preview_state_logic():
+    assert "let _profileAvatarDialogPreviewState" in PANELS_JS
+    assert "function _setProfileAvatarPreviewState" in PANELS_JS
+    preview = _extract_function(PANELS_JS, "_profileReactivePreviewAvatar")
+    assert "desiredState" in preview
+    assert "orderedSlots" in preview
+    refresh = _extract_function(PANELS_JS, "_refreshProfileAvatarDialogPreview")
+    assert "_profileAvatarDialogPreviewState" in refresh
+    assert "profileAvatarPreviewSummary" in refresh
+
+
+def test_live_reactive_avatar_repaints_when_live_turn_is_created_late():
+    state_fn = _extract_function(UI_JS, "setReactiveAvatarState")
+    assert "_assistantAvatarRefreshNeeded(normalized,true)" in state_fn, \
+        "same-state live SSE events should repair a stale live avatar without repainting every token"
+    assert "refreshAssistantProfileAvatars({state:normalized,liveOnly:true})" in state_fn
+    assert "function _refreshLiveAssistantAvatarFromCurrentState" in UI_JS
+    assert UI_JS.count("_refreshLiveAssistantAvatarFromCurrentState();") >= 3, \
+        "every live assistant turn creation path should repaint from the current reactive state"
+
+
+def test_reactive_avatar_stream_state_changes_are_session_owned():
+    active_guard = "if(!S.session||S.session.session_id!==activeSid) return;"
+    for event_name in ("reasoning", "tool", "tool_complete"):
+        block = _extract_event_listener(MESSAGES_JS, event_name)
+        state_idx = block.find("setReactiveAvatarState")
+        guard_idx = block.find(active_guard)
+        assert state_idx != -1, f"{event_name} should update reactive avatar state"
+        assert guard_idx != -1, f"{event_name} should guard against stale/background sessions"
+        assert guard_idx < state_idx, \
+            f"{event_name} must not let background streams mutate the current avatar state"
+
+    active_branch = "if(S.session&&S.session.session_id===activeSid){"
+    for event_name in ("apperror", "cancel"):
+        block = _extract_event_listener(MESSAGES_JS, event_name)
+        state_idx = block.find("setReactiveAvatarState")
+        branch_idx = block.find(active_branch)
+        assert state_idx != -1, f"{event_name} should update reactive avatar state"
+        assert branch_idx != -1, f"{event_name} should branch on active session ownership"
+        assert branch_idx < state_idx, \
+            f"{event_name} must not let terminal background streams mutate the current avatar state"
+
+    handler = _extract_function(MESSAGES_JS, "_handleStreamError")
+    assert active_branch in handler
+    assert handler.find(active_branch) < handler.find("setReactiveAvatarState('error'"), \
+        "network stream errors should only flip the avatar for the active stream owner"
+
+
+def test_profile_switch_avatar_refresh_does_not_block_switch_path():
+    switch_fn = _extract_function(PANELS_JS, "switchToProfile")
+    assert "await refreshActiveProfileAvatarSettings" not in switch_fn, \
+        "profile switching must not block model/workspace refresh on avatar-settings I/O"
+    assert "void refreshActiveProfileAvatarSettings(S.activeProfile)" in switch_fn
+
+
+def test_profile_surfaces_render_reactive_idle_avatar_when_enabled():
+    fn = _extract_function(PANELS_JS, "_profileAvatarForUi")
+    assert "effective_reactive_avatar" in fn, \
+        "profile cards/details should use the effective reactive idle asset when reactive mode is enabled"
+    assert "avatar_mode" in fn and "reactive" in fn, \
+        "profile avatar rendering must branch on static vs reactive mode"
+    assert "data-avatar-state" in fn or "state:'idle'" in fn or "state='idle'" in fn, \
+        "reactive profile surfaces should stamp the idle avatar state"
+
+
+def test_profile_avatar_map_preserves_reactive_payloads_from_profile_summaries():
+    fn = _extract_function(UI_JS, "setProfileAvatarMap")
+    assert "reactiveAvatar:_normalizeReactiveAvatarPack(p.reactive_avatar)" in fn, \
+        "profile summary sync should keep saved reactive slots"
+    assert "effectiveReactiveAvatar:_normalizeEffectiveReactiveAvatarMap(p.effective_reactive_avatar)" in fn, \
+        "profile summary sync should keep effective reactive fallbacks"
+    assert "avatarMode:entry.mode" in fn, \
+        "active profile sync should apply the saved static/reactive mode"
+
+
+def test_reactive_avatar_selection_is_not_disabled_by_reduced_motion():
+    active_fn = _extract_function(UI_JS, "_activeProfileAvatarForState")
+    profile_fn = _extract_function(PANELS_JS, "_profileAvatarForUi")
+    assert "_isAvatarMotionReduced" not in active_fn, \
+        "reduced motion may suppress CSS animation, but it must not ignore the user's Reactive avatar selection"
+    assert "_isAvatarMotionReduced" not in profile_fn, \
+        "profile surfaces should still show the selected reactive idle asset under reduced-motion preferences"
+
+
+def test_image_avatar_preview_does_not_bleed_fallback_layer():
+    assert ".profile-avatar--image:not(.profile-avatar--broken)" in STYLE_CSS, \
+        "loaded image avatars must not show the accent fallback behind transparent frames"
+    assert re.search(r"\.profile-avatar--image:not\(\.profile-avatar--broken\)\s*\{[^}]*background:transparent", STYLE_CSS)
+    assert re.search(r"\.profile-avatar--image:not\(\.profile-avatar--broken\) \.profile-avatar-fallback-text\s*\{[^}]*display:none!important", STYLE_CSS)
 
 
 # ── v3 helpers present, v2 helpers gone ───────────────────────────────────

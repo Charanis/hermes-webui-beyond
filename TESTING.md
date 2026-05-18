@@ -12,6 +12,10 @@
 > Run: `pytest tests/ -v --timeout=60`
 >
 > Local regression focus: verify that a previously closed workspace panel stays visually closed from first paint through boot completion on desktop refresh; there should be no brief open-then-close flash.
+>
+> Profile UI state-preservation gate: when a profile action is supposed to update only one surface, set an unrelated visible control to an unusual sentinel value first, perform the action, and confirm the selected profile, detail pane, sliders, inputs, and profile cards do not remount or flash to defaults. Prefer targeted DOM patching over full panel reloads for avatar-only or metadata-only saves.
+>
+> Reactive avatar regression focus: in Profiles, open Change avatar, switch to Reactive, upload only an Idle animation first, save, and confirm the other state rows show fallback behavior rather than requiring all five files. Switch back to Static and save, then reopen Reactive and confirm the saved animation is still selectable without reuploading. With both a static avatar and reactive Idle uploaded, save Reactive mode and verify profile cards, the profile hero, and a live assistant turn show the reactive Idle asset rather than the static avatar. While saving avatar changes, confirm the selected profile detail does not reload: runtime sliders and inputs must not flash back to default values, profile selection must stay stable, and only avatar surfaces should repaint. Verify Clear static leaves saved animations intact, Clear animations leaves the static fallback intact, and a live assistant turn changes the avatar through thinking, talking, working/tool, and error states when those events occur. For visual QA, capture desktop and narrow screenshots of the dialog: the live preview must sit in a side panel, Static/Reactive must render as styled selector cards, native file inputs must not be visible, state preview buttons must appear only in Reactive mode, and transparent animated/image avatars must not show fallback text or color behind the loaded image.
 
 ---
 
