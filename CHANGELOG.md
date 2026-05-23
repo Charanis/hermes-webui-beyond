@@ -3,6 +3,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Settings -> Appearance now offers an opt-in composer-adjacent agent avatar placement. The default thread avatar layout remains unchanged, while the new mode shows the active agent avatar beside the message composer at the composer box's initial height without growing with long drafts.
+
 ## [v0.51.130] — 2026-05-24 — Release DB (stage-batch12 — 3-PR profile-isolation + boot-precedence + workspace Artifacts tab)
 
 ### Fixed
@@ -294,7 +298,6 @@
 - **PR #2738** by @weidzhou — `_write_session_index()` full-rebuild path now deduplicates entries by `session_id`. When old-format `session_*.json` files coexist with WebUI-format `xxx.json` files sharing the same `session_id`, the index produced duplicate Vue `:key` entries and crashed the frontend with a blank page. The lazy rebuild now uses `dict[session_id → compact_entry]` keyed on session_id, with the higher `message_count` entry winning on conflict.
 - **PR #2730** by @ashbuildslife — Sanitize git fetch diagnostics before returning update-check errors to the browser. New `_sanitize_git_diagnostic()` in `api/updates.py` strips credentialed URL userinfo (`user:token@host`), GitHub token shapes (`ghp_*`, `gho_*`, `github_pat_*`), and secret-looking query parameters (`?access_token=`, `?token=`, `?password=`, `?auth=`, `?key=`), then caps the message at 300 characters. Empirically verified that plain `https://github.com/owner/repo.git` URLs and SSH-style `git@host:owner/repo` remotes pass through untouched — only credentialed shapes are redacted. Update-check failure context (e.g. `Authentication failed`, network errors) is preserved.
 - **PR #2742** by @Isla-Liu — Per-turn SQLite connection leak in handoff-summary path (#2233). Two functions on the `/api/session/handoff-summary` hot path were opening `sqlite3.connect(...)` inside a bare `with` statement, which commits the transaction at scope exit but does NOT close the connection. Per-turn invocations accumulated `state.db`/`state.db-wal` file descriptors and CPython heap pages on long-lived worker threads, surfacing as multi-GB VmRSS / 6× duplicated state.db fds on long-running installs. Wrapped both call sites with `contextlib.closing(...)` (already imported and used at 7 other sites in the same files) so the connection is closed deterministically: `api/models.py::count_conversation_rounds` and `api/routes.py::_persist_handoff_summary_to_state_db`. Regression test loops both functions 20× against a tmp `state.db` and asserts `/proc/<pid>/fd` count does not grow more than 2. Live soak: fd growth = 0, VmRSS growth = 0 KB across 20 POSTs.
-
 ## [v0.51.107] — 2026-05-21 — Release CE (stage-400 — 8-PR batch — pinned-sessions-limit getter rename + uploaded-file user-turn dedupe + active-run repair guard + incremental KaTeX streaming + profile default model on fresh boot + French locale completion + update-check error surfacing + release-update apply path)
 
 ### Fixed
