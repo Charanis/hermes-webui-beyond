@@ -61,8 +61,9 @@ def test_render_uses_projects_and_chats_sections_instead():
 
 
 def test_legacy_project_picker_still_allows_removing_a_project_assignment():
-    """The row action menu still needs the server-side move-to-null path."""
+    """The row action menu still needs the server-side move-to-null path and
+    the optimistic cache update for the rendered grouped sidebar."""
     js = _js()
 
     assert "await api('/api/session/move',{method:'POST',body:JSON.stringify({session_id:session.session_id,project_id:null})});" in js
-    assert "_allSessions[idx].project_id=null" in js
+    assert "_updateSessionProjectCache(session.session_id,null)" in js
