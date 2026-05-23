@@ -376,8 +376,12 @@ Invariants:
 - Age Archive must not write `session.archived`.
 - Opening a cross-profile row must not switch or rewrite the session profile.
 - Manual archived sessions retain existing restore/archive semantics.
-- The initial sidebar fetch must stay bounded by current rows and counts, not by
-  total historical session count.
+- Manual archived sessions are not current rows; they are lazy-loaded through
+  the same per-group `Archive` subsection so restore remains discoverable
+  without adding another sidebar bucket.
+- The initial sidebar fetch must stay bounded by the configured current age
+  window, explicit current-row exceptions, and archive counts. It must not load
+  archived row payloads or full historical transcripts.
 - Full session messages still load through the existing session-open path, not
   through the sidebar index.
 

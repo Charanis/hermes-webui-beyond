@@ -236,7 +236,7 @@ def test_current_session_stays_current_even_when_old():
     assert group["archive_count"] == 0
 
 
-def test_manual_archived_rows_are_excluded_and_counted_separately():
+def test_manual_archived_rows_are_excluded_from_current_and_counted_in_archive():
     rows = [
         _row("manual", workspace_group="chats", archived=True, age_days=30),
         _row("current", workspace_group="chats", age_days=1),
@@ -251,9 +251,32 @@ def test_manual_archived_rows_are_excluded_and_counted_separately():
     group = _group(index, "chats")
     assert [row["session_id"] for row in group["sessions"]] == ["current"]
     assert group["current_count"] == 1
-    assert group["archive_count"] == 0
+    assert group["archive_count"] == 1
+    assert group["archive"]["count"] == 1
+    assert group["archive"]["has_more"] is True
     assert group["manual_archived_count"] == 1
     assert index["manual_archived"] == {"count": 1}
+
+
+def test_archive_page_includes_manually_archived_rows_for_restore_path():
+    rows = [
+        _row("manual-recent", workspace_group="chats", archived=True, age_days=1),
+        _row("old", workspace_group="chats", age_days=10),
+        _row("current", workspace_group="chats", age_days=1),
+    ]
+
+    page = build_session_archive_page(
+        rows,
+        group_id="chats",
+        server_time=1_700_000_000.0,
+        session_archive_after_days=7,
+        limit=10,
+    )
+
+    assert [row["session_id"] for row in page["sessions"]] == ["manual-recent", "old"]
+    assert page["archive"]["count"] == 2
+    assert page["sessions"][0]["archived"] is True
+    assert page["sessions"][0]["age_archived"] is False
 
 
 def test_build_archive_page_is_group_scoped_sorted_and_cursor_paginated(tmp_path):
@@ -286,16 +309,16 @@ def test_build_archive_page_is_group_scoped_sorted_and_cursor_paginated(tmp_path
     )
 
     assert [row["session_id"] for row in first["sessions"]] == ["work-newer-b", "work-newer-a"]
-    assert first["remaining_count"] == 1
+    assert first["remaining_count"] == 2
     assert first["next_cursor"]
-    assert first["archive"]["count"] == 3
+    assert first["archive"]["count"] == 4
     assert first["archive"]["has_more"] is True
     assert first["archive"]["cursor"] == first["next_cursor"]
-    assert [row["session_id"] for row in second["sessions"]] == ["work-older"]
+    assert [row["session_id"] for row in second["sessions"]] == ["work-older", "manual"]
     assert second["remaining_count"] == 0
     assert second["next_cursor"] is None
     assert all(row["group_id"] == f"workspace:{normalized}" for row in first["sessions"] + second["sessions"])
-    assert all(row["age_archived"] for row in first["sessions"] + second["sessions"])
+    assert all(row["age_archived"] or row.get("archived") for row in first["sessions"] + second["sessions"])
 
 
 def test_archive_page_stale_cursor_uses_keyset_boundary(tmp_path):

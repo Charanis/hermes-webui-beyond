@@ -5170,6 +5170,7 @@ def handle_post(handler, parsed) -> bool:
                 workspace=session.workspace,
                 model=session.model,
                 model_provider=session.model_provider,
+                workspace_group=getattr(session, "workspace_group", None),
                 messages=copy.deepcopy(session.messages),
                 tool_calls=copy.deepcopy(session.tool_calls),
                 # Reset ephemeral / per-session-instance flags. Duplicating an
@@ -5663,6 +5664,7 @@ def handle_post(handler, parsed) -> bool:
         # Create new session inheriting workspace/model/profile
         branch = Session(
             workspace=source.workspace,
+            workspace_group=getattr(source, "workspace_group", None),
             model=source.model,
             profile=getattr(source, "profile", None),
             title=branch_title,

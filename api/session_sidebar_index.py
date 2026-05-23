@@ -110,6 +110,10 @@ def build_session_sidebar_index(
         if compact.get("archived"):
             group["manual_archived_count"] += 1
             manual_archived_count += 1
+            group["archive_count"] += 1
+            group["archive"]["count"] += 1
+            group["archive"]["has_more"] = True
+            group["archive"]["next_offset"] = 0
         elif compact["age_archived"]:
             group["archive_count"] += 1
             group["archive"]["count"] += 1
@@ -157,7 +161,7 @@ def build_session_archive_page(
             archive_after_days=archive_after_days,
             current_session_id=current_session_id,
         )
-        if compact["group_id"] == group_id and compact["age_archived"] and not compact.get("archived"):
+        if compact["group_id"] == group_id and (compact["age_archived"] or compact.get("archived")):
             archive_rows.append(compact)
 
     archive_rows.sort(key=_sidebar_sort_key, reverse=True)

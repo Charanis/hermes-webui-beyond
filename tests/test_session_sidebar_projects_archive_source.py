@@ -152,6 +152,18 @@ def test_archive_rows_are_not_synced_into_current_groups():
     assert "_isOptimisticFirstTurnSessionRow(row)" in sync_body
 
 
+def test_archive_rows_keep_manual_restore_action_path():
+    js = _js()
+    render_body = _function_body(js, "renderSessionListFromCache")
+    menu_body = _function_body(js, "_openSessionActionMenu")
+
+    assert "flatSessionRows.push({group,session:s,archive:true})" in render_body
+    assert "if(archive) rowEl.dataset.archive='true'" in render_body
+    assert "s.archived?' archived':''" in render_body
+    assert "session.archived?t('session_restore'):t('session_archive')" in menu_body
+    assert "archived:!session.archived" in menu_body
+
+
 def test_collapsed_projects_do_not_add_archive_rows_to_virtual_flat_list():
     js = _js()
     body = _function_body(js, "renderSessionListFromCache")

@@ -5,7 +5,7 @@
 
 ### Added
 
-- Add a global Chat sidebar index organized into workspace Projects and general Chats, with avatar-based agent identity, lazy Archive sections for inactive sessions, on-demand archive search, and a configurable Archive cutoff in Preferences.
+- Add a global Chat sidebar index organized into workspace Projects and general Chats, with avatar-based agent identity, lazy Archive sections for inactive and manually archived sessions, on-demand archive search, and a configurable Archive cutoff in Preferences.
 - Settings -> Appearance now offers an opt-in composer-adjacent agent avatar placement. The default thread avatar layout remains unchanged, while the new mode shows the active agent avatar beside the message composer at the composer box's initial height without growing with long drafts.
 - Reactive agent avatars now show the composer-focus accent ring while the agent is active, and rapid thinking/talking/tool state changes wait for parsed GIF/APNG/WebP loop boundaries when available, with the old timing used only as an unreadable-URL fallback.
 
