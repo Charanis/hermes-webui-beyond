@@ -261,3 +261,66 @@ def test_session_index_archive_returns_aged_rows_without_messages():
         assert rows[0].get("profile") == "default"
     finally:
         _delete_session_file(path)
+
+
+def test_session_index_archive_returns_manual_archived_rows_for_restore():
+    sid, path = _write_session_file(
+        title="Manual archived row",
+        workspace_group="chats",
+        age_days=1,
+        archived=True,
+    )
+    try:
+        data, status = get(
+            "/api/session-index/archive?group_id=chats&limit=5"
+        )
+        assert status == 200, data
+        rows = [row for row in data.get("sessions", []) if row.get("session_id") == sid]
+        assert rows, data
+        row = rows[0]
+        assert row.get("archived") is True
+        assert row.get("age_archived") is False
+        assert "messages" not in row
+    finally:
+        _delete_session_file(path)
+
+
+def test_duplicate_preserves_chats_workspace_group_with_runtime_workspace():
+    sid, path = _write_session_file(
+        title="Duplicate chats row",
+        workspace_group="chats",
+    )
+    duplicate_sid = None
+    try:
+        data, status = post("/api/session/duplicate", {"session_id": sid})
+        assert status == 200, data
+        duplicate = data["session"]
+        duplicate_sid = duplicate["session_id"]
+        assert duplicate["workspace_group"] == "chats"
+        assert duplicate["workspace"]
+    finally:
+        if duplicate_sid:
+            post("/api/session/delete", {"session_id": duplicate_sid})
+        _delete_session_file(path)
+
+
+def test_branch_preserves_chats_workspace_group_with_runtime_workspace():
+    sid, path = _write_session_file(
+        title="Fork chats row",
+        workspace_group="chats",
+    )
+    branch_sid = None
+    try:
+        data, status = post("/api/session/branch", {"session_id": sid})
+        assert status == 200, data
+        branch_sid = data["session_id"]
+        metadata, metadata_status = get(
+            f"/api/session?session_id={urllib.parse.quote(branch_sid)}&messages=0&resolve_model=0"
+        )
+        assert metadata_status == 200, metadata
+        assert metadata["session"]["workspace_group"] == "chats"
+        assert metadata["session"]["workspace"]
+    finally:
+        if branch_sid:
+            post("/api/session/delete", {"session_id": branch_sid})
+        _delete_session_file(path)

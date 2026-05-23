@@ -39,7 +39,8 @@
 - Existing sessions without `workspace_group` infer `workspace` when they have a workspace path, preserving historical discoverability.
 - New general chats still keep a runtime workspace fallback for agent execution, but store `workspace_group: "chats"` so they appear under Chats.
 - Age Archive is virtual and never writes `session.archived`.
-- Manual archived rows stay out of the normal current/age-Archive read model.
+- Manual archived rows stay out of current rows and load lazily through the same Archive subsection so the existing restore action remains discoverable.
+- The initial sidebar index is bounded by the current age window plus explicit current-row exceptions and archive counts; archived row payloads are fetched only when Archive is opened or searched.
 - Pinned, unread, streaming, pending, and currently open sessions remain in the current list even when older than the cutoff.
 - Detailed sidebar rows may show metadata such as model and message count, but not visible profile-name badges.
 
