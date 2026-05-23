@@ -368,6 +368,9 @@ State mutated by this feature:
   session between Project and Chats,
 - no automatic mutation for the age-based Archive bucket.
 
+Persisted `workspace_group` records sidebar grouping intent (`workspace` or
+`chats`) separately from the runtime `workspace` path used to launch agents.
+
 Invariants:
 
 - Age Archive must not write `session.archived`.
