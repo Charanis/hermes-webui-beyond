@@ -54,7 +54,7 @@ def _get(path):
 
 
 def test_appearance_pickers_schedule_autosave_and_do_not_mark_dirty():
-    for fn in ("_pickTheme", "_pickSkin", "_pickFontSize"):
+    for fn in ("_pickTheme", "_pickSkin", "_pickFontSize", "_pickAvatarPresenceLayout"):
         block = _function_block(BOOT_JS, fn)
         assert "_scheduleAppearanceAutosave()" in block, (
             f"{fn}() should invoke _scheduleAppearanceAutosave()"
@@ -72,11 +72,15 @@ def test_appearance_revert_preview_no_longer_rolls_back_theme_skin_font():
     assert "_markSettingsDirty()" not in block
 
 
-def test_appearance_autosave_payload_is_theme_skin_font_only():
+def test_appearance_autosave_payload_includes_visual_layout_preferences():
     block = _function_block(PANELS_JS, "_appearancePayloadFromUi")
     assert "theme:" in block
     assert "skin:" in block
     assert "font_size:" in block
+    assert "avatar_presence_layout:" in block
+    assert "session_jump_buttons:" in block
+    assert "session_endless_scroll:" in block
+    assert "hidden_tabs:" in block
     assert "language:" not in block
     assert "workspace" not in block
     assert "show_token_usage" not in block
@@ -107,6 +111,40 @@ def test_full_save_settings_still_includes_font_size():
     assert "body.theme=theme;" in compact
     assert "body.skin=skin;" in compact
     assert "body.font_size=fontSize;" in compact
+
+
+def test_avatar_presence_layout_setting_is_in_appearance_surface():
+    assert 'id="settingsAvatarPresenceLayout"' in INDEX_HTML
+    assert 'id="avatarPresencePickerGrid"' in INDEX_HTML
+    assert 'data-avatar-presence-layout-val="thread"' in INDEX_HTML
+    assert 'data-avatar-presence-layout-val="composer"' in INDEX_HTML
+    assert "_pickAvatarPresenceLayout('thread')" in INDEX_HTML
+    assert "_pickAvatarPresenceLayout('composer')" in INDEX_HTML
+    assert "hermes-avatar-presence-layout" in INDEX_HTML
+
+
+def test_avatar_presence_layout_is_applied_from_boot_and_saved_settings():
+    for fn in (
+        "_normalizeAvatarPresenceLayout",
+        "_applyAvatarPresenceLayout",
+        "_pickAvatarPresenceLayout",
+        "_syncAvatarPresencePicker",
+    ):
+        assert f"function {fn}" in BOOT_JS
+    apply_block = _function_block(BOOT_JS, "_applyAvatarPresenceLayout")
+    assert "document.documentElement.dataset.avatarPresence='composer'" in apply_block
+    assert "delete document.documentElement.dataset.avatarPresence" in apply_block
+    assert "localStorage.setItem('hermes-avatar-presence-layout',normalized)" in apply_block
+    assert "refreshAssistantProfileAvatars({state:window._activeProfileAvatarState||'idle',force:true})" in apply_block
+    assert "s.avatar_presence_layout" in BOOT_JS
+    assert "hermes-avatar-presence-layout" in BOOT_JS
+
+
+def test_full_save_settings_includes_avatar_presence_layout():
+    block = _function_block(PANELS_JS, "saveSettings")
+    compact = block.replace(" ", "")
+    assert "constavatarPresenceLayout=" in compact
+    assert "body.avatar_presence_layout=avatarPresenceLayout;" in compact
 
 
 def test_settings_api_accepts_appearance_only_payload_without_overwriting_other_fields():

@@ -152,6 +152,7 @@ function _beginSettingsPanelSession() {
   _settingsThemeOnOpen = localStorage.getItem('hermes-theme') || 'dark';
   _settingsSkinOnOpen = localStorage.getItem('hermes-skin') || 'default';
   _settingsFontSizeOnOpen = localStorage.getItem('hermes-font-size') || 'default';
+  _settingsAvatarPresenceLayoutOnOpen = localStorage.getItem('hermes-avatar-presence-layout') || 'thread';
   _pendingSettingsTargetPanel = null;
   if (_settingsAppearanceAutosaveTimer) {
     clearTimeout(_settingsAppearanceAutosaveTimer);
@@ -9072,6 +9073,7 @@ let _settingsDirty = false;
 let _settingsThemeOnOpen = null; // track theme at open time for discard revert
 let _settingsSkinOnOpen = null; // track skin at open time for discard revert
 let _settingsFontSizeOnOpen = null; // track font size at open time for discard revert
+let _settingsAvatarPresenceLayoutOnOpen = null; // track avatar placement at open time for saved-state bookkeeping
 let _settingsHermesDefaultModelOnOpen = '';
 let _settingsSection = 'conversation';
 let _currentSettingsSection = 'conversation';
@@ -9285,6 +9287,7 @@ function _appearancePayloadFromUi(){
     theme: ($('settingsTheme')||{}).value || localStorage.getItem('hermes-theme') || 'dark',
     skin: ($('settingsSkin')||{}).value || localStorage.getItem('hermes-skin') || 'default',
     font_size: ($('settingsFontSize')||{}).value || localStorage.getItem('hermes-font-size') || 'default',
+    avatar_presence_layout: ((($('settingsAvatarPresenceLayout')||{}).value || localStorage.getItem('hermes-avatar-presence-layout') || 'thread')==='composer')?'composer':'thread',
     session_jump_buttons: !!($('settingsSessionJumpButtons')||{}).checked,
     session_endless_scroll: !!($('settingsSessionEndlessScroll')||{}).checked,
     hidden_tabs: _getHiddenTabs(),
@@ -9314,6 +9317,7 @@ function _rememberAppearanceSaved(payload){
   _settingsThemeOnOpen=payload.theme||localStorage.getItem('hermes-theme')||'dark';
   _settingsSkinOnOpen=payload.skin||localStorage.getItem('hermes-skin')||'default';
   _settingsFontSizeOnOpen=payload.font_size||localStorage.getItem('hermes-font-size')||'default';
+  _settingsAvatarPresenceLayoutOnOpen=(payload.avatar_presence_layout==='composer')?'composer':'thread';
 }
 
 function _scheduleAppearanceAutosave(){
@@ -9334,6 +9338,12 @@ async function _autosaveAppearanceSettings(payload){
     _rememberAppearanceSaved(payload);
     if(saved&&saved.font_size){
       localStorage.setItem('hermes-font-size',saved.font_size);
+    }
+    if(saved&&saved.avatar_presence_layout&&typeof _applyAvatarPresenceLayout==='function'){
+      _applyAvatarPresenceLayout(saved.avatar_presence_layout);
+      if(typeof _syncAvatarPresencePicker==='function') _syncAvatarPresencePicker(saved.avatar_presence_layout);
+      const avatarHidden=$('settingsAvatarPresenceLayout');
+      if(avatarHidden) avatarHidden.value=(saved.avatar_presence_layout==='composer')?'composer':'thread';
     }
     if(saved){
       window._sessionJumpButtonsEnabled=!!saved.session_jump_buttons;
@@ -9516,6 +9526,11 @@ async function loadSettingsPanel(){
     const fontSizeSel=$('settingsFontSize');
     if(fontSizeSel) fontSizeSel.value=fontSizeVal;
     if(typeof _syncFontSizePicker==='function') _syncFontSizePicker(fontSizeVal);
+    const avatarPresenceVal=(settings.avatar_presence_layout==='composer')?'composer':'thread';
+    if(typeof _applyAvatarPresenceLayout==='function') _applyAvatarPresenceLayout(avatarPresenceVal);
+    const avatarPresenceSel=$('settingsAvatarPresenceLayout');
+    if(avatarPresenceSel) avatarPresenceSel.value=avatarPresenceVal;
+    if(typeof _syncAvatarPresencePicker==='function') _syncAvatarPresencePicker(avatarPresenceVal);
     const jumpButtonsCb=$('settingsSessionJumpButtons');
     if(jumpButtonsCb){
       jumpButtonsCb.checked=!!settings.session_jump_buttons;
@@ -10461,7 +10476,7 @@ function _setSettingsAuthButtonsVisible(active){
 }
 
 function _applySavedSettingsUi(saved, body, opts){
-  const {sendKey,showTokenUsage,showQuotaChip,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize}=opts;
+  const {sendKey,showTokenUsage,showQuotaChip,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize,avatarPresenceLayout}=opts;
   window._sendKey=sendKey||'enter';
   window._showTokenUsage=showTokenUsage;
   window._showQuotaChip=showQuotaChip===true;
@@ -10492,6 +10507,8 @@ function _applySavedSettingsUi(saved, body, opts){
   _settingsThemeOnOpen=theme;
   _settingsSkinOnOpen=skin||'default';
   _settingsFontSizeOnOpen=fontSize||localStorage.getItem('hermes-font-size')||'default';
+  _settingsAvatarPresenceLayoutOnOpen=(avatarPresenceLayout==='composer')?'composer':'thread';
+  if(typeof _applyAvatarPresenceLayout==='function') _applyAvatarPresenceLayout(_settingsAvatarPresenceLayoutOnOpen);
   const bar=$('settingsUnsavedBar');
   if(bar) bar.style.display='none';
   _settingsHermesDefaultModelOnOpen=body.default_model||_settingsHermesDefaultModelOnOpen||'';
@@ -10580,6 +10597,7 @@ async function saveSettings(andClose){
   const theme=($('settingsTheme')||{}).value||'dark';
   const skin=($('settingsSkin')||{}).value||'default';
   const fontSize=($('settingsFontSize')||{}).value||localStorage.getItem('hermes-font-size')||'default';
+  const avatarPresenceLayout=(($('settingsAvatarPresenceLayout')||{}).value==='composer')?'composer':'thread';
   const language=($('settingsLanguage')||{}).value||'en';
   const sidebarDensity=($('settingsSidebarDensity')||{}).value==='detailed'?'detailed':'compact';
   const busyInputMode=($('settingsBusyInputMode')||{}).value||'queue';
@@ -10589,6 +10607,7 @@ async function saveSettings(andClose){
   body.theme=theme;
   body.skin=skin;
   body.font_size=fontSize;
+  body.avatar_presence_layout=avatarPresenceLayout;
   body.session_jump_buttons=!!($('settingsSessionJumpButtons')||{}).checked;
   body.session_endless_scroll=!!($('settingsSessionEndlessScroll')||{}).checked;
   body.language=language;
@@ -10625,7 +10644,7 @@ async function saveSettings(andClose){
           if(typeof showToast==='function') showToast('Failed to update default model — settings saved');
         }
       }
-      _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
+      _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize,avatarPresenceLayout});
       showToast(t(saved.auth_just_enabled?'settings_saved_pw':'settings_saved_pw_updated'));
       _settingsDirty=false;
       _resetSettingsPanelState();
@@ -10644,7 +10663,7 @@ async function saveSettings(andClose){
         if(typeof showToast==='function') showToast('Failed to update default model — settings saved');
       }
     }
-    _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
+    _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize,avatarPresenceLayout});
     showToast(t('settings_saved'));
     _settingsDirty=false;
     _resetSettingsPanelState();
