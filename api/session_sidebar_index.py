@@ -4,35 +4,38 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 from pathlib import Path
 from typing import Any, Iterable
 
 
 ARCHIVE_AFTER_DAY_CHOICES = (7, 14, 30, 90)
+DEFAULT_ARCHIVE_AFTER_DAYS = 7
+DEFAULT_ARCHIVE_LIMIT = 50
 SECONDS_PER_DAY = 86_400
 WORKSPACE_GROUP_WORKSPACE = "workspace"
 WORKSPACE_GROUP_CHATS = "chats"
+VALID_WORKSPACE_GROUPS = (WORKSPACE_GROUP_WORKSPACE, WORKSPACE_GROUP_CHATS)
 
 
 def normalize_archive_after_days(value: Any) -> int:
     """Return a supported archive age threshold, defaulting to 7 days."""
     if isinstance(value, bool):
-        return 7
+        return DEFAULT_ARCHIVE_AFTER_DAYS
     if isinstance(value, int):
         days = value
     elif isinstance(value, str) and value.strip().isdigit():
         days = int(value.strip())
     else:
-        return 7
-    return days if days in ARCHIVE_AFTER_DAY_CHOICES else 7
+        return DEFAULT_ARCHIVE_AFTER_DAYS
+    return days if days in ARCHIVE_AFTER_DAY_CHOICES else DEFAULT_ARCHIVE_AFTER_DAYS
 
 
 def normalize_workspace_group(group: Any, *, workspace: Any = None) -> str:
     """Normalize the sidebar workspace grouping mode for a session row."""
-    if group == WORKSPACE_GROUP_WORKSPACE:
-        return WORKSPACE_GROUP_WORKSPACE
-    if group == WORKSPACE_GROUP_CHATS:
-        return WORKSPACE_GROUP_CHATS
+    normalized = str(group).strip().lower() if group is not None else ""
+    if normalized in VALID_WORKSPACE_GROUPS:
+        return normalized
     return WORKSPACE_GROUP_WORKSPACE if workspace else WORKSPACE_GROUP_CHATS
 
 
@@ -43,10 +46,39 @@ def session_activity_ts(row: dict[str, Any]) -> float:
         if value in (None, ""):
             continue
         try:
-            return float(value)
+            parsed = float(value)
         except (TypeError, ValueError):
             continue
+        if math.isfinite(parsed):
+            return parsed
     return 0
+
+
+def workspace_key_for(workspace: Any = None, workspace_group: Any = None) -> str:
+    """Return the stable sidebar group key for workspace or general chats."""
+    normalized_workspace = _normalize_workspace_path(workspace)
+    group = normalize_workspace_group(workspace_group, workspace=normalized_workspace)
+    if group == WORKSPACE_GROUP_WORKSPACE and normalized_workspace:
+        return f"workspace:{normalized_workspace}"
+    return WORKSPACE_GROUP_CHATS
+
+
+def session_is_current(
+    row: dict[str, Any],
+    *,
+    server_time: float,
+    session_archive_after_days: Any = None,
+    current_session_id: str | None = None,
+) -> bool:
+    """Return whether a row belongs in current sidebar sessions."""
+    archive_after_days = normalize_archive_after_days(session_archive_after_days)
+    compact = _compact_sidebar_row(
+        row,
+        server_time=server_time,
+        archive_after_days=archive_after_days,
+        current_session_id=current_session_id,
+    )
+    return not compact.get("archived") and not compact["age_archived"]
 
 
 def build_session_sidebar_index(
@@ -62,6 +94,7 @@ def build_session_sidebar_index(
     archive_after_days = normalize_archive_after_days(session_archive_after_days)
     groups: dict[str, dict[str, Any]] = {}
     names = workspace_names or {}
+    manual_archived_count = 0
 
     for row in rows:
         compact = _compact_sidebar_row(
@@ -79,8 +112,12 @@ def build_session_sidebar_index(
 
         if compact.get("archived"):
             group["manual_archived_count"] += 1
+            manual_archived_count += 1
         elif compact["age_archived"]:
             group["archive_count"] += 1
+            group["archive"]["count"] += 1
+            group["archive"]["has_more"] = True
+            group["archive"]["next_offset"] = 0
         else:
             group["sessions"].append(compact)
             group["current_count"] += 1
@@ -95,19 +132,21 @@ def build_session_sidebar_index(
     )
     return {
         "groups": ordered_groups,
+        "manual_archived": {"count": manual_archived_count},
+        "archive_after_days": archive_after_days,
         "server_time": server_time,
         "server_tz": server_tz,
         "session_archive_after_days": archive_after_days,
     }
 
 
-def build_archive_page(
+def build_session_archive_page(
     rows: Iterable[dict[str, Any]],
     *,
     group_id: str,
     server_time: float,
     session_archive_after_days: Any = None,
-    limit: int = 50,
+    limit: Any = DEFAULT_ARCHIVE_LIMIT,
     cursor: str | None = None,
     current_session_id: str | None = None,
 ) -> dict[str, Any]:
@@ -126,16 +165,28 @@ def build_archive_page(
 
     archive_rows.sort(key=_sidebar_sort_key, reverse=True)
     start = _cursor_start_index(archive_rows, cursor)
-    page_limit = max(0, int(limit or 0))
+    page_limit = _normalize_archive_limit(limit)
     page = archive_rows[start:start + page_limit]
     remaining_count = max(0, len(archive_rows) - (start + len(page)))
     next_cursor = _encode_cursor(page[-1]) if remaining_count and page else None
     return {
         "group_id": group_id,
+        "key": group_id,
         "sessions": page,
         "next_cursor": next_cursor,
         "remaining_count": remaining_count,
+        "archive": {
+            "count": len(archive_rows),
+            "has_more": remaining_count > 0,
+            "next_offset": start + len(page) if remaining_count > 0 else None,
+            "cursor": next_cursor,
+        },
     }
+
+
+def build_archive_page(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    """Backward-compatible alias for build_session_archive_page."""
+    return build_session_archive_page(*args, **kwargs)
 
 
 def _normalize_workspace_path(value: Any) -> str | None:
@@ -196,6 +247,16 @@ def _compact_sidebar_row(
     compact["workspace"] = workspace
     compact["activity_ts"] = activity_ts
     compact["group_id"] = group_id
+    compact["id"] = row.get("session_id")
+    compact["title"] = row.get("title") or "Untitled"
+    compact["profile"] = row.get("profile")
+    compact["avatar"] = row.get("avatar")
+    compact["updated_at"] = row.get("updated_at")
+    compact["age_seconds"] = max(0, server_time - activity_ts) if activity_ts else None
+    compact["pinned"] = bool(row.get("pinned"))
+    compact["unread"] = bool(row.get("unread"))
+    compact["streaming"] = bool(row.get("is_streaming") or row.get("active_stream_id"))
+    compact["pending"] = bool(row.get("has_pending_user_message") or row.get("pending_user_message"))
     compact["age_archived"] = _is_age_archived(
         compact,
         server_time=server_time,
@@ -236,12 +297,21 @@ def _empty_group(
     is_workspace = group_id.startswith("workspace:")
     return {
         "group_id": group_id,
+        "key": group_id,
         "kind": "project" if is_workspace else "chats",
+        "type": "workspace" if is_workspace else "chats",
         "name": _workspace_name(workspace, workspace_names) if is_workspace else "Chats",
+        "label": _workspace_name(workspace, workspace_names) if is_workspace else "Chats",
         "workspace": workspace,
         "current_count": 0,
         "archive_count": 0,
         "manual_archived_count": 0,
+        "archive": {
+            "count": 0,
+            "has_more": False,
+            "next_offset": None,
+            "cursor": None,
+        },
         "sessions": [],
         "latest_activity_at": 0,
     }
@@ -271,7 +341,10 @@ def _decode_cursor(cursor: str | None) -> tuple[float, str] | None:
     try:
         raw = base64.urlsafe_b64decode(cursor.encode("ascii"))
         payload = json.loads(raw.decode("utf-8"))
-        return (float(payload["activity_ts"]), str(payload["session_id"]))
+        activity_ts = float(payload["activity_ts"])
+        if not math.isfinite(activity_ts):
+            return None
+        return (activity_ts, str(payload["session_id"]))
     except (KeyError, TypeError, ValueError, json.JSONDecodeError):
         return None
 
@@ -281,6 +354,18 @@ def _cursor_start_index(rows: list[dict[str, Any]], cursor: str | None) -> int:
     if cursor_key is None:
         return 0
     for index, row in enumerate(rows):
-        if _sidebar_sort_key(row) == cursor_key:
-            return index + 1
-    return 0
+        if _sidebar_sort_key(row) < cursor_key:
+            return index
+    return len(rows)
+
+
+def _normalize_archive_limit(limit: Any) -> int:
+    if isinstance(limit, bool):
+        return DEFAULT_ARCHIVE_LIMIT
+    try:
+        parsed = int(limit)
+    except (TypeError, ValueError):
+        return DEFAULT_ARCHIVE_LIMIT
+    if parsed <= 0:
+        return DEFAULT_ARCHIVE_LIMIT
+    return parsed
