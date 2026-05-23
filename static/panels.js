@@ -3900,9 +3900,11 @@ function _positionComposerWsDropdown(){
 function _positionProfileDropdown(){
   const dd=$('profileDropdown');
   const chip=$('profileChip');
+  const avatar=$('composerPresenceAvatar');
   const footer=document.querySelector('.composer-footer');
-  if(!dd||!chip||!footer)return;
-  const chipRect=chip.getBoundingClientRect();
+  const anchor=(window._profileDropdownAnchor==='composerAvatar'&&avatar&&avatar.offsetParent)?avatar:chip;
+  if(!dd||!anchor||!footer)return;
+  const chipRect=anchor.getBoundingClientRect();
   const footerRect=footer.getBoundingClientRect();
   let left=chipRect.left-footerRect.left;
   const maxLeft=Math.max(0, footer.clientWidth-dd.offsetWidth);
@@ -8671,29 +8673,52 @@ function renderProfileDropdown(data) {
   dd.appendChild(mgmt);
 }
 
-function toggleProfileDropdown() {
+function toggleComposerAvatarProfileDropdown(e){
+  if(e){
+    e.preventDefault();
+    e.stopPropagation();
+  }
+  if(typeof _isComposerPresenceLayoutActive==='function'&&!_isComposerPresenceLayoutActive()) return;
+  window._profileDropdownAnchor='composerAvatar';
+  toggleProfileDropdown({anchor:'composerAvatar'});
+}
+
+function toggleProfileDropdown(opts) {
   const dd = $('profileDropdown');
   if (!dd) return;
   if (dd.classList.contains('open')) { closeProfileDropdown(); return; }
+  const anchor=opts&&opts.anchor==='composerAvatar'?'composerAvatar':'profileChip';
   closeWsDropdown(); // close workspace dropdown if open
   if(typeof closeModelDropdown==='function') closeModelDropdown();
   api('/api/profiles').then(data => {
+    window._profileDropdownAnchor=anchor;
     renderProfileDropdown(data);
     dd.classList.add('open');
     _positionProfileDropdown();
     const chip=$('profileChip');
-    if(chip) chip.classList.add('active');
+    const avatar=$('composerPresenceAvatar');
+    if(chip) chip.classList.toggle('active',anchor!=='composerAvatar');
+    if(avatar){
+      avatar.classList.toggle('active',anchor==='composerAvatar');
+      avatar.setAttribute('aria-expanded',anchor==='composerAvatar'?'true':'false');
+    }
   }).catch(e => { showToast(t('profiles_load_failed')); });
 }
 
 function closeProfileDropdown() {
   const dd = $('profileDropdown');
   if (dd) dd.classList.remove('open');
+  window._profileDropdownAnchor=null;
   const chip=$('profileChip');
   if(chip) chip.classList.remove('active');
+  const avatar=$('composerPresenceAvatar');
+  if(avatar){
+    avatar.classList.remove('active');
+    avatar.setAttribute('aria-expanded','false');
+  }
 }
 document.addEventListener('click', e => {
-  if (!e.target.closest('#profileChipWrap') && !e.target.closest('#profileDropdown')) closeProfileDropdown();
+  if (!e.target.closest('#profileChipWrap') && !e.target.closest('#composerPresenceAvatar') && !e.target.closest('#profileDropdown')) closeProfileDropdown();
 });
 window.addEventListener('resize',()=>{
   const dd=$('profileDropdown');

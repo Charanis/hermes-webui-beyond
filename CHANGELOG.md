@@ -6,6 +6,12 @@
 ### Added
 
 - Settings -> Appearance now offers an opt-in composer-adjacent agent avatar placement. The default thread avatar layout remains unchanged, while the new mode shows the active agent avatar beside the message composer at the composer box's initial height without growing with long drafts.
+- Reactive agent avatars now show the composer-focus accent ring while the agent is active, and rapid thinking/talking/tool state changes wait for parsed GIF/APNG/WebP loop boundaries when available, with the old timing used only as an unreadable-URL fallback.
+
+### Fixed
+
+- Composer-adjacent avatar mode now aligns the combined desktop avatar+composer row to the chat message column, shortens the composer by the avatar width, keeps desktop workspace/model values visible inside the narrower composer, keeps the avatar bottom-aligned as long drafts grow the composer, lets the mobile settings submenu expand across the avatar row instead of staying composer-width, keeps the Context section visible in that submenu before token usage data arrives, replaces the mobile inline profile chip with the Space files shortcut while making the avatar open profile switching, and keeps the mobile model/reasoning/settings control fixed beside Send instead of letting it slide into the scrollable tool strip.
+- Reactive avatar same-state events now clear stale queued state changes, so a reaffirmed current animation is not followed by an older queued transition.
 
 ## [v0.51.107] — 2026-05-21 — Release CE (stage-400 — 8-PR batch — pinned-sessions-limit getter rename + uploaded-file user-turn dedupe + active-run repair guard + incremental KaTeX streaming + profile default model on fresh boot + French locale completion + update-check error surfacing + release-update apply path)
 

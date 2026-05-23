@@ -43,11 +43,36 @@ def _max_width_media_blocks(width_px):
     return blocks
 
 
+def _min_width_media_blocks(width_px):
+    """Return all @media(min-width:Npx) bodies using balanced braces."""
+    pattern = re.compile(rf'@media\s*\(\s*min-width\s*:\s*{width_px}px\s*\)\s*\{{')
+    blocks = []
+    for match in pattern.finditer(CSS):
+        open_brace = match.end() - 1
+        depth = 0
+        for idx in range(open_brace, len(CSS)):
+            if CSS[idx] == "{":
+                depth += 1
+            elif CSS[idx] == "}":
+                depth -= 1
+                if depth == 0:
+                    blocks.append(CSS[open_brace + 1:idx])
+                    break
+    return blocks
+
+
 def _composer_phone_media_block():
     for block in _max_width_media_blocks(640):
         if ".composer-footer" in block:
             return block
     raise AssertionError("Missing composer rules in @media(max-width:640px)")
+
+
+def _composer_presence_desktop_media_block():
+    for block in _min_width_media_blocks(641):
+        if 'data-avatar-presence="composer"' in block and ".composer-workspace-label" in block:
+            return block
+    raise AssertionError("Missing composer presence desktop label override")
 
 
 def _strip_css_comments(css):
@@ -884,7 +909,9 @@ def test_composer_presence_markup_is_adjacent_to_composer_box():
     assert upload_idx != -1, "upload bar should still exist"
     assert row_idx < avatar_idx < box_idx < upload_idx, \
         "presence avatar must be adjacent before the composer box and before the upload bar"
-    assert '<div id="composerPresenceAvatar" class="composer-presence-avatar" aria-hidden="true"></div>' in HTML
+    assert 'id="composerPresenceAvatar"' in HTML
+    assert 'class="composer-presence-avatar"' in HTML
+    assert 'aria-controls="profileDropdown"' in HTML
     rel = _element_relationships(HTML)
     assert rel.parent_by_id.get("composerPresenceAvatar") == "composerPresenceRow"
     assert rel.parent_by_id.get("composerBox") == "composerPresenceRow"
@@ -914,13 +941,19 @@ def test_composer_presence_css_preserves_default_and_enables_opt_in_layout():
     composer_inner = _declarations(_rule_body(CSS, '.composer-presence-avatar .profile-avatar--composer'))
 
     assert root_vars.get("--composer-presence-avatar-size") == "56px"
+    assert "--msg-max: 780px" in CSS or "--msg-max:780px" in CSS
     assert default_row.get("max-width") == "780px"
     assert default_row.get("margin") == "0 auto"
     assert "display" not in default_row, "composer row layout display must be opt-in"
     assert _display_hidden(default_avatar)
     assert active_row.get("display") == "grid"
-    assert active_row.get("grid-template-columns") == "var(--composer-presence-avatar-size,56px) minmax(0,1fr)"
-    assert active_row.get("align-items") == "start"
+    assert active_row.get("max-width") == "var(--msg-max)", \
+        "desktop composer-avatar mode should align the combined avatar+composer row to the message column"
+    assert active_row.get("grid-template-columns") == \
+        "var(--composer-presence-avatar-size,56px) minmax(0,calc(var(--msg-max) - var(--composer-presence-avatar-size,56px) - 6px))", \
+        "desktop composer column must be shortened by the avatar column and gap"
+    assert active_row.get("align-items") == "end", \
+        "avatar must stay bottom-aligned when the composer grows with a long draft"
     assert active_row.get("gap") == "6px"
     assert active_avatar.get("display") == "flex"
     assert active_avatar.get("width") == "var(--composer-presence-avatar-size,56px)"
@@ -931,12 +964,62 @@ def test_composer_presence_css_preserves_default_and_enables_opt_in_layout():
     assert active_thread_avatar.get("display") == "none!important"
 
 
+def test_composer_presence_desktop_keeps_workspace_and_model_values_visible():
+    """Desktop composer-avatar mode must not collapse value-bearing chips to icons."""
+    desktop = _composer_presence_desktop_media_block()
+
+    for selector in (
+        ':root[data-avatar-presence="composer"] .composer-workspace-label',
+        ':root[data-avatar-presence="composer"] #composerWorkspaceLabel',
+        ':root[data-avatar-presence="composer"] .composer-model-label',
+        ':root[data-avatar-presence="composer"] #composerModelLabel',
+    ):
+        declarations = _declarations(_rule_body(desktop, selector))
+        assert declarations.get("display") == "inline", \
+            f"{selector} should remain visible in desktop composer-avatar mode"
+
+    model_chevron = _declarations(_rule_body(
+        desktop,
+        ':root[data-avatar-presence="composer"] .composer-model-chevron',
+    ))
+    workspace_group = _declarations(_rule_body(
+        desktop,
+        ':root[data-avatar-presence="composer"] .composer-workspace-group',
+    ))
+    workspace_chip = _declarations(_rule_body(
+        desktop,
+        ':root[data-avatar-presence="composer"] .composer-workspace-chip',
+    ))
+    model_chip = _declarations(_rule_body(
+        desktop,
+        ':root[data-avatar-presence="composer"] .composer-model-chip',
+    ))
+    composer_divider = _declarations(_rule_body(
+        desktop,
+        ':root[data-avatar-presence="composer"] .composer-divider',
+    ))
+
+    assert model_chevron.get("display") == "inline-flex"
+    assert workspace_group.get("max-width") == "284px"
+    assert workspace_chip.get("max-width") == "200px"
+    assert workspace_chip.get("justify-content") == "flex-start"
+    assert workspace_chip.get("gap") == "8px"
+    assert workspace_chip.get("padding") == "8px 12px 8px 10px"
+    assert model_chip.get("max-width") == "280px"
+    assert model_chip.get("justify-content") == "flex-start"
+    assert model_chip.get("gap") == "8px"
+    assert model_chip.get("padding") == "8px 10px 8px 12px"
+    assert composer_divider.get("display") == "block"
+
+
 def test_composer_presence_mobile_rule_keeps_avatar_56px_and_layout_compact():
     """Phone composer mode consumes the measured avatar size beside the compact box."""
     mobile = _composer_phone_media_block()
     active_row = _declarations(_rule_body(mobile, ':root[data-avatar-presence="composer"] .composer-presence-row'))
     active_avatar = _declarations(_rule_body(mobile, ':root[data-avatar-presence="composer"] .composer-presence-avatar'))
     composer_inner = _declarations(_rule_body(mobile, ':root[data-avatar-presence="composer"] .composer-presence-avatar .profile-avatar--composer'))
+    active_profile_wrap = _declarations(_rule_body(mobile, ':root[data-avatar-presence="composer"] .composer-profile-wrap'))
+    active_workspace_wrap = _declarations(_rule_body(mobile, ':root[data-avatar-presence="composer"] .composer-ws-wrap'))
 
     assert active_row.get("gap") == "6px"
     assert active_row.get("max-width") == "none"
@@ -945,6 +1028,32 @@ def test_composer_presence_mobile_rule_keeps_avatar_56px_and_layout_compact():
     assert active_avatar.get("height") == "var(--composer-presence-avatar-size,56px)"
     assert composer_inner.get("width") == "var(--composer-presence-avatar-size,56px)"
     assert composer_inner.get("height") == "var(--composer-presence-avatar-size,56px)"
+    assert active_profile_wrap.get("display") == "none!important", \
+        "composer-avatar mobile mode should hide the inline profile chip because the avatar opens profiles"
+    assert active_workspace_wrap.get("display") == "flex", \
+        "composer-avatar mobile mode should keep the Space files shortcut inline in the vacated profile slot"
+
+
+def test_composer_presence_avatar_opens_profile_menu_on_mobile():
+    """The composer avatar should be the profile switch affordance in avatar+composer phone mode."""
+    assert 'id="composerPresenceAvatar"' in HTML
+    avatar_start = HTML.index('id="composerPresenceAvatar"')
+    avatar_end = HTML.index('>', avatar_start)
+    avatar_html = HTML[avatar_start:avatar_end]
+    assert 'onclick="toggleComposerAvatarProfileDropdown(event)"' in avatar_html
+    assert 'aria-controls="profileDropdown"' in avatar_html
+    assert 'aria-haspopup="true"' in avatar_html
+
+    panels_js = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
+    assert "function toggleComposerAvatarProfileDropdown" in panels_js
+    assert "_profileDropdownAnchor='composerAvatar'" in panels_js, \
+        "avatar-triggered profile menu should remember the avatar as its positioning anchor"
+    position_start = panels_js.index("function _positionProfileDropdown()")
+    position_end = panels_js.index("function renderWorkspaceDropdownInto", position_start)
+    position_body = panels_js[position_start:position_end]
+    for expected in ("composerPresenceAvatar", "_profileDropdownAnchor==='composerAvatar'", "profileChip"):
+        assert expected in position_body, \
+            f"profile dropdown positioning must support both avatar and chip anchors ({expected})"
 
 
 def test_mobile_composer_overflow_control_present():
@@ -957,6 +1066,13 @@ def test_mobile_composer_overflow_control_present():
         "mobile config button must be associated with its panel"
     left_start = HTML.index('<div class="composer-left">')
     left_end = HTML.index('<div class="composer-right">', left_start)
+    right_end = HTML.index('<div class="composer-mobile-config-panel"', left_end)
+    assert 'id="composerMobileConfigBtn"' not in HTML[left_start:left_end], \
+        "mobile overflow/settings button must not live inside the scrollable composer-left strip"
+    assert 'id="composerMobileConfigBtn"' in HTML[left_end:right_end], \
+        "mobile overflow/settings button should stay in the fixed right-side action group"
+    assert HTML.index('id="composerMobileConfigBtn"', left_end) < HTML.index('id="btnSend"', left_end), \
+        "mobile overflow/settings button should sit beside Send instead of behind scrollable controls"
     assert 'id="composerMobileConfigPanel"' not in HTML[left_start:left_end], \
         "mobile overflow panel must not be nested inside .composer-left where overflow can clip it"
     assert "function toggleMobileComposerConfig()" in (REPO / "static" / "ui.js").read_text(encoding="utf-8"), \
@@ -976,6 +1092,12 @@ def test_mobile_composer_overflow_control_present():
         "mobile overflow panel must allow the context details row to span below primary actions"
     assert panel_open.get("display") == "flex", \
         "mobile overflow panel must become visible when opened"
+    composer_avatar_panel = _declarations(_rule_body(
+        mobile_css,
+        ':root[data-avatar-presence="composer"] .composer-mobile-config-panel',
+    ))
+    assert composer_avatar_panel.get("left") == "calc(8px - var(--composer-presence-avatar-size,56px) - 6px)", \
+        "composer-adjacent avatar mode should let the mobile overflow panel use the full row width"
 
 
 def test_model_and_reasoning_controls_live_in_mobile_overflow_panel():
@@ -1057,8 +1179,12 @@ def test_context_details_live_in_mobile_overflow_panel():
     right_html = HTML[right_start:right_end]
     assert 'id="composerMobileContextAction"' not in right_html, \
         "mobile context details must not live in composer-right as another phone slot"
-    assert 'id="composerMobileCtxBadge"' not in right_html, \
-        "mobile context badge must stay on the config button, not composer-right"
+    config_start = right_html.index('id="composerMobileConfigBtn"')
+    send_start = right_html.index('id="btnSend"', config_start)
+    config_html = right_html[config_start:send_start]
+    assert right_html.count('id="composerMobileCtxBadge"') == 1
+    assert 'id="composerMobileCtxBadge"' in config_html, \
+        "mobile context badge must stay attached to the fixed config button"
 
     ui_js = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
     sync_start = ui_js.index("function _syncMobileCtxDisplay(state)")
@@ -1076,6 +1202,27 @@ def test_context_details_live_in_mobile_overflow_panel():
     ):
         assert expected in sync_body, \
             f"_syncCtxIndicator must preserve upstream context logic while updating mobile context UI ({expected})"
+    no_data_match = re.search(
+        r"if\(!state\|\|!state\.visible\)\{(?P<body>[\s\S]*?)\n\s*return;\n\s*\}",
+        sync_body,
+    )
+    assert no_data_match, "_syncMobileCtxDisplay must handle the no-context-data state"
+    no_data_body = no_data_match.group("body")
+    assert "row.style.display='';" in no_data_body, \
+        "mobile context row must remain visible in the settings panel even before usage data arrives"
+    assert "insights_no_usage_data" in no_data_body, \
+        "mobile context row should render a no-usage placeholder instead of disappearing"
+    assert "window.t" in no_data_body, \
+        "no-data context state must tolerate early calls before i18n globals are ready"
+    for expected in (
+        "tokensLine.style.display='none'",
+        "thresholdLine.style.display='none'",
+        "costLine.style.display='none'",
+    ):
+        assert expected in no_data_body, \
+            f"no-data context state should hide unavailable detail lines ({expected})"
+    assert "tokensLine.style.display='';" in sync_body, \
+        "token details must be restored when context usage data arrives after a no-data state"
 
     mobile_css = _composer_phone_media_block()
     ctx_wrap = _declarations(_rule_body(mobile_css, ".ctx-indicator-wrap"))
