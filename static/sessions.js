@@ -2306,7 +2306,8 @@ async function renderSessionList(opts={}){
   try{
     if(!($('sessionSearch').value||'').trim()) _contentSearchResults = [];
     const params=new URLSearchParams();
-    if(S.session&&S.session.session_id) params.set('current_session_id',S.session.session_id);
+    const activeSidForSidebar=_activeSessionIdForSidebar();
+    if(activeSidForSidebar) params.set('current_session_id',activeSidForSidebar);
     const qs=params.toString();
     const indexData = await api('/api/session-index' + (qs?('?'+qs):''));
     // Discard stale response — a newer renderSessionList() call superseded us.
@@ -3259,7 +3260,8 @@ function _appendSearchArchiveAffordance(groups, query){
     const archiveMeta=(group&&group.archive)||{};
     const archiveCount=Number(group&&group.archive_count||archiveMeta.count||0);
     const loadedRows=Array.isArray(_sessionIndexArchiveRows[groupId])?_sessionIndexArchiveRows[groupId]:[];
-    if(archiveCount>0&&!loadedRows.length) candidates.push({group,groupId});
+    const hasMoreArchive=Boolean(_sessionIndexArchiveNextCursor[groupId]||archiveMeta.has_more||archiveMeta.next_cursor);
+    if(archiveCount>0&&(!loadedRows.length||hasMoreArchive)) candidates.push({group,groupId});
   }
   if(!candidates.length) return false;
   const row=document.createElement('button');

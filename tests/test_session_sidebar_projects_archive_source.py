@@ -52,16 +52,25 @@ def test_render_session_list_uses_session_index_read_model():
 
 def test_search_can_request_archive_without_preloading_every_old_row():
     js = _js()
+    body = _function_body(js, "_appendSearchArchiveAffordance")
+    render_body = _function_body(js, "renderSessionListFromCache")
 
-    assert "Search Archive" in js
-    assert "_loadSessionIndexArchive" in js
+    assert "Search Archive" in body
+    assert "_sessionIndexArchiveNextCursor[groupId]" in body
+    assert "archiveMeta.has_more" in body
+    assert "archiveCount>0&&(!loadedRows.length||hasMoreArchive)" in body
+    assert "_saveSessionIndexArchiveCollapsed(state)" in body
+    assert "_loadSessionIndexArchive(candidate.groupId)" in body
+    assert "_appendSearchArchiveAffordance(visibleSearchArchiveGroups,q)" in render_body
     assert "_contentSearchResults" in js
 
 
 def test_sidebar_index_sends_current_session_id():
     js = _js()
+    body = _function_body(js, "renderSessionList")
 
-    assert "current_session_id" in js
+    assert "const activeSidForSidebar=_activeSessionIdForSidebar();" in body
+    assert "params.set('current_session_id',activeSidForSidebar)" in body
 
 
 def test_sidebar_index_state_and_local_storage_keys_exist():
