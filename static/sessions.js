@@ -3247,6 +3247,41 @@ function _appendArchiveLoadState(body, group){
   }
 }
 
+function _appendSearchArchiveAffordance(groups, query){
+  const list=$('sessionList');
+  const q=String(query||'').trim();
+  if(!list||!q) return false;
+  const candidates=[];
+  for(const display of Array.isArray(groups)?groups:[]){
+    const group=display&&display.group;
+    const groupId=(display&&display.groupId)||_sessionIndexGroupId(group);
+    if(!group||!groupId||_sessionIndexArchiveLoading[groupId]) continue;
+    const archiveMeta=(group&&group.archive)||{};
+    const archiveCount=Number(group&&group.archive_count||archiveMeta.count||0);
+    const loadedRows=Array.isArray(_sessionIndexArchiveRows[groupId])?_sessionIndexArchiveRows[groupId]:[];
+    if(archiveCount>0&&!loadedRows.length) candidates.push({group,groupId});
+  }
+  if(!candidates.length) return false;
+  const row=document.createElement('button');
+  row.type='button';
+  row.className='session-archive-state session-archive-load-more session-search-archive';
+  row.textContent='Search Archive';
+  row.onclick=(e)=>{
+    e.stopPropagation();
+    const state=_sessionIndexArchiveCollapsed();
+    for(const candidate of candidates){
+      state[candidate.groupId]=false;
+    }
+    _saveSessionIndexArchiveCollapsed(state);
+    for(const candidate of candidates){
+      void _loadSessionIndexArchive(candidate.groupId);
+    }
+    renderSessionListFromCache();
+  };
+  list.appendChild(row);
+  return true;
+}
+
 function _handleSidebarDisclosureKeydown(e){
   if(e.target!==e.currentTarget) return;
   if(e.key==='Enter'||e.key===' '||e.key==='Spacebar'){
@@ -3516,7 +3551,10 @@ function renderSessionListFromCache(){
   renderRows(chatsBody,chatsDisplay.currentRows,chatsDisplay.group,false);
   appendArchiveSection(chatsBody,chatsDisplay);
   list.appendChild(chatsBody);
-  if(!flatSessionRows.length&&q){
+  const visibleSearchArchiveGroups=displayGroups.filter(display=>!(display.group&&display.group.kind==='project'&&projectCollapsed[display.groupId]));
+  visibleSearchArchiveGroups.push(chatsDisplay);
+  const searchArchiveAppended=_appendSearchArchiveAffordance(visibleSearchArchiveGroups,q);
+  if(!flatSessionRows.length&&q&&!searchArchiveAppended){
     const empty=document.createElement('div');
     empty.style.cssText='padding:20px 14px;color:var(--muted);font-size:12px;text-align:center;opacity:.7;';
     empty.textContent='No matching sessions.';

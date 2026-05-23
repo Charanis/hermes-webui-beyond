@@ -50,6 +50,20 @@ def test_render_session_list_uses_session_index_read_model():
     assert "_applySessionIndexPayload(indexData)" in js
 
 
+def test_search_can_request_archive_without_preloading_every_old_row():
+    js = _js()
+
+    assert "Search Archive" in js
+    assert "_loadSessionIndexArchive" in js
+    assert "_contentSearchResults" in js
+
+
+def test_sidebar_index_sends_current_session_id():
+    js = _js()
+
+    assert "current_session_id" in js
+
+
 def test_sidebar_index_state_and_local_storage_keys_exist():
     js = _js()
 
