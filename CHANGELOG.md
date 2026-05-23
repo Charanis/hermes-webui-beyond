@@ -3,6 +3,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Settings -> Appearance now offers an opt-in composer-adjacent agent avatar placement. The default thread avatar layout remains unchanged, while the new mode shows the active agent avatar beside the message composer at the composer box's initial height without growing with long drafts.
 
 ## [v0.51.107] — 2026-05-21 — Release CE (stage-400 — 8-PR batch — pinned-sessions-limit getter rename + uploaded-file user-turn dedupe + active-run repair guard + incremental KaTeX streaming + profile default model on fresh boot + French locale completion + update-check error surfacing + release-update apply path)
 
