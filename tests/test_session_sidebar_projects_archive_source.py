@@ -141,6 +141,19 @@ def test_fresh_current_rows_prune_cached_archive_rows_on_index_apply():
     assert body.index("const currentRows=_sessionIndexCurrentRows()") < body.index("const archiveRows=_sessionIndexLoadedArchiveRows()")
 
 
+def test_archive_load_rechecks_live_current_rows_before_assignment():
+    js = _js()
+    body = _function_body(js, "_loadSessionIndexArchive")
+
+    assert "const liveGroupIds=new Set(_sessionIndexGroups.map(g=>_sessionIndexGroupId(g)).filter(Boolean))" in body
+    assert "if(!liveGroupIds.has(groupId))" in body
+    assert "const currentIds=new Set(_sessionIndexCurrentRows().map(s=>s&&s.session_id).filter(Boolean))" in body
+    assert "const visibleMerged=merged.filter(s=>!(s&&s.session_id&&currentIds.has(s.session_id)))" in body
+    assert "_sessionIndexArchiveRows[groupId]=visibleMerged" in body
+    assert body.index("const data=await api('/api/session-index/archive?'") < body.index("const liveGroupIds=new Set")
+    assert body.index("const currentIds=new Set(_sessionIndexCurrentRows()") < body.index("_sessionIndexArchiveRows[groupId]=visibleMerged")
+
+
 def test_project_and_archive_headers_are_keyboard_accessible():
     js = _js()
     handler = _function_body(js, "_handleSidebarDisclosureKeydown")
@@ -169,3 +182,10 @@ def test_project_new_button_is_not_nested_inside_disclosure_control():
     assert "projectToggle.appendChild(caret);projectToggle.appendChild(folder);projectToggle.appendChild(name);projectToggle.appendChild(count)" in body
     assert "hdr.appendChild(projectToggle);hdr.appendChild(add)" in body
     assert "hdr.appendChild(caret);hdr.appendChild(folder);hdr.appendChild(name);hdr.appendChild(count);hdr.appendChild(add)" not in body
+
+
+def test_project_new_button_has_accessible_name():
+    js = _js()
+    body = _function_body(js, "renderSessionListFromCache")
+
+    assert "add.setAttribute('aria-label','New chat in this project')" in body
