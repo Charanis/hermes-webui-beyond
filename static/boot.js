@@ -1381,7 +1381,8 @@ function _applyFontSize(size){
   } else {
     delete document.documentElement.dataset.fontSize;
   }
-  if(typeof scheduleComposerPresenceAvatarMeasure==='function') scheduleComposerPresenceAvatarMeasure();
+  if(typeof scheduleComposerPresenceAvatarMeasureSettled==='function') scheduleComposerPresenceAvatarMeasureSettled();
+  else if(typeof scheduleComposerPresenceAvatarMeasure==='function') scheduleComposerPresenceAvatarMeasure();
 }
 
 function _pickFontSize(size){
@@ -1413,7 +1414,8 @@ function _applyAvatarPresenceLayout(layout){
   if(typeof refreshAssistantProfileAvatars==='function'){
     refreshAssistantProfileAvatars({state:window._activeProfileAvatarState||'idle',force:true});
   }
-  if(typeof scheduleComposerPresenceAvatarMeasure==='function') scheduleComposerPresenceAvatarMeasure();
+  if(typeof scheduleComposerPresenceAvatarMeasureSettled==='function') scheduleComposerPresenceAvatarMeasureSettled();
+  else if(typeof scheduleComposerPresenceAvatarMeasure==='function') scheduleComposerPresenceAvatarMeasure();
   return normalized;
 }
 
@@ -1434,6 +1436,16 @@ function _syncAvatarPresencePicker(active){
     btn.style.borderColor='';
     btn.style.boxShadow='';
   });
+}
+
+function _refreshComposerPresenceAfterLayout(){
+  if(typeof refreshAssistantProfileAvatars==='function'){
+    refreshAssistantProfileAvatars({state:window._activeProfileAvatarState||'idle',force:true});
+  }else if(typeof refreshComposerPresenceAvatar==='function'){
+    refreshComposerPresenceAvatar({force:true});
+  }
+  if(typeof scheduleComposerPresenceAvatarMeasureSettled==='function') scheduleComposerPresenceAvatarMeasureSettled();
+  else if(typeof scheduleComposerPresenceAvatarMeasure==='function') scheduleComposerPresenceAvatarMeasure();
 }
 
 function _buildSkinPicker(activeSkin){
@@ -1722,6 +1734,7 @@ function _deferBootHydration(fn){
         $('emptyState').style.display='';
         if(typeof renderSessionList==='function') await renderSessionList();
         if(typeof startGatewaySSE==='function')startGatewaySSE();
+        _refreshComposerPresenceAfterLayout();
         return;
       }
       await loadSession(saved);
@@ -1748,6 +1761,7 @@ function _deferBootHydration(fn){
         $('emptyState').style.display='';
         if(typeof renderSessionList==='function')void renderSessionList({deferWhileInteracting:true});
         if(typeof startGatewaySSE==='function')startGatewaySSE();
+        _refreshComposerPresenceAfterLayout();
         return;
       }
       // Restore the panel from localStorage when the session has a workspace.
@@ -1762,6 +1776,7 @@ function _deferBootHydration(fn){
       syncTopbar();syncWorkspacePanelState();
       if(typeof renderSessionList==='function')void renderSessionList({deferWhileInteracting:true});
       if(typeof startGatewaySSE==='function')startGatewaySSE();
+      _refreshComposerPresenceAfterLayout();
       await checkInflightOnBoot(saved);return;}
     catch(e){localStorage.removeItem('hermes-webui-session');}
   }
@@ -1778,6 +1793,7 @@ function _deferBootHydration(fn){
   if(typeof renderSessionList==='function')void renderSessionList({deferWhileInteracting:true});
   // Start real-time gateway session sync if setting is enabled
   if(typeof startGatewaySSE==='function') startGatewaySSE();
+  _refreshComposerPresenceAfterLayout();
 })().catch(e=>{
   console.error('[hermes] boot failed', e);
   try{S._bootReady=true;}catch(_){}
@@ -1823,6 +1839,7 @@ window.addEventListener('pageshow', async (event) => {
   if (typeof renderSessionListFromCache === 'function') {
     try { renderSessionListFromCache(); } catch (_) {}
   }
+  _refreshComposerPresenceAfterLayout();
   // Restart the gateway SSE watcher — the persisted connection is dead after bfcache
   if (typeof startGatewaySSE === 'function') try { startGatewaySSE(); } catch (_) {}
   // Re-sync sidebar collapse state from localStorage. bfcache restored the
