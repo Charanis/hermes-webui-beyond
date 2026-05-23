@@ -1522,6 +1522,7 @@ function _deferBootHydration(fn){
     window._simplifiedToolCalling=s.simplified_tool_calling!==false;
     window._sidebarDensity=(s.sidebar_density==='detailed'?'detailed':'compact');
     window._pinnedSessionsLimit=parseInt(s.pinned_sessions_limit||3,10)||3;
+    window._sessionArchiveAfterDays=parseInt(s.session_archive_after_days||7,10)||7;
     window._busyInputMode=(s.busy_input_mode||'queue');
     window._sessionEndlessScrollEnabled=!!s.session_endless_scroll;
     window._botName=s.bot_name||'Hermes';
@@ -1618,6 +1619,7 @@ function _deferBootHydration(fn){
     window._sessionJumpButtonsEnabled=false;
     window._sidebarDensity='compact';
     window._pinnedSessionsLimit=3;
+    window._sessionArchiveAfterDays=7;
     window._busyInputMode='queue';
     window._sessionEndlessScrollEnabled=false;
     window._botName='Hermes';
