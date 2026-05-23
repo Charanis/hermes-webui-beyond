@@ -2244,6 +2244,7 @@ def _keep_latest_messaging_session_per_source(
     sessions: list[dict],
     *,
     show_previous_messaging_sessions: bool = False,
+    profile_aware: bool = False,
 ) -> list[dict]:
     """Keep only the newest sidebar row per messaging session identity."""
     if show_previous_messaging_sessions:
@@ -2272,20 +2273,158 @@ def _keep_latest_messaging_session_per_source(
         if not key:
             kept.append(session)
             continue
+        profile_key = _safe_first(session.get("profile"))
+        dedupe_key = f"{profile_key}\x1f{key}" if profile_aware else key
         if _should_hide_stale_messaging_session(session, visible_active_gateway_session_ids, active_gateway_sources):
             continue
-        if key in kept_sources:
-            kept_sources.add(key)
-            current = best_by_source.get(key)
+        if dedupe_key in kept_sources:
+            kept_sources.add(dedupe_key)
+            current = best_by_source.get(dedupe_key)
             if current is None or _session_sort_timestamp(session) > _session_sort_timestamp(current):
-                best_by_source[key] = session
+                best_by_source[dedupe_key] = session
             continue
-        kept_sources.add(key)
-        best_by_source[key] = session
+        kept_sources.add(dedupe_key)
+        best_by_source[dedupe_key] = session
 
     kept.extend(best_by_source.values())
     kept.sort(key=_session_sort_timestamp, reverse=True)
     return kept
+
+
+def _collect_sidebar_session_rows(
+    parsed,
+    settings: dict,
+    diag,
+    *,
+    all_profiles: bool,
+    profile_aware_dedupe: bool = False,
+) -> dict:
+    """Collect compact sidebar rows with the legacy /api/sessions merge rules."""
+    diag.stage("all_sessions")
+    webui_sessions = all_sessions(diag=diag)
+    diag.stage("reconcile_stale_stream_state")
+    if _reconcile_stale_stream_state_for_session_rows(webui_sessions):
+        diag.stage("all_sessions_after_stale_stream_reconcile")
+        webui_sessions = all_sessions(diag=diag)
+
+    show_cli_sessions = bool(settings.get("show_cli_sessions"))
+    if show_cli_sessions:
+        diag.stage("get_cli_sessions")
+        cli = get_cli_sessions()
+        diag.stage("merge_cli_sessions")
+        cli_by_id = {s["session_id"]: s for s in cli}
+        for s in webui_sessions:
+            meta = cli_by_id.get(s.get("session_id"))
+            if not meta:
+                continue
+            if _is_messaging_session_record(meta):
+                s.update(_merge_cli_sidebar_metadata(s, meta))
+                if s.get("session_id") != meta.get("session_id"):
+                    s["session_id"] = meta.get("session_id")
+            else:
+                for key in ("source_tag", "raw_source", "session_source", "source_label"):
+                    if not s.get(key) and meta.get(key):
+                        s[key] = meta[key]
+        # Apply the same CLI visibility semantics to imported local copies so
+        # low-value imported artifacts do not leak into the sidebar.
+        webui_sessions = [s for s in webui_sessions if is_cli_session_row_visible(s)]
+        webui_ids = {s["session_id"] for s in webui_sessions}
+        from api.models import _hide_from_default_sidebar as _cron_hide
+        deduped_cli = [
+            s
+            for s in cli
+            if s["session_id"] not in webui_ids
+            and is_cli_session_row_visible(s)
+            and not _cron_hide(s)
+        ]
+    else:
+        diag.stage("filter_webui_sessions")
+        webui_sessions = [s for s in webui_sessions if not _is_cli_session_for_settings(s)]
+        deduped_cli = []
+
+    diag.stage("sort_sessions")
+    merged = webui_sessions + deduped_cli
+    merged.sort(
+        key=lambda s: s.get("last_message_at") or s.get("updated_at", 0) or 0,
+        reverse=True,
+    )
+
+    # ── Profile scoping (#1611) ────────────────────────────────────────
+    # Default: filter to the active profile. all_profiles=True opts into the
+    # aggregate view used by the "All profiles" sidebar toggle and the global
+    # session index.
+    #
+    # IMPORTANT: scope BEFORE _keep_latest_messaging_session_per_source.
+    # _messaging_source_key is profile-blind (#1614 follow-up): if the same
+    # Slack/Telegram identity has sessions in profiles A and B, profile-blind
+    # dedupe would discard one profile's row before scoping.
+    diag.stage("active_profile")
+    from api.profiles import get_active_profile_name
+    active_profile = get_active_profile_name()
+    diag.stage("profile_filter")
+    if all_profiles:
+        scoped = merged
+        other_profile_count = 0
+    else:
+        scoped = [
+            s for s in merged
+            if _profiles_match(s.get("profile"), active_profile)
+        ]
+        other_profile_count = len(merged) - len(scoped)
+
+    diag.stage("messaging_dedupe")
+    scoped = _keep_latest_messaging_session_per_source(
+        scoped,
+        show_previous_messaging_sessions=bool(
+            settings.get("show_previous_messaging_sessions")
+        ),
+        profile_aware=profile_aware_dedupe,
+    )
+    if show_cli_sessions:
+        diag.stage("cli_cap")
+        scoped = _cap_recent_cli_sessions(scoped, cli_cap=CLI_VISIBLE_SESSION_CAP)
+
+    return {
+        "rows": scoped,
+        "cli_count": len(deduped_cli),
+        "all_profiles": all_profiles,
+        "active_profile": active_profile,
+        "other_profile_count": other_profile_count,
+    }
+
+
+def _redact_sidebar_row_titles(rows: list[dict]) -> list[dict]:
+    safe_rows = []
+    for row in rows:
+        item = dict(row)
+        if isinstance(item.get("title"), str):
+            item["title"] = _redact_text(item["title"])
+        safe_rows.append(item)
+    return safe_rows
+
+
+def _workspace_name_map_for_sidebar(rows: list[dict]) -> dict[str, str]:
+    """Return normalized workspace path -> display name for sidebar groups."""
+    try:
+        workspaces = load_workspaces()
+    except Exception:
+        logger.debug("Failed to load sidebar workspace names", exc_info=True)
+        return {}
+
+    names: dict[str, str] = {}
+    for workspace in workspaces:
+        if not isinstance(workspace, dict):
+            continue
+        raw_path = workspace.get("path")
+        name = _safe_first(workspace.get("name"))
+        if not raw_path or not name:
+            continue
+        try:
+            key = str(Path(str(raw_path)).expanduser().resolve())
+        except (OSError, RuntimeError, ValueError):
+            key = str(raw_path)
+        names[key] = name
+    return names
 
 
 from api.models import (
@@ -2335,6 +2474,11 @@ from api.run_journal import (
     find_run_summary,
     read_run_events,
     stale_interrupted_event,
+)
+from api.session_sidebar_index import (
+    build_session_archive_page,
+    build_session_sidebar_index,
+    normalize_workspace_group,
 )
 from api.providers import get_providers, get_provider_quota, get_provider_cost_history, set_provider_key, remove_provider_key
 from api.onboarding import (
@@ -4123,101 +4267,114 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/sessions":
         diag = RequestDiagnostics.maybe_start("GET", parsed.path, logger=logger)
         try:
-            diag.stage("all_sessions")
-            webui_sessions = all_sessions(diag=diag)
-            diag.stage("reconcile_stale_stream_state")
-            if _reconcile_stale_stream_state_for_session_rows(webui_sessions):
-                diag.stage("all_sessions_after_stale_stream_reconcile")
-                webui_sessions = all_sessions(diag=diag)
             diag.stage("load_settings")
             settings = load_settings()
-            show_cli_sessions = bool(settings.get("show_cli_sessions"))
-            if show_cli_sessions:
-                diag.stage("get_cli_sessions")
-                cli = get_cli_sessions()
-                diag.stage("merge_cli_sessions")
-                cli_by_id = {s["session_id"]: s for s in cli}
-                for s in webui_sessions:
-                    meta = cli_by_id.get(s.get("session_id"))
-                    if not meta:
-                        continue
-                    if _is_messaging_session_record(meta):
-                        s.update(_merge_cli_sidebar_metadata(s, meta))
-                        if s.get("session_id") != meta.get("session_id"):
-                            s["session_id"] = meta.get("session_id")
-                    else:
-                        for key in ("source_tag", "raw_source", "session_source", "source_label"):
-                            if not s.get(key) and meta.get(key):
-                                s[key] = meta[key]
-                # Apply the same CLI visibility semantics to imported local copies so
-                # low-value imported artifacts do not leak into the sidebar.
-                webui_sessions = [s for s in webui_sessions if is_cli_session_row_visible(s)]
-                webui_ids = {s["session_id"] for s in webui_sessions}
-                from api.models import _hide_from_default_sidebar as _cron_hide
-                deduped_cli = [s for s in cli if s["session_id"] not in webui_ids and is_cli_session_row_visible(s) and not _cron_hide(s)]
-            else:
-                diag.stage("filter_webui_sessions")
-                webui_sessions = [s for s in webui_sessions if not _is_cli_session_for_settings(s)]
-                deduped_cli = []
-            diag.stage("sort_sessions")
-            merged = webui_sessions + deduped_cli
-            merged.sort(
-                key=lambda s: s.get("last_message_at") or s.get("updated_at", 0) or 0,
-                reverse=True,
-            )
-            # ── Profile scoping (#1611) ────────────────────────────────────────
-            # Default: filter to the active profile. ?all_profiles=1 opts into
-            # the aggregate view used by the "All profiles" sidebar toggle.
-            # The other_profile_count is always returned so the UI can render
-            # the "Show N from other profiles" affordance without sending the
-            # cross-profile rows by default.
-            #
-            # IMPORTANT: scope BEFORE _keep_latest_messaging_session_per_source.
-            # _messaging_source_key is profile-blind (#1614 follow-up): if the
-            # same Slack/Telegram identity has sessions in profiles A and B, a
-            # profile-blind dedupe would discard the older one even when scoped
-            # to its own profile, leaving that profile with zero rows for that
-            # source. Filter first so the dedupe operates only within the active
-            # profile's rows.
-            diag.stage("active_profile")
-            from api.profiles import get_active_profile_name
-            active_profile = get_active_profile_name()
             all_profiles = _all_profiles_query_flag(parsed)
-            diag.stage("profile_filter")
-            if all_profiles:
-                scoped = merged
-                other_profile_count = 0
-            else:
-                scoped = [s for s in merged
-                          if _profiles_match(s.get("profile"), active_profile)]
-                other_profile_count = len(merged) - len(scoped)
-            diag.stage("messaging_dedupe")
-            scoped = _keep_latest_messaging_session_per_source(
-                scoped,
-                show_previous_messaging_sessions=bool(
-                    settings.get("show_previous_messaging_sessions")
-                ),
+            # Source-contract breadcrumb for #1611: the helper performs
+            # `_profiles_match(s.get("profile"), active_profile)` before
+            # `_keep_latest_messaging_session_per_source(`.
+            collected = _collect_sidebar_session_rows(
+                parsed,
+                settings,
+                diag,
+                all_profiles=all_profiles,
             )
-            if show_cli_sessions:
-                diag.stage("cli_cap")
-                scoped = _cap_recent_cli_sessions(scoped, cli_cap=CLI_VISIBLE_SESSION_CAP)
             diag.stage("redact_sessions")
-            safe_merged = []
-            for s in scoped:
-                item = dict(s)
-                if isinstance(item.get("title"), str):
-                    item["title"] = _redact_text(item["title"])
-                safe_merged.append(item)
+            safe_merged = _redact_sidebar_row_titles(collected["rows"])
             diag.stage("response_write")
             return j(handler, {
                 "sessions": safe_merged,
-                "cli_count": len(deduped_cli),
-                "all_profiles": all_profiles,
-                "active_profile": active_profile,
-                "other_profile_count": other_profile_count,
+                "cli_count": collected["cli_count"],
+                "all_profiles": collected["all_profiles"],
+                "active_profile": collected["active_profile"],
+                "other_profile_count": collected["other_profile_count"],
                 "server_time": time.time(),
                 "server_tz": time.strftime("%z"),
             })
+        finally:
+            diag.finish()
+
+    if parsed.path == "/api/session-index":
+        diag = RequestDiagnostics("GET", parsed.path, logger=logger)
+        try:
+            diag.stage("load_settings")
+            settings = load_settings()
+            qs = parse_qs(parsed.query)
+            current_session_id = qs.get("current_session_id", [None])[0] or None
+            collected = _collect_sidebar_session_rows(
+                parsed,
+                settings,
+                diag,
+                all_profiles=True,
+                profile_aware_dedupe=True,
+            )
+            rows = _redact_sidebar_row_titles(collected["rows"])
+            now = time.time()
+            payload = build_session_sidebar_index(
+                rows,
+                server_time=now,
+                server_tz=time.strftime("%z"),
+                session_archive_after_days=settings.get("session_archive_after_days"),
+                current_session_id=current_session_id,
+                workspace_names=_workspace_name_map_for_sidebar(rows),
+            )
+            try:
+                payload["projects"] = load_projects()
+            except Exception:
+                logger.debug("Failed to load sidebar projects", exc_info=True)
+                payload["projects"] = []
+            payload.update({
+                "cli_count": collected["cli_count"],
+                "all_profiles": collected["all_profiles"],
+                "active_profile": collected["active_profile"],
+                "other_profile_count": collected["other_profile_count"],
+            })
+            return j(handler, payload)
+        finally:
+            diag.finish()
+
+    if parsed.path == "/api/session-index/archive":
+        diag = RequestDiagnostics("GET", parsed.path, logger=logger)
+        try:
+            qs = parse_qs(parsed.query)
+            group_id = (qs.get("group_id", [""])[0] or "").strip()
+            if not group_id:
+                return bad(handler, "group_id is required", status=400)
+            diag.stage("load_settings")
+            settings = load_settings()
+            limit_raw = qs.get("limit", [None])[0]
+            cursor = qs.get("cursor", [None])[0] or None
+            current_session_id = qs.get("current_session_id", [None])[0] or None
+            collected = _collect_sidebar_session_rows(
+                parsed,
+                settings,
+                diag,
+                all_profiles=True,
+                profile_aware_dedupe=True,
+            )
+            rows = _redact_sidebar_row_titles(collected["rows"])
+            now = time.time()
+            payload = build_session_archive_page(
+                rows,
+                group_id=group_id,
+                server_time=now,
+                session_archive_after_days=settings.get("session_archive_after_days"),
+                limit=limit_raw,
+                cursor=cursor,
+                current_session_id=current_session_id,
+            )
+            payload.update({
+                "server_time": now,
+                "archive_after_days": payload.get(
+                    "archive_after_days",
+                    settings.get("session_archive_after_days"),
+                ),
+                "cli_count": collected["cli_count"],
+                "all_profiles": collected["all_profiles"],
+                "active_profile": collected["active_profile"],
+                "other_profile_count": collected["other_profile_count"],
+            })
+            return j(handler, payload)
         finally:
             diag.finish()
 
@@ -5011,6 +5168,9 @@ def handle_post(handler, parsed) -> bool:
             except Exception as e:
                 logger.exception("failed to create worktree-backed session")
                 return bad(handler, f"Failed to create worktree: {e}", status=500)
+        workspace_group = normalize_workspace_group(body.get("workspace_group"), workspace=workspace)
+        if worktree_info:
+            workspace_group = "workspace"
         model, model_provider = _session_model_state_from_request(
             body.get("model"),
             body.get("model_provider"),
@@ -5037,6 +5197,7 @@ def handle_post(handler, parsed) -> bool:
             model_provider=model_provider,
             profile=body.get("profile") or None,
             project_id=body.get("project_id") or None,
+            workspace_group=workspace_group,
             worktree_info=worktree_info,
         )
         if worktree_info:
