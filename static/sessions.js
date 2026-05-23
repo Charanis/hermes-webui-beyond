@@ -2374,7 +2374,16 @@ async function _loadSessionIndexArchive(groupId, opts={}){
       merged.push(row);
       seen.add(row.session_id);
     }
-    _sessionIndexArchiveRows[groupId]=merged;
+    const liveGroupIds=new Set(_sessionIndexGroups.map(g=>_sessionIndexGroupId(g)).filter(Boolean));
+    if(!liveGroupIds.has(groupId)){
+      delete _sessionIndexArchiveRows[groupId];
+      delete _sessionIndexArchiveNextCursor[groupId];
+      delete _sessionIndexArchiveErrors[groupId];
+      return;
+    }
+    const currentIds=new Set(_sessionIndexCurrentRows().map(s=>s&&s.session_id).filter(Boolean));
+    const visibleMerged=merged.filter(s=>!(s&&s.session_id&&currentIds.has(s.session_id)));
+    _sessionIndexArchiveRows[groupId]=visibleMerged;
     _sessionIndexArchiveNextCursor[groupId]=(data&&data.next_cursor)||null;
     if(data&&typeof data.server_time==='number'&&data.server_time>0){
       _serverTimeDelta=Date.now()-(data.server_time*1000);
@@ -3506,6 +3515,7 @@ function renderSessionListFromCache(){
     add.className='session-project-new';
     add.textContent='+';
     add.title='New chat in this project';
+    add.setAttribute('aria-label','New chat in this project');
     add.onclick=(e)=>{
       e.stopPropagation();
       void newSession(true,{workspace:group.workspace,workspace_group:'workspace'});

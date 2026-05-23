@@ -28,6 +28,23 @@ def _show_project_picker_body() -> str:
     return SESSIONS_SRC[start:end]
 
 
+def _function_body(name: str) -> str:
+    start = SESSIONS_SRC.find(f"function {name}(")
+    assert start != -1, f"{name} not found in sessions.js"
+    depth_start = SESSIONS_SRC.find("{", start)
+    assert depth_start != -1, f"{name} body not found"
+    depth = 1
+    i = depth_start + 1
+    while i < len(SESSIONS_SRC) and depth:
+        if SESSIONS_SRC[i] == "{":
+            depth += 1
+        elif SESSIONS_SRC[i] == "}":
+            depth -= 1
+        i += 1
+    assert depth == 0, f"{name} body did not terminate"
+    return SESSIONS_SRC[start:i]
+
+
 PICKER_BODY = _show_project_picker_body()
 
 
@@ -126,6 +143,18 @@ console.log(JSON.stringify({
         {"id": "sb", "project_id": "proj-new"},
     ]
     assert observed == {"all": expected, "grouped": expected}
+
+
+def test_real_project_cache_helper_updates_all_rendered_caches():
+    body = _function_body("_updateSessionProjectCache")
+
+    assert "_allSessions.findIndex" in body
+    assert "_allSessions[idx]={..._allSessions[idx],project_id:projectId}" in body
+    assert "Array.isArray(_sessionIndexGroups)" in body
+    assert "Array.isArray(group&&group.sessions)" in body
+    assert "row.project_id=projectId" in body
+    assert "Object.keys(_sessionIndexArchiveRows||{})" in body
+    assert "Array.isArray(_sessionIndexArchiveRows[groupId])" in body
 
 
 def test_new_project_branch_still_uses_authoritative_refetch():
