@@ -2285,6 +2285,12 @@ function _applySessionIndexPayload(indexData){
       delete _sessionIndexArchiveErrors[key];
     }
   }
+  const currentRows=_sessionIndexCurrentRows();
+  const currentIds=new Set(currentRows.map(s=>s&&s.session_id).filter(Boolean));
+  for(const key of Object.keys(_sessionIndexArchiveRows||{})){
+    const rows=Array.isArray(_sessionIndexArchiveRows[key])?_sessionIndexArchiveRows[key]:[];
+    _sessionIndexArchiveRows[key]=rows.filter(s=>!(s&&s.session_id&&currentIds.has(s.session_id)));
+  }
   _otherProfileCount = 0;
   const archiveAfter=parseInt(indexData.session_archive_after_days||indexData.archive_after_days||7,10)||7;
   if(typeof window!=='undefined') window._sessionArchiveAfterDays=archiveAfter;
@@ -2298,7 +2304,6 @@ function _applySessionIndexPayload(indexData){
   if (typeof indexData.server_tz === 'string') {
     _serverTz = indexData.server_tz;
   }
-  const currentRows=_sessionIndexCurrentRows();
   const archiveRows=_sessionIndexLoadedArchiveRows();
   const sessionRows=[...currentRows,...archiveRows];
   _reconcileActiveSessionIdleStateFromList(sessionRows);
@@ -3342,7 +3347,7 @@ function renderSessionListFromCache(){
   const addFlatRows=(display, archive=false)=>{
     const group=display.group;
     const groupId=display.groupId;
-    if(!archive&&projectCollapsed[groupId]&&group.kind==='project') return;
+    if(group.kind==='project'&&projectCollapsed[groupId]) return;
     if(archive&&archiveCollapsed[groupId]!==false) return;
     const rows=archive?display.archiveRows:display.currentRows;
     for(const s of rows){

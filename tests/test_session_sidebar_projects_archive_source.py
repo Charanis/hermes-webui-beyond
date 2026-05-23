@@ -119,3 +119,23 @@ def test_archive_rows_are_not_synced_into_current_groups():
     assert "archiveIds.has(row.session_id)" in sync_body
     assert "row.archived||row.age_archived" in sync_body
     assert "_isOptimisticFirstTurnSessionRow(row)" in sync_body
+
+
+def test_collapsed_projects_do_not_add_archive_rows_to_virtual_flat_list():
+    js = _js()
+    body = _function_body(js, "renderSessionListFromCache")
+
+    assert "if(group.kind==='project'&&projectCollapsed[groupId]) return;" in body
+    collapsed_guard = body.index("if(group.kind==='project'&&projectCollapsed[groupId]) return;")
+    archive_guard = body.index("if(archive&&archiveCollapsed[groupId]!==false) return;")
+    archive_push = body.index("flatSessionRows.push({group,session:s,archive:true})")
+    assert collapsed_guard < archive_guard < archive_push
+
+
+def test_fresh_current_rows_prune_cached_archive_rows_on_index_apply():
+    js = _js()
+    body = _function_body(js, "_applySessionIndexPayload")
+
+    assert "const currentIds=new Set(currentRows.map(s=>s&&s.session_id).filter(Boolean))" in body
+    assert "_sessionIndexArchiveRows[key]=rows.filter(s=>!(s&&s.session_id&&currentIds.has(s.session_id)))" in body
+    assert body.index("const currentRows=_sessionIndexCurrentRows()") < body.index("const archiveRows=_sessionIndexLoadedArchiveRows()")
