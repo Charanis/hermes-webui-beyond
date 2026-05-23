@@ -838,7 +838,7 @@ function setActiveProfileAvatar(avatar, shape, opts={}){
   }):'';
   if(before===after&&beforeShape===normalizedShape&&beforeReactive===afterReactive) return;
   if(typeof clearMessageRenderCache==='function') clearMessageRenderCache();
-  if(typeof refreshAssistantProfileAvatars==='function') refreshAssistantProfileAvatars();
+  if(typeof refreshAssistantProfileAvatars==='function') refreshAssistantProfileAvatars({force:true});
 }
 function setActiveProfileAvatarSettings(settings){
   settings=settings&&typeof settings==='object'?settings:{};
@@ -892,6 +892,27 @@ async function refreshConversationProfileAvatarSettings(profileName){
     return null;
   }
 }
+function _isComposerPresenceLayoutActive(){
+  return document.documentElement.dataset.avatarPresence==='composer';
+}
+function refreshComposerPresenceAvatar(opts={}){
+  const host=$('composerPresenceAvatar');
+  if(!host) return;
+  if(!_isComposerPresenceLayoutActive()){
+    if(host.innerHTML) host.innerHTML='';
+    return;
+  }
+  const label=window._botName||'Hermes';
+  const fallback=label.charAt(0).toUpperCase()||'H';
+  const requestedState=opts.state||window._activeProfileAvatarState||'idle';
+  const state=_PROFILE_REACTIVE_AVATAR_STATES.includes(requestedState)?requestedState:'idle';
+  const profileName=_currentConversationProfileName();
+  const current=host.firstElementChild;
+  if(!opts.force&&current&&current.getAttribute('data-avatar-state')===state&&current.getAttribute('data-avatar-profile')===profileName){
+    return;
+  }
+  host.innerHTML=_conversationProfileAvatarMarkupForState(state,{fallback,classes:'profile-avatar--composer',title:label,profileName});
+}
 function setReactiveAvatarState(state='idle', opts={}){
   const normalized=_PROFILE_REACTIVE_AVATAR_STATES.includes(state)?state:'idle';
   const now=Date.now();
@@ -923,6 +944,12 @@ function setReactiveAvatarState(state='idle', opts={}){
 function _assistantAvatarRefreshNeeded(state='idle', liveOnly=false){
   const normalized=_PROFILE_REACTIVE_AVATAR_STATES.includes(state)?state:'idle';
   const profileName=_currentConversationProfileName();
+  if(_isComposerPresenceLayoutActive()){
+    const host=$('composerPresenceAvatar');
+    const node=document.querySelector('#composerPresenceAvatar .profile-avatar--composer');
+    if(!node) return !!host;
+    return node.getAttribute('data-avatar-state')!==normalized||node.getAttribute('data-avatar-profile')!==profileName;
+  }
   const selector=liveOnly
     ? '#liveAssistantTurn .msg-role.assistant .role-icon.assistant'
     : '.msg-role.assistant .role-icon.assistant';
@@ -935,6 +962,11 @@ function refreshAssistantProfileAvatars(opts={}){
   const fallback=label.charAt(0).toUpperCase()||'H';
   const requestedState=opts.state||window._activeProfileAvatarState||'idle';
   const state=_PROFILE_REACTIVE_AVATAR_STATES.includes(requestedState)?requestedState:'idle';
+  if(_isComposerPresenceLayoutActive()){
+    refreshComposerPresenceAvatar({state,force:!!opts.force});
+    return;
+  }
+  refreshComposerPresenceAvatar({state,force:true});
   const selector=opts.liveOnly
     ? '#liveAssistantTurn .msg-role.assistant .role-icon.assistant'
     : '.msg-role.assistant .role-icon.assistant';

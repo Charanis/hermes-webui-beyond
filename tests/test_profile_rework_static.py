@@ -296,6 +296,38 @@ def test_live_avatar_refresh_uses_current_session_profile_resolver():
         "reactive state changes must not repaint visible chat from the active profile"
 
 
+def test_composer_presence_avatar_uses_current_session_profile_resolver():
+    assert "function refreshComposerPresenceAvatar" in UI_JS
+    fn = _extract_function(UI_JS, "refreshComposerPresenceAvatar")
+    assert "_conversationProfileAvatarMarkupForState(state" in fn
+    assert "profile-avatar--composer" in fn
+    assert "_currentConversationProfileName()" in fn
+    assert "data-avatar-profile" in fn
+    assert "_activeProfileAvatarMarkupForState" not in fn
+
+
+def test_composer_presence_reactive_refreshes_visible_avatar_only_in_composer_mode():
+    needed = _extract_function(UI_JS, "_assistantAvatarRefreshNeeded")
+    refresh = _extract_function(UI_JS, "refreshAssistantProfileAvatars")
+    assert "function _isComposerPresenceLayoutActive()" in UI_JS
+    assert "#composerPresenceAvatar .profile-avatar--composer" in needed
+    assert "if(_isComposerPresenceLayoutActive())" in refresh
+    assert "refreshComposerPresenceAvatar({state,force:!!opts.force})" in refresh
+    composer_branch = refresh[
+        refresh.find("if(_isComposerPresenceLayoutActive())"):
+        refresh.find("document.querySelectorAll(selector)")
+    ]
+    assert "return;" in composer_branch
+
+
+def test_composer_presence_forces_repaint_when_active_avatar_payload_changes():
+    fn = _extract_function(UI_JS, "setActiveProfileAvatar")
+    assert "refreshAssistantProfileAvatars({force:true})" in fn, (
+        "same-profile avatar payload changes must repaint the composer avatar even when "
+        "state/profile data attributes are unchanged"
+    )
+
+
 def test_session_profile_avatar_refresh_helpers_exist():
     assert "function _currentConversationProfileName()" in UI_JS
     assert "function _profileAvatarEntryForName(" in UI_JS
