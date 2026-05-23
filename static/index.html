@@ -19,6 +19,7 @@
 <link rel="apple-touch-icon" sizes="512x512" href="static/apple-touch-icon.png">
 <script>(function(){var themes={light:1,dark:1,system:1},skins={default:1,ares:1,mono:1,slate:1,poseidon:1,sisyphus:1,charizard:1,sienna:1,catppuccin:1,hepburn:1,nous:1,'geist-contrast':1},legacy={slate:['dark','slate'],solarized:['dark','poseidon'],monokai:['dark','sisyphus'],nord:['dark','slate'],oled:['dark','default']},t=(localStorage.getItem('hermes-theme')||'dark').toLowerCase(),s=(localStorage.getItem('hermes-skin')||'').toLowerCase(),m=legacy[t],theme=m?m[0]:(themes[t]?t:'dark'),skin=skins[s]?s:(m?m[1]:'default');localStorage.setItem('hermes-theme',theme);localStorage.setItem('hermes-skin',skin);if(theme==='system')theme=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';if(theme==='dark')document.documentElement.classList.add('dark');if(skin!=='default')document.documentElement.dataset.skin=skin;})()</script>
 <script>(function(){var fs=localStorage.getItem('hermes-font-size');if(fs&&fs!=='default')document.documentElement.dataset.fontSize=fs;})()</script>
+<script>(function(){try{var v=localStorage.getItem('hermes-avatar-presence-layout');if(v==='composer')document.documentElement.dataset.avatarPresence='composer';else delete document.documentElement.dataset.avatarPresence;}catch(e){}})()</script>
 <!-- theme-color: surfaces the active app chrome color to native status bars (Safari status bar, PWA, native WKWebView wrappers). Updated dynamically by boot.js when theme/skin changes. The light/dark default values match style.css :root --sidebar / :root.dark --sidebar. -->
 <meta name="theme-color" content="#FAF7F0" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#141425" media="(prefers-color-scheme: dark)">
@@ -956,6 +957,26 @@
                 </button>
               </div>
               <input type="hidden" id="settingsFontSize" value="default">
+            </div>
+            <div class="settings-field">
+              <label>Agent avatar placement</label>
+              <div id="avatarPresencePickerGrid" style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-top:4px">
+                <button type="button" data-avatar-presence-layout-val="thread" onclick="_pickAvatarPresenceLayout('thread')" class="avatar-presence-pick-btn" aria-pressed="true" style="border:1px solid var(--border2);border-radius:10px;padding:10px 8px;text-align:center;cursor:pointer;background:none;transition:all .15s">
+                  <div style="width:100%;height:40px;border-radius:6px;background:var(--surface);border:1px solid var(--border);margin-bottom:6px;display:flex;align-items:center;justify-content:center;gap:5px;color:var(--muted)">
+                    <span style="width:10px;height:10px;border-radius:50%;background:var(--accent-bg-strong);display:inline-block"></span>
+                    <span style="width:38px;height:16px;border-radius:6px;border:1px solid var(--border2);display:inline-block"></span>
+                  </div>
+                  <span style="font-size:12px;font-weight:500;color:var(--text)">Thread</span>
+                </button>
+                <button type="button" data-avatar-presence-layout-val="composer" onclick="_pickAvatarPresenceLayout('composer')" class="avatar-presence-pick-btn" aria-pressed="false" style="border:1px solid var(--border2);border-radius:10px;padding:10px 8px;text-align:center;cursor:pointer;background:none;transition:all .15s">
+                  <div style="width:100%;height:40px;border-radius:6px;background:var(--surface);border:1px solid var(--border);margin-bottom:6px;display:flex;align-items:center;justify-content:center;gap:5px;color:var(--muted)">
+                    <span style="width:22px;height:22px;border-radius:8px;background:var(--accent-bg-strong);display:inline-block"></span>
+                    <span style="width:42px;height:22px;border-radius:8px;border:1px solid var(--border2);display:inline-block"></span>
+                  </div>
+                  <span style="font-size:12px;font-weight:500;color:var(--text)">Composer</span>
+                </button>
+              </div>
+              <input type="hidden" id="settingsAvatarPresenceLayout" value="thread">
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">

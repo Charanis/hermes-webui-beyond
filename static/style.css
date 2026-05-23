@@ -432,7 +432,8 @@
   :root[data-skin="geist-contrast"] .side-menu-item.active,
   :root[data-skin="geist-contrast"] .skin-pick-btn.active,
   :root[data-skin="geist-contrast"] .theme-pick-btn.active,
-  :root[data-skin="geist-contrast"] .font-size-pick-btn.active{background:var(--surface-subtle)!important;border-color:var(--border2)!important;color:var(--text)!important;box-shadow:inset 0 0 0 1px var(--border)!important;font-weight:500!important;}
+  :root[data-skin="geist-contrast"] .font-size-pick-btn.active,
+  :root[data-skin="geist-contrast"] .avatar-presence-pick-btn.active{background:var(--surface-subtle)!important;border-color:var(--border2)!important;color:var(--text)!important;box-shadow:inset 0 0 0 1px var(--border)!important;font-weight:500!important;}
   :root[data-skin="geist-contrast"] .session-item.active{position:relative;border:1px solid var(--border2)!important;}
   :root[data-skin="geist-contrast"] .session-item.active::before{content:"";position:absolute;left:6px;top:10px;bottom:10px;width:2px;border-radius:999px;background:var(--accent);}
   :root[data-skin="geist-contrast"] .session-item.active .session-title,
@@ -3238,18 +3239,21 @@ main.main.showing-logs > #mainLogs{display:flex;}
 .mcp-tool-page-btn:hover:not(:disabled){border-color:var(--accent-bg-strong);color:var(--accent-text);}
 .mcp-tool-page-btn:disabled{opacity:.45;cursor:not-allowed;}
 
-/* Picker grids (theme / skin / font-size): make the card chrome use
+/* Picker grids (theme / skin / font-size / avatar placement): make the card chrome use
    tokens so all skins flip correctly. */
 #mainSettings .theme-pick-btn,
 #mainSettings .skin-pick-btn,
-#mainSettings .font-size-pick-btn{background:var(--bg)!important;border-color:var(--border)!important;}
+#mainSettings .font-size-pick-btn,
+#mainSettings .avatar-presence-pick-btn{background:var(--bg)!important;border-color:var(--border)!important;}
 #mainSettings .theme-pick-btn:hover,
 #mainSettings .skin-pick-btn:hover,
-#mainSettings .font-size-pick-btn:hover{border-color:var(--accent-bg-strong)!important;background:var(--surface)!important;}
+#mainSettings .font-size-pick-btn:hover,
+#mainSettings .avatar-presence-pick-btn:hover{border-color:var(--accent-bg-strong)!important;background:var(--surface)!important;}
 /* Active/selected state for picker cards — must use !important to beat the base border-color:var(--border)!important rule above */
 #mainSettings .theme-pick-btn.active,
 #mainSettings .skin-pick-btn.active,
-#mainSettings .font-size-pick-btn.active{border-color:var(--accent)!important;box-shadow:0 0 0 1px var(--accent-bg-strong)!important;background:var(--surface)!important;}
+#mainSettings .font-size-pick-btn.active,
+#mainSettings .avatar-presence-pick-btn.active{border-color:var(--accent)!important;box-shadow:0 0 0 1px var(--accent-bg-strong)!important;background:var(--surface)!important;}
 
 /* Responsive: tighten canvas on small screens. */
 @media (max-width: 768px){

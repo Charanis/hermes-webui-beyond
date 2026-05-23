@@ -1408,6 +1408,41 @@ function _syncFontSizePicker(active){
   });
 }
 
+function _normalizeAvatarPresenceLayout(layout){
+  return String(layout||'thread').trim().toLowerCase()==='composer'?'composer':'thread';
+}
+
+function _applyAvatarPresenceLayout(layout){
+  const normalized=_normalizeAvatarPresenceLayout(layout);
+  try{localStorage.setItem('hermes-avatar-presence-layout',normalized);}catch(_){}
+  if(normalized==='composer') document.documentElement.dataset.avatarPresence='composer';
+  else delete document.documentElement.dataset.avatarPresence;
+  if(typeof refreshAssistantProfileAvatars==='function'){
+    refreshAssistantProfileAvatars({state:window._activeProfileAvatarState||'idle',force:true});
+  }
+  if(typeof scheduleComposerPresenceAvatarMeasure==='function') scheduleComposerPresenceAvatarMeasure();
+  return normalized;
+}
+
+function _pickAvatarPresenceLayout(layout){
+  const normalized=_applyAvatarPresenceLayout(layout);
+  _syncAvatarPresencePicker(normalized);
+  const hidden=$('settingsAvatarPresenceLayout');
+  if(hidden) hidden.value=normalized;
+  if(typeof _scheduleAppearanceAutosave==='function') _scheduleAppearanceAutosave();
+}
+
+function _syncAvatarPresencePicker(active){
+  const normalized=_normalizeAvatarPresenceLayout(active);
+  document.querySelectorAll('#avatarPresencePickerGrid .avatar-presence-pick-btn').forEach(btn=>{
+    const selected=btn.dataset.avatarPresenceLayoutVal===normalized;
+    btn.classList.toggle('active',selected);
+    btn.setAttribute('aria-pressed',selected?'true':'false');
+    btn.style.borderColor='';
+    btn.style.boxShadow='';
+  });
+}
+
 function _buildSkinPicker(activeSkin){
   const grid=$('skinPickerGrid');
   if(!grid) return;
@@ -1553,6 +1588,8 @@ function _deferBootHydration(fn){
     const fontSize=(s.font_size||localStorage.getItem('hermes-font-size')||'default');
     localStorage.setItem('hermes-font-size',fontSize);
     _applyFontSize(fontSize);
+    const avatarPresenceLayout=_normalizeAvatarPresenceLayout(s.avatar_presence_layout||localStorage.getItem('hermes-avatar-presence-layout')||'thread');
+    _applyAvatarPresenceLayout(avatarPresenceLayout);
     if(typeof setLocale==='function'){
       const _lang=typeof resolvePreferredLocale==='function'
         ? resolvePreferredLocale(s.language, localStorage.getItem('hermes-lang'))
@@ -1591,6 +1628,7 @@ function _deferBootHydration(fn){
       if(typeof applyLocaleToDOM==='function')applyLocaleToDOM();
     }
     if(typeof _applyTtsEnabled==='function') _applyTtsEnabled(localStorage.getItem('hermes-tts-enabled')==='true');
+    _applyAvatarPresenceLayout(localStorage.getItem('hermes-avatar-presence-layout')||'thread');
   }
   // Non-blocking update check (fire-and-forget, once per tab session)
   // ?test_updates=1 in URL forces banner display for testing (bypasses sessionStorage guards)
