@@ -139,3 +139,18 @@ def test_fresh_current_rows_prune_cached_archive_rows_on_index_apply():
     assert "const currentIds=new Set(currentRows.map(s=>s&&s.session_id).filter(Boolean))" in body
     assert "_sessionIndexArchiveRows[key]=rows.filter(s=>!(s&&s.session_id&&currentIds.has(s.session_id)))" in body
     assert body.index("const currentRows=_sessionIndexCurrentRows()") < body.index("const archiveRows=_sessionIndexLoadedArchiveRows()")
+
+
+def test_project_and_archive_headers_are_keyboard_accessible():
+    js = _js()
+    handler = _function_body(js, "_handleSidebarDisclosureKeydown")
+    body = _function_body(js, "renderSessionListFromCache")
+
+    assert "if(e.target!==e.currentTarget) return;" in handler
+    assert "e.key==='Enter'||e.key===' '||e.key==='Spacebar'" in handler
+    assert "e.preventDefault()" in handler
+    assert "e.currentTarget.click()" in handler
+    assert body.count("hdr.setAttribute('role','button')") >= 2
+    assert body.count("hdr.tabIndex=0") >= 2
+    assert body.count("hdr.setAttribute('aria-expanded',collapsed?'false':'true')") >= 2
+    assert body.count("hdr.onkeydown=_handleSidebarDisclosureKeydown") >= 2

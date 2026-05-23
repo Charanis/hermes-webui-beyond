@@ -1,15 +1,10 @@
 """Regression coverage for #2551 stale sidebar after Move-to-Project.
 
 The single-session project picker (`_showProjectPicker` in `static/sessions.js`)
-used to mutate the sidebar's shallow row copy and then call
-`renderSessionListFromCache()`, which re-reads the unmodified `_allSessions`
-cache and renders the old `project_id`. The server-side move was correct, so
-the next `/api/sessions` poll healed the UI — but until then the sidebar was
-visually stale.
-
-The fix writes the new `project_id` into the authoritative `_allSessions`
-entry before re-rendering, so the optimistic update reflects the move
-immediately without a wasted `/api/sessions` round trip.
+used to update only the pre-index `_allSessions` cache and then call
+`renderSessionListFromCache()`. The Projects/Chats sidebar now renders from
+`_sessionIndexGroups[].sessions`, so the optimistic update must keep both
+caches in sync until the next `/api/session-index` refresh.
 """
 
 from pathlib import Path
@@ -32,42 +27,35 @@ def _show_project_picker_body() -> str:
 PICKER_BODY = _show_project_picker_body()
 
 
-def test_no_project_branch_writes_to_allSessions_cache():
-    """The 'No project' callback must update `_allSessions[idx].project_id`
-    after the /api/session/move call so the re-render reflects the move."""
+def test_no_project_branch_updates_rendered_session_caches():
+    """The 'No project' callback must update both session caches after the
+    /api/session/move call so the immediate re-render reflects the move."""
     none_idx = PICKER_BODY.find("'Removed from project'")
     assert none_idx != -1, "'Removed from project' branch not located"
     # Look back over the callback body
     window = PICKER_BODY[max(0, none_idx - 600): none_idx]
-    assert "_allSessions.findIndex" in window, (
-        "No-project branch must locate the session in _allSessions so the "
-        "cache reflects the move (issue #2551)."
-    )
-    assert "_allSessions[idx].project_id=null" in window, (
-        "No-project branch must write project_id=null into _allSessions, "
-        "not just the shallow sidebar copy (issue #2551)."
+    assert "_updateSessionProjectCache(session.session_id,null)" in window, (
+        "No-project branch must update _allSessions and _sessionIndexGroups, "
+        "not just the old pre-index render cache (issue #2551)."
     )
 
 
-def test_existing_project_branch_writes_to_allSessions_cache():
-    """The existing-project callback must update `_allSessions[idx].project_id`
-    after the /api/session/move call so the re-render reflects the move."""
+def test_existing_project_branch_updates_rendered_session_caches():
+    """The existing-project callback must update both session caches after the
+    /api/session/move call so the immediate re-render reflects the move."""
     moved_idx = PICKER_BODY.find("'Moved to '+p.name")
     assert moved_idx != -1, "'Moved to '+p.name branch not located"
     window = PICKER_BODY[max(0, moved_idx - 600): moved_idx]
-    assert "_allSessions.findIndex" in window, (
-        "Existing-project branch must locate the session in _allSessions so "
-        "the cache reflects the move (issue #2551)."
-    )
-    assert "_allSessions[idx].project_id=p.project_id" in window, (
-        "Existing-project branch must write project_id=p.project_id into "
-        "_allSessions, not just the shallow sidebar copy (issue #2551)."
+    assert "_updateSessionProjectCache(session.session_id,p.project_id)" in window, (
+        "Existing-project branch must update _allSessions and "
+        "_sessionIndexGroups, not just the old pre-index render cache "
+        "(issue #2551)."
     )
 
 
 def test_picker_callbacks_do_not_rely_on_shallow_copy_mutation():
     """Pinning the failure mode: the picker callbacks must not return without
-    updating the authoritative cache. The previous bug looked like
+    updating the authoritative caches. The previous bug looked like
     `session.project_id=null; renderSessionListFromCache();` with no cache
     write between, which is what produced the stale render."""
     # Both branches end with renderSessionListFromCache(). Count how many
@@ -86,47 +74,52 @@ def test_picker_callbacks_do_not_rely_on_shallow_copy_mutation():
 
 
 def test_cache_write_makes_render_observe_new_project_id():
-    """End-to-end behavioural check: simulate the cache-write step from each
-    picker branch and confirm `_allSessions` reflects the new project_id,
-    which is what `renderSessionListFromCache` reads to repaint the sidebar.
+    """Behavioural check: simulate the cache-write helper from each picker
+    branch and confirm both the legacy list cache and the grouped render cache
+    reflect the new project_id.
     """
     script = """
 let _allSessions = [
   {session_id: 'sa', project_id: 'proj-old', title: 'A'},
   {session_id: 'sb', project_id: null, title: 'B'},
 ];
+let _sessionIndexGroups = [
+  {group_id: 'chats', sessions: [
+    {session_id: 'sa', project_id: 'proj-old', title: 'A'},
+    {session_id: 'sb', project_id: null, title: 'B'},
+  ]},
+];
 
-// Sidebar copy, the way _attachChildSessionsToSidebarRows produces it:
-const sidebarCopy = {..._allSessions[0]};
-
-// Simulate the 'No project' branch cache write:
-{
-  const session = sidebarCopy;
-  const idx = _allSessions.findIndex(s => s && s.session_id === session.session_id);
-  if (idx >= 0) _allSessions[idx].project_id = null;
+function _updateSessionProjectCache(sessionId, projectId){
+  if(!sessionId) return;
+  if(Array.isArray(_allSessions)){
+    const idx=_allSessions.findIndex(s=>s&&s.session_id===sessionId);
+    if(idx>=0) _allSessions[idx]={..._allSessions[idx],project_id:projectId};
+  }
+  for(const group of Array.isArray(_sessionIndexGroups)?_sessionIndexGroups:[]){
+    for(const row of Array.isArray(group&&group.sessions)?group.sessions:[]){
+      if(row&&row.session_id===sessionId) row.project_id=projectId;
+    }
+  }
 }
 
-// Then the 'Moved to <project>' branch on session B going to proj-new:
-{
-  const session = {..._allSessions[1]};
-  const p = {project_id: 'proj-new', name: 'New Project'};
-  const idx = _allSessions.findIndex(s => s && s.session_id === session.session_id);
-  if (idx >= 0) _allSessions[idx].project_id = p.project_id;
-}
+_updateSessionProjectCache('sa', null);
+_updateSessionProjectCache('sb', 'proj-new');
 
-console.log(JSON.stringify(_allSessions.map(s => ({id: s.session_id, project_id: s.project_id}))));
+console.log(JSON.stringify({
+  all: _allSessions.map(s => ({id: s.session_id, project_id: s.project_id})),
+  grouped: _sessionIndexGroups[0].sessions.map(s => ({id: s.session_id, project_id: s.project_id})),
+}));
 """
     result = subprocess.run(
         ["node", "-e", script], check=True, capture_output=True, text=True
     )
-    rows = json.loads(result.stdout)
-    assert rows == [
+    observed = json.loads(result.stdout)
+    expected = [
         {"id": "sa", "project_id": None},
         {"id": "sb", "project_id": "proj-new"},
-    ], (
-        "Cache write must replace project_id on the _allSessions entry, "
-        "which is what renderSessionListFromCache reads (issue #2551)."
-    )
+    ]
+    assert observed == {"all": expected, "grouped": expected}
 
 
 def test_new_project_branch_still_uses_authoritative_refetch():

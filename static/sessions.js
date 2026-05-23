@@ -3267,6 +3267,14 @@ function _appendArchiveLoadState(body, group){
   }
 }
 
+function _handleSidebarDisclosureKeydown(e){
+  if(e.target!==e.currentTarget) return;
+  if(e.key==='Enter'||e.key===' '||e.key==='Spacebar'){
+    e.preventDefault();
+    e.currentTarget.click();
+  }
+}
+
 function renderSessionListFromCache(){
   // Don't re-render while user is actively renaming a session (would destroy the input)
   if(_renamingSid) return;
@@ -3448,6 +3456,10 @@ function renderSessionListFromCache(){
     body.className='session-date-body session-index-archive-body';
     const collapsed=archiveCollapsed[groupId]!==false;
     if(collapsed){body.style.display='none';caret.classList.add('collapsed');}
+    hdr.setAttribute('role','button');
+    hdr.tabIndex=0;
+    hdr.setAttribute('aria-expanded',collapsed?'false':'true');
+    hdr.onkeydown=_handleSidebarDisclosureKeydown;
     hdr.onclick=()=>{
       const state=_sessionIndexArchiveCollapsed();
       const willOpen=body.style.display==='none';
@@ -3497,6 +3509,10 @@ function renderSessionListFromCache(){
       void newSession(true,{workspace:group.workspace,workspace_group:'workspace'});
     };
     hdr.appendChild(caret);hdr.appendChild(folder);hdr.appendChild(name);hdr.appendChild(count);hdr.appendChild(add);
+    hdr.setAttribute('role','button');
+    hdr.tabIndex=0;
+    hdr.setAttribute('aria-expanded',collapsed?'false':'true');
+    hdr.onkeydown=_handleSidebarDisclosureKeydown;
     hdr.onclick=()=>{
       const state=_sessionIndexProjectsCollapsed();
       state[groupId]=!collapsed;
@@ -4133,6 +4149,24 @@ async function deleteSession(sid){
 
 const PROJECT_COLORS=['#7cb9ff','#f5c542','#e94560','#50c878','#c084fc','#fb923c','#67e8f9','#f472b6'];
 
+function _updateSessionProjectCache(sessionId,projectId){
+  if(!sessionId) return;
+  if(Array.isArray(_allSessions)){
+    const idx=_allSessions.findIndex(s=>s&&s.session_id===sessionId);
+    if(idx>=0) _allSessions[idx]={..._allSessions[idx],project_id:projectId};
+  }
+  for(const group of Array.isArray(_sessionIndexGroups)?_sessionIndexGroups:[]){
+    for(const row of Array.isArray(group&&group.sessions)?group.sessions:[]){
+      if(row&&row.session_id===sessionId) row.project_id=projectId;
+    }
+  }
+  for(const groupId of Object.keys(_sessionIndexArchiveRows||{})){
+    for(const row of Array.isArray(_sessionIndexArchiveRows[groupId])?_sessionIndexArchiveRows[groupId]:[]){
+      if(row&&row.session_id===sessionId) row.project_id=projectId;
+    }
+  }
+}
+
 function _showProjectPicker(session, anchorEl){
   // Close any existing picker
   document.querySelectorAll('.project-picker').forEach(p=>p.remove());
@@ -4146,12 +4180,7 @@ function _showProjectPicker(session, anchorEl){
     picker.remove();
     document.removeEventListener('click',close);
     await api('/api/session/move',{method:'POST',body:JSON.stringify({session_id:session.session_id,project_id:null})});
-    // Sidebar rows are shallow copies of _allSessions entries (see
-    // _attachChildSessionsToSidebarRows), so mutating `session` only updates
-    // the discarded copy. Write into the authoritative cache so the next
-    // renderSessionListFromCache() reflects the move. (#2551)
-    const idx=_allSessions.findIndex(s=>s&&s.session_id===session.session_id);
-    if(idx>=0) _allSessions[idx].project_id=null;
+    _updateSessionProjectCache(session.session_id,null);
     renderSessionListFromCache();
     showToast('Removed from project');
   };
@@ -4173,9 +4202,7 @@ function _showProjectPicker(session, anchorEl){
       picker.remove();
       document.removeEventListener('click',close);
       await api('/api/session/move',{method:'POST',body:JSON.stringify({session_id:session.session_id,project_id:p.project_id})});
-      // See #2551 — write to _allSessions, not the shallow sidebar copy.
-      const idx=_allSessions.findIndex(s=>s&&s.session_id===session.session_id);
-      if(idx>=0) _allSessions[idx].project_id=p.project_id;
+      _updateSessionProjectCache(session.session_id,p.project_id);
       renderSessionListFromCache();
       showToast('Moved to '+p.name);
     };
