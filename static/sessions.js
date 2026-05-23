@@ -1519,6 +1519,7 @@ let _sessionIndexArchiveRows = {};
 let _sessionIndexArchiveNextCursor = {};
 let _sessionIndexArchiveLoading = {};
 let _sessionIndexArchiveErrors = {};
+let _sessionIndexArchiveCounts = {};
 let _renamingSid = null;  // session_id currently being renamed (blocks list re-renders)
 let _showArchived = false;  // toggle to show archived sessions
 let _sessionSelectMode = false;  // batch select mode
@@ -1602,6 +1603,11 @@ function _sessionIndexArchiveCollapsed(){
 }
 function _saveSessionIndexArchiveCollapsed(state){
   _writeSidebarJsonState(SESSION_INDEX_ARCHIVE_COLLAPSED_KEY,state);
+}
+function _sessionIndexArchiveCountForGroup(group){
+  const archiveMeta=(group&&group.archive)||{};
+  const count=Number(group&&group.archive_count||archiveMeta.count||0);
+  return Number.isFinite(count)&&count>0?count:0;
 }
 function _sessionIndexCurrentRows(){
   const rows=[];
@@ -2304,7 +2310,19 @@ function _applySessionIndexPayload(indexData){
       delete _sessionIndexArchiveNextCursor[key];
       delete _sessionIndexArchiveLoading[key];
       delete _sessionIndexArchiveErrors[key];
+      delete _sessionIndexArchiveCounts[key];
     }
+  }
+  for(const group of _sessionIndexGroups){
+    const groupId=_sessionIndexGroupId(group);
+    if(!groupId) continue;
+    const archiveCount=_sessionIndexArchiveCountForGroup(group);
+    if(Object.prototype.hasOwnProperty.call(_sessionIndexArchiveCounts,groupId)&&_sessionIndexArchiveCounts[groupId]!==archiveCount){
+      delete _sessionIndexArchiveRows[groupId];
+      delete _sessionIndexArchiveNextCursor[groupId];
+      delete _sessionIndexArchiveErrors[groupId];
+    }
+    _sessionIndexArchiveCounts[groupId]=archiveCount;
   }
   const currentRows=_sessionIndexCurrentRows();
   const currentIds=new Set(currentRows.map(s=>s&&s.session_id).filter(Boolean));
@@ -2407,6 +2425,7 @@ async function _loadSessionIndexArchive(groupId, opts={}){
     const visibleMerged=merged.filter(s=>!(s&&s.session_id&&currentIds.has(s.session_id)));
     _sessionIndexArchiveRows[groupId]=visibleMerged;
     _sessionIndexArchiveNextCursor[groupId]=(data&&data.next_cursor)||null;
+    if(data&&data.archive&&typeof data.archive.count==='number') _sessionIndexArchiveCounts[groupId]=data.archive.count;
     if(data&&typeof data.server_time==='number'&&data.server_time>0){
       _serverTimeDelta=Date.now()-(data.server_time*1000);
     }
@@ -3308,10 +3327,10 @@ function _appendSearchArchiveAffordance(groups, query){
     const groupId=(display&&display.groupId)||_sessionIndexGroupId(group);
     if(!group||!groupId||_sessionIndexArchiveLoading[groupId]) continue;
     const archiveMeta=(group&&group.archive)||{};
-    const archiveCount=Number(group&&group.archive_count||archiveMeta.count||0);
-    const loadedRows=Array.isArray(_sessionIndexArchiveRows[groupId])?_sessionIndexArchiveRows[groupId]:[];
-    const hasMoreArchive=Boolean(_sessionIndexArchiveNextCursor[groupId]||archiveMeta.has_more||archiveMeta.next_cursor);
-    if(archiveCount>0&&(!loadedRows.length||hasMoreArchive)) candidates.push({group,groupId});
+    const archiveCount=_sessionIndexArchiveCountForGroup(group);
+    const archiveRequested=Object.prototype.hasOwnProperty.call(_sessionIndexArchiveRows,groupId);
+    const hasMoreArchive=Boolean(_sessionIndexArchiveNextCursor[groupId]||archiveMeta.next_cursor);
+    if(archiveCount>0&&(!archiveRequested||hasMoreArchive)) candidates.push({group,groupId});
   }
   if(!candidates.length) return false;
   const row=document.createElement('button');
@@ -3503,7 +3522,7 @@ function renderSessionListFromCache(){
     const group=display.group;
     const groupId=display.groupId;
     const archiveMeta=(group&&group.archive)||{};
-    const archiveCount=Number(group&&group.archive_count||archiveMeta.count||0);
+    const archiveCount=_sessionIndexArchiveCountForGroup(group);
     const loadedRows=display.archiveRows;
     if(!archiveCount&&!loadedRows.length&&!_sessionIndexArchiveErrors[groupId]) return;
     const wrapper=document.createElement('div');

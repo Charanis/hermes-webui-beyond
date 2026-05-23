@@ -57,8 +57,9 @@ def test_search_can_request_archive_without_preloading_every_old_row():
 
     assert "Search Archive" in body
     assert "_sessionIndexArchiveNextCursor[groupId]" in body
-    assert "archiveMeta.has_more" in body
-    assert "archiveCount>0&&(!loadedRows.length||hasMoreArchive)" in body
+    assert "const archiveRequested=Object.prototype.hasOwnProperty.call(_sessionIndexArchiveRows,groupId)" in body
+    assert "archiveMeta.has_more" not in body
+    assert "archiveCount>0&&(!archiveRequested||hasMoreArchive)" in body
     assert "_saveSessionIndexArchiveCollapsed(state)" in body
     assert "_loadSessionIndexArchive(candidate.groupId)" in body
     assert "_appendSearchArchiveAffordance(visibleSearchArchiveGroups,q)" in render_body
@@ -82,10 +83,24 @@ def test_sidebar_index_state_and_local_storage_keys_exist():
         "let _sessionIndexArchiveNextCursor = {};",
         "let _sessionIndexArchiveLoading = {};",
         "let _sessionIndexArchiveErrors = {};",
+        "let _sessionIndexArchiveCounts = {};",
         "hermes-sidebar-projects-collapsed",
         "hermes-sidebar-archive-collapsed",
     ):
         assert snippet in js
+
+
+def test_archive_search_exhaustion_state_resets_when_counts_change():
+    js = _js()
+    apply_body = _function_body(js, "_applySessionIndexPayload")
+    search_body = _function_body(js, "_appendSearchArchiveAffordance")
+
+    assert "_sessionIndexArchiveCountForGroup(group)" in apply_body
+    assert "Object.prototype.hasOwnProperty.call(_sessionIndexArchiveCounts,groupId)" in apply_body
+    assert "delete _sessionIndexArchiveRows[groupId]" in apply_body
+    assert "_sessionIndexArchiveCounts[groupId]=archiveCount" in apply_body
+    assert "const archiveRequested=Object.prototype.hasOwnProperty.call(_sessionIndexArchiveRows,groupId)" in search_body
+    assert "archiveCount>0&&(!archiveRequested||hasMoreArchive)" in search_body
 
 
 def test_lazy_archive_loader_and_group_labels_are_present():
