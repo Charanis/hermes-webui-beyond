@@ -1167,6 +1167,16 @@
               <div style="font-size:11px;color:var(--muted);margin-top:4px">Maximum number of active conversations that can be pinned in the sidebar. Default is 3.</div>
             </div>
             <div class="settings-field">
+              <label for="settingsArchiveAfterDays" data-i18n="settings_label_archive_after_days">Archive cutoff</label>
+              <select id="settingsArchiveAfterDays" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
+                <option value="7" data-i18n="settings_archive_after_days_7">After 7 days</option>
+                <option value="14" data-i18n="settings_archive_after_days_14">After 14 days</option>
+                <option value="30" data-i18n="settings_archive_after_days_30">After 30 days</option>
+                <option value="90" data-i18n="settings_archive_after_days_90">After 90 days</option>
+              </select>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_archive_after_days">Move inactive conversations out of the main sidebar after this many days.</div>
+            </div>
+            <div class="settings-field">
               <label for="settingsAutoTitleRefresh" data-i18n="settings_label_auto_title_refresh">Adaptive title refresh</label>
               <select id="settingsAutoTitleRefresh" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px">
                 <option value="0" data-i18n="settings_auto_title_refresh_off">Off</option>

@@ -1530,6 +1530,7 @@ function _deferBootHydration(fn){
     window._simplifiedToolCalling=s.simplified_tool_calling!==false;
     window._sidebarDensity=(s.sidebar_density==='detailed'?'detailed':'compact');
     window._pinnedSessionsLimit=parseInt(s.pinned_sessions_limit||3,10)||3;
+    window._sessionArchiveAfterDays=parseInt(s.session_archive_after_days||7,10)||7;
     window._inflightStateLimits={
       maxSessions:parseInt(s.inflight_state_max_sessions||8,10)||8,
       messages:parseInt(s.inflight_state_max_messages||24,10)||24,
@@ -1629,6 +1630,7 @@ function _deferBootHydration(fn){
     window._sessionJumpButtonsEnabled=false;
     window._sidebarDensity='compact';
     window._pinnedSessionsLimit=3;
+    window._sessionArchiveAfterDays=7;
     window._busyInputMode='queue';
     window._sessionEndlessScrollEnabled=false;
     window._botName='Hermes';

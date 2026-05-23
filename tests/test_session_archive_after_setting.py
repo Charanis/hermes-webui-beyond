@@ -1,6 +1,15 @@
 """Backend contract tests for the session archive cutoff setting."""
 
 import json
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+CONFIG_PY = (REPO_ROOT / "api" / "config.py").read_text(encoding="utf-8")
+INDEX_HTML = (REPO_ROOT / "static" / "index.html").read_text(encoding="utf-8")
+PANELS_JS = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+BOOT_JS = (REPO_ROOT / "static" / "boot.js").read_text(encoding="utf-8")
+I18N_JS = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
 
 
 def test_archive_after_setting_defaults_and_validation_contract():
@@ -55,3 +64,27 @@ def test_load_settings_normalizes_invalid_archive_after_value(monkeypatch, tmp_p
 
     loaded = config.load_settings()
     assert loaded["session_archive_after_days"] == 7
+
+
+def test_archive_cutoff_setting_is_registered_and_wired_through_ui():
+    assert '"session_archive_after_days": 7' in CONFIG_PY
+    assert '"session_archive_after_days": {7, 14, 30, 90}' in CONFIG_PY
+
+    assert 'id="settingsArchiveAfterDays"' in INDEX_HTML
+    assert 'data-i18n="settings_label_archive_after_days"' in INDEX_HTML
+    assert 'data-i18n="settings_desc_archive_after_days"' in INDEX_HTML
+
+    assert "payload.session_archive_after_days=parseInt(archiveAfterSel.value,10)" in PANELS_JS
+    assert "settings.session_archive_after_days" in PANELS_JS
+
+    assert "window._sessionArchiveAfterDays=parseInt(s.session_archive_after_days||7,10)||7" in BOOT_JS
+
+    for key in (
+        "settings_label_archive_after_days",
+        "settings_desc_archive_after_days",
+        "settings_archive_after_days_7",
+        "settings_archive_after_days_14",
+        "settings_archive_after_days_30",
+        "settings_archive_after_days_90",
+    ):
+        assert key in I18N_JS
