@@ -1367,11 +1367,12 @@
   .composer-box{max-width:clamp(780px,60vw,1100px);margin:0 auto;background:linear-gradient(var(--input-bg),var(--input-bg)),var(--bg);border:1px solid var(--border2);border-radius:16px;display:flex;flex-direction:column;transition:border-color .2s,box-shadow .2s;position:relative;z-index:2;}
   .composer-presence-row{max-width:780px;margin:0 auto;position:relative;}
   .composer-presence-row .composer-box{max-width:none;margin:0;width:100%;}
-  .composer-presence-avatar{display:none;box-sizing:border-box;}
+  .composer-presence-avatar{display:none;box-sizing:border-box;background:transparent;border:0;padding:0;color:inherit;}
   .composer-presence-avatar .profile-avatar--composer{width:var(--composer-presence-avatar-size,56px);height:var(--composer-presence-avatar-size,56px);font-size:calc(var(--composer-presence-avatar-size,56px) * .38);background:var(--accent-bg);color:var(--accent-text);border-color:var(--accent-bg-strong);}
-  :root[data-avatar-presence="composer"] .composer-presence-row{max-width:780px;display:grid;grid-template-columns:var(--composer-presence-avatar-size,56px) minmax(0,1fr);align-items:start;gap:6px;}
+  :root[data-avatar-presence="composer"] .composer-presence-row{max-width:var(--msg-max);display:grid;grid-template-columns:var(--composer-presence-avatar-size,56px) minmax(0,calc(var(--msg-max) - var(--composer-presence-avatar-size,56px) - 6px));align-items:end;gap:6px;}
   :root[data-avatar-presence="composer"] .composer-presence-row .composer-box{min-width:0;}
-  :root[data-avatar-presence="composer"] .composer-presence-avatar{display:flex;width:var(--composer-presence-avatar-size,56px);height:var(--composer-presence-avatar-size,56px);align-items:center;justify-content:center;}
+  :root[data-avatar-presence="composer"] .composer-presence-avatar{display:flex;width:var(--composer-presence-avatar-size,56px);height:var(--composer-presence-avatar-size,56px);align-items:center;justify-content:center;cursor:pointer;-webkit-tap-highlight-color:transparent;}
+  :root[data-avatar-presence="composer"] .composer-presence-avatar:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:999px;}
   :root[data-avatar-presence="composer"] .msg-role.assistant .profile-avatar--message{display:none!important;}
   .composer-box:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-bg);}
   .composer-wrap.drag-over .composer-box{border-color:var(--accent-text);background:var(--accent-bg);}
@@ -1811,6 +1812,19 @@
     .composer-divider{display:none;}
   }
 
+  @media(min-width:641px){
+    :root[data-avatar-presence="composer"] .composer-workspace-label,
+    :root[data-avatar-presence="composer"] #composerWorkspaceLabel,
+    :root[data-avatar-presence="composer"] .composer-model-label,
+    :root[data-avatar-presence="composer"] #composerModelLabel{display:inline;}
+    :root[data-avatar-presence="composer"] .composer-model-chevron{display:inline-flex;}
+    :root[data-avatar-presence="composer"] .composer-workspace-group{max-width:284px;min-height:0;}
+    :root[data-avatar-presence="composer"] .composer-workspace-chip{max-width:200px;min-width:0;min-height:0;padding:8px 12px 8px 10px;justify-content:flex-start;gap:8px;font-size:inherit;}
+    :root[data-avatar-presence="composer"] .composer-model-chip{max-width:280px;min-width:0;min-height:0;padding:8px 10px 8px 12px;justify-content:flex-start;gap:8px;font-size:inherit;}
+    :root[data-avatar-presence="composer"] .composer-workspace-files-btn{min-width:0;padding:8px 10px 8px 12px;}
+    :root[data-avatar-presence="composer"] .composer-divider{display:block;}
+  }
+
   @container composer-footer (max-width: 520px){
     /* Stage 2: full icon-only for tighter widths. Container-width compaction is needed
        when side panels narrow the composer even though the viewport is not a phone. */
@@ -1911,6 +1925,8 @@
     :root[data-avatar-presence="composer"] .composer-presence-row{max-width:none;grid-template-columns:var(--composer-presence-avatar-size,56px) minmax(0,1fr);gap:6px;}
     :root[data-avatar-presence="composer"] .composer-presence-avatar{width:var(--composer-presence-avatar-size,56px);height:var(--composer-presence-avatar-size,56px);}
     :root[data-avatar-presence="composer"] .composer-presence-avatar .profile-avatar--composer{width:var(--composer-presence-avatar-size,56px);height:var(--composer-presence-avatar-size,56px);}
+    :root[data-avatar-presence="composer"] .composer-profile-wrap{display:none!important;}
+    :root[data-avatar-presence="composer"] .composer-ws-wrap{display:flex;}
     .composer-left{flex:1 1 auto;width:auto;flex-wrap:nowrap;align-items:center;gap:10px;overflow-x:auto;overflow-y:hidden;max-height:none;row-gap:0;-webkit-overflow-scrolling:touch;}
     .composer-left > *{flex-shrink:0;}
     .composer-profile-wrap,
@@ -1940,6 +1956,7 @@
     .composer-left > .composer-toolsets-wrap{display:none!important;}
     .composer-mobile-config-btn{box-sizing:border-box;position:relative;display:inline-flex!important;width:44px;height:44px;min-width:44px;min-height:44px;flex-shrink:0;}
     .composer-mobile-config-panel.open{display:flex;}
+    :root[data-avatar-presence="composer"] .composer-mobile-config-panel{left:calc(8px - var(--composer-presence-avatar-size,56px) - 6px);}
     .composer-mobile-config-action{box-sizing:border-box;flex:1 1 0;min-height:44px;min-width:0;background:var(--input-bg);border-color:var(--border);}
     .composer-mobile-context-action{flex:1 0 100%;}
     /* icon-only composer chips continue below mobile widths */
@@ -2125,6 +2142,7 @@
 .profile-avatar--dropdown{width:28px;height:28px;font-size:14px;}
 .profile-avatar--detail{width:72px;height:72px;font-size:34px;}
 .profile-avatar--message{width:32px!important;height:32px!important;font-size:17px!important;background:var(--accent-bg);color:var(--accent-text);border-color:var(--accent-bg-strong);}
+.profile-avatar--reactive[data-avatar-state]:not([data-avatar-state="idle"]){border-color:var(--accent);outline:3px solid var(--accent-bg);outline-offset:0;}
 .assistant-turn#liveAssistantTurn .profile-avatar--message[data-avatar-state="thinking"]{animation:avatar-reactive-pulse 1.6s ease-in-out infinite;}
 .assistant-turn#liveAssistantTurn .profile-avatar--message[data-avatar-state="talking"]{animation:avatar-reactive-talk 1.1s ease-in-out infinite;}
 .assistant-turn#liveAssistantTurn .profile-avatar--message[data-avatar-state="working"]{animation:avatar-reactive-work 1.3s ease-in-out infinite;}

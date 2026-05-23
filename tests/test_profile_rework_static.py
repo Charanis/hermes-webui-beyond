@@ -7,8 +7,14 @@ the Runtime tile reuses the composer model picker. A regression that silently
 deletes one of these signals is caught here without needing a browser.
 """
 
+import json
 import re
+import shutil
+import subprocess
+import textwrap
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).parent.parent.resolve()
 PANELS_JS = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
@@ -20,6 +26,7 @@ MESSAGES_JS = (REPO_ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 COMMANDS_JS = (REPO_ROOT / "static" / "commands.js").read_text(encoding="utf-8")
 BOOT_JS = (REPO_ROOT / "static" / "boot.js").read_text(encoding="utf-8")
 UI_JS = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
+NODE = shutil.which("node")
 
 
 def _extract_function(src: str, name: str) -> str:
@@ -278,6 +285,160 @@ def test_live_reactive_avatar_repaints_when_live_turn_is_created_late():
     assert "function _refreshLiveAssistantAvatarFromCurrentState" in UI_JS
     assert UI_JS.count("_refreshLiveAssistantAvatarFromCurrentState();") >= 3, \
         "every live assistant turn creation path should repaint from the current reactive state"
+
+
+def test_reactive_avatar_active_outline_matches_composer_focus_signal():
+    selector = (
+        '.profile-avatar--reactive[data-avatar-state]:not([data-avatar-state="idle"])'
+    )
+    assert selector in STYLE_CSS, \
+        "non-idle reactive avatars should expose the same active yellow signal as the composer"
+    rule = re.search(rf"{re.escape(selector)}\s*\{{([^}}]+)\}}", STYLE_CSS)
+    assert rule, f"missing CSS rule for {selector}"
+    body = rule.group(1)
+    assert "border-color:var(--accent)" in body
+    assert "outline:3px solid var(--accent-bg)" in body
+    assert "outline-offset:" in body
+
+
+def test_reactive_avatar_state_changes_are_coalesced_to_animation_loops():
+    assert "const _PROFILE_REACTIVE_AVATAR_FALLBACK_LOOP_MS_BY_STATE" in UI_JS
+    assert "window._profileAvatarLoopDurationCache" in UI_JS
+    assert "window._profileAvatarLoopDurationPromises" in UI_JS
+    assert "window._activeProfileAvatarQueuedState" in UI_JS
+    assert "window._activeProfileAvatarLoopTimer" in UI_JS
+    assert "function _applyReactiveAvatarState" in UI_JS
+    apply_fn = _extract_function(UI_JS, "_applyReactiveAvatarState")
+    assert "_restartReactiveAvatarLoopForState(normalized)" in apply_fn
+    restart_fn = _extract_function(UI_JS, "_restartReactiveAvatarLoopForState")
+    assert "window._activeProfileAvatarLoopStartedAt=_avatarNow()" in restart_fn
+    assert "_primeReactiveAvatarLoopDuration(normalized)" in restart_fn
+    assert "refreshAssistantProfileAvatars({state:normalized,liveOnly:!!opts.liveOnly})" in apply_fn
+    state_fn = _extract_function(UI_JS, "setReactiveAvatarState")
+    assert "_currentReactiveAvatarLoopRemainingMs()" in state_fn
+    assert "window._activeProfileAvatarQueuedState={state:normalized,opts:{liveOnly:!!opts.liveOnly}}" in state_fn
+    schedule_fn = _extract_function(UI_JS, "_rescheduleReactiveAvatarQueuedState")
+    assert "window._activeProfileAvatarLoopTimer=setTimeout" in schedule_fn
+    assert "_flushReactiveAvatarQueuedState()" in schedule_fn
+    assert "_applyReactiveAvatarState(normalized,opts)" in state_fn
+    assert "_isAvatarMotionReduced()" in state_fn, \
+        "reduced-motion users should not wait on invisible animation loop timers"
+
+
+def test_reactive_avatar_same_state_event_clears_stale_queued_transition():
+    state_fn = _extract_function(UI_JS, "setReactiveAvatarState")
+    same_state_start = state_fn.index("if(window._activeProfileAvatarState===normalized&&!opts.force){")
+    queue_gate_start = state_fn.index("if(!opts.force&&normalized!=='error'", same_state_start)
+    same_state_branch = state_fn[same_state_start:queue_gate_start]
+
+    assert "window._activeProfileAvatarQueuedState" in same_state_branch, (
+        "when the latest event reaffirms the visible avatar state, any older queued "
+        "different state should be cleared instead of playing after the current loop"
+    )
+    assert "_clearReactiveAvatarQueue()" in same_state_branch
+
+
+def test_reactive_avatar_loop_duration_parsers_read_gif_apng_and_webp_metadata():
+    if not NODE:
+        pytest.skip("node is required for the avatar loop parser regression test")
+    helper_names = [
+        "_profileAvatarAsciiAt",
+        "_profileAvatarLe16",
+        "_profileAvatarLe24",
+        "_profileAvatarBe32",
+        "_profileAvatarGifLoopDurationMs",
+        "_profileAvatarApngLoopDurationMs",
+        "_profileAvatarWebpLoopDurationMs",
+        "_profileAvatarLoopDurationFromBytes",
+    ]
+    helpers = "\n".join(_extract_function(UI_JS, name) for name in helper_names)
+    script = helpers + textwrap.dedent(
+        r"""
+        function pngChunk(type, data){
+          const out=[(data.length>>>24)&255,(data.length>>>16)&255,(data.length>>>8)&255,data.length&255];
+          for(const ch of type) out.push(ch.charCodeAt(0));
+          out.push(...data,0,0,0,0);
+          return out;
+        }
+        function be32(n){ return [(n>>>24)&255,(n>>>16)&255,(n>>>8)&255,n&255]; }
+        function be16(n){ return [(n>>>8)&255,n&255]; }
+        function fcTL(seq, delayNum, delayDen){
+          return [
+            ...be32(seq), ...be32(1), ...be32(1), ...be32(0), ...be32(0),
+            ...be16(delayNum), ...be16(delayDen), 0, 0
+          ];
+        }
+        function riffChunk(type, data){
+          const out=[];
+          for(const ch of type) out.push(ch.charCodeAt(0));
+          out.push(data.length&255,(data.length>>>8)&255,(data.length>>>16)&255,(data.length>>>24)&255,...data);
+          if(data.length % 2) out.push(0);
+          return out;
+        }
+        const gif=Uint8Array.from([
+          71,73,70,56,57,97,1,0,1,0,0,0,0,
+          33,249,4,0,10,0,0,0,44,0,0,0,0,1,0,1,0,0,2,2,76,1,0,
+          33,249,4,0,20,0,0,0,44,0,0,0,0,1,0,1,0,0,2,2,76,1,0,
+          59
+        ]);
+        const apng=Uint8Array.from([
+          137,80,78,71,13,10,26,10,
+          ...pngChunk('IHDR',[...be32(1),...be32(1),8,6,0,0,0]),
+          ...pngChunk('acTL',[...be32(2),...be32(0)]),
+          ...pngChunk('fcTL',fcTL(0,1,10)),
+          ...pngChunk('fcTL',fcTL(1,2,10)),
+          ...pngChunk('IEND',[])
+        ]);
+        const webpBody=[
+          ...riffChunk('VP8X',[2,0,0,0,0,0,0,0,0,0]),
+          ...riffChunk('ANMF',[0,0,0,0,0,0,0,0,0,0,0,0,100,0,0,0]),
+          ...riffChunk('ANMF',[0,0,0,0,0,0,0,0,0,0,0,0,250,0,0,0])
+        ];
+        const riffSize=4+webpBody.length;
+        const webp=Uint8Array.from([
+          82,73,70,70,riffSize&255,(riffSize>>>8)&255,(riffSize>>>16)&255,(riffSize>>>24)&255,
+          87,69,66,80,...webpBody
+        ]);
+        const out={
+          gif:_profileAvatarLoopDurationFromBytes(gif,'image/gif','avatar.gif'),
+          apng:_profileAvatarLoopDurationFromBytes(apng,'image/png','avatar.png'),
+          webp:_profileAvatarLoopDurationFromBytes(webp,'image/webp','avatar.webp'),
+          staticPng:_profileAvatarLoopDurationFromBytes(Uint8Array.from([137,80,78,71,13,10,26,10]),'image/png','static.png'),
+        };
+        console.log(JSON.stringify(out));
+        """
+    )
+    proc = subprocess.run([NODE, "-e", script], check=True, capture_output=True, text=True)
+    out = json.loads(proc.stdout)
+    assert out == {"gif": 300, "apng": 300, "webp": 350, "staticPng": None}
+
+
+def test_profile_avatar_asset_refresh_restarts_current_loop_timing():
+    restart_fn = _extract_function(UI_JS, "_restartReactiveAvatarLoopForState")
+    assert "window._activeProfileAvatarLoopStartedAt=_avatarNow()" in restart_fn
+    assert "window._activeProfileAvatarLoopDurationMs=0" in restart_fn
+    assert "_primeReactiveAvatarLoopDuration(normalized)" in restart_fn
+
+    active_fn = _extract_function(UI_JS, "setActiveProfileAvatar")
+    assert "_restartReactiveAvatarLoopForState(window._activeProfileAvatarState||'idle')" in active_fn, \
+        "forced avatar refreshes should restart loop timing for the newly displayed media"
+
+    settings_fn = _extract_function(UI_JS, "refreshConversationProfileAvatarSettings")
+    assert "_restartReactiveAvatarLoopForState(window._activeProfileAvatarState||'idle')" in settings_fn, \
+        "profile settings refreshes should not leave the old media loop duration active"
+
+
+def test_reactive_avatar_error_state_is_immediate_queue_boundary():
+    state_fn = _extract_function(UI_JS, "setReactiveAvatarState")
+    assert "window._activeProfileAvatarState!=='error'" in state_fn, \
+        "leaving error should bypass normal loop queueing once any explicit hold has expired"
+
+
+def test_live_avatar_refresh_repairs_without_forcing_animation_restart():
+    fn = _extract_function(UI_JS, "_refreshLiveAssistantAvatarFromCurrentState")
+    assert "force:true" not in fn, \
+        "live turn creation should repair missing avatars without forcing DOM replacement"
+    assert "liveOnly:true" in fn
 
 
 def test_chat_avatar_markup_uses_current_session_profile_resolver():
