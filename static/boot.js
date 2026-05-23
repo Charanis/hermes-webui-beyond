@@ -1381,6 +1381,7 @@ function _applyFontSize(size){
   } else {
     delete document.documentElement.dataset.fontSize;
   }
+  if(typeof scheduleComposerPresenceAvatarMeasure==='function') scheduleComposerPresenceAvatarMeasure();
 }
 
 function _pickFontSize(size){
