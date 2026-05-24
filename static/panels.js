@@ -3830,8 +3830,9 @@ function getWorkspaceFriendlyName(path){
 
 function syncWorkspaceDisplays(){
   const hasSession=!!(S.session&&S.session.workspace);
-  // Fall back to the profile default workspace when no session is active yet.
-  // S._profileDefaultWorkspace is set during boot and profile switches from /api/settings.
+  // Fall back to the globally selected WebUI space when no session is active yet.
+  // S._profileDefaultWorkspace is the legacy variable used for this blank-state
+  // workspace fallback; loadWorkspaceList() keeps it synced to /api/workspaces.last.
   const defaultWs=(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
   const ws=hasSession?S.session.workspace:(defaultWs||'');
   const hasWorkspace=!!(ws);
@@ -3867,6 +3868,7 @@ async function loadWorkspaceList(){
   try{
     const data = await api('/api/workspaces');
     _workspaceList = data.workspaces || [];
+    if(data.last) S._profileDefaultWorkspace = data.last;
     syncWorkspaceDisplays();
     return data;
   }catch(e){ return {workspaces:[], last:''}; }
@@ -4516,6 +4518,7 @@ async function switchToWorkspace(path,name){
       session_id:S.session.session_id, workspace:path, model:S.session.model, model_provider:S.session.model_provider||null
     })});
     S.session.workspace=path;
+    S._profileDefaultWorkspace=path;
     // Explicit workspace switch = user overriding any pending profile-switch default.
     // Clear the one-shot flag so a subsequent newSession() inherits this choice instead.
     S._profileSwitchWorkspace=null;
@@ -6939,8 +6942,7 @@ async function _persistProfileDefaultWorkspace(profileName, next, prior){
   if (_isCurrentProfileRuntimeHydration(profileName, token)) _applyProfileDefaultWorkspace(saved);
   const active = S.activeProfile || (_profilesCache && _profilesCache.active) || 'default';
   if (active === profileName) {
-    S._profileDefaultWorkspace = saved;
-    if (typeof syncWorkspaceDisplays === 'function') syncWorkspaceDisplays();
+    S._profileConfigDefaultWorkspace = saved;
   }
   return updated;
 }
@@ -8816,28 +8818,13 @@ async function switchToProfile(name) {
       }
     }
 
-    // ── Apply workspace ────────────────────────────────────────────────────
+    // ── Keep WebUI Spaces global ───────────────────────────────────────────
     if (profileDefaultWorkspace) {
-      // Always store the persistent profile default — used for blank-page display
-      // and workspace auto-bind throughout the session lifecycle (#804, #823).
-      S._profileDefaultWorkspace = profileDefaultWorkspace;
-      // Also set the one-shot flag consumed by newSession() so the first new
-      // session after a profile switch inherits this workspace (#424).
-      S._profileSwitchWorkspace = profileDefaultWorkspace;
-
-      if (S.session && !needsFreshProfileSession) {
-        // Empty session (no messages yet) — safe to update it in place
-        const sessionId = S.session.session_id;
-        S.session.workspace = profileDefaultWorkspace;
-        try {
-          void api('/api/session/update', { method: 'POST', body: JSON.stringify({
-            session_id: sessionId,
-            workspace: profileDefaultWorkspace,
-            model: S.session.model,
-            model_provider: S.session.model_provider||null,
-          })}).catch(() => {});
-        } catch (_) {}
-      }
+      // Profile default workspace is an agent runtime preference, not the
+      // active WebUI Space.  Switching profiles must not hide the shared Spaces
+      // catalog or silently move the visible chat to another workspace.
+      S._profileConfigDefaultWorkspace = profileDefaultWorkspace;
+      S._profileSwitchWorkspace = null;
     }
 
     // ── Session ────────────────────────────────────────────────────────────
@@ -8877,8 +8864,8 @@ async function switchToProfile(name) {
       await renderSessionList();
       if (_switchGen !== _profileSwitchGeneration) return;
       syncTopbar();
-      // Refresh workspace file tree so the right panel shows the new
-      // profile's workspace, not the previous one (#1214).
+      // Refresh workspace file tree so the right panel reflects the still-active
+      // global WebUI space after the profile switch.
       if (S.session && S.session.workspace) {
         const dirLoad = loadDir('.');
         if (typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed') await dirLoad;

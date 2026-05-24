@@ -5,8 +5,10 @@ profile-switch semantic (setting it to null after the first new session). This
 caused the blank-page default workspace display to regress after any session
 was created and then deleted.
 
-Fix: introduce S._profileSwitchWorkspace as the dedicated one-shot flag for
-profile-switch semantics; S._profileDefaultWorkspace is now persistent.
+Fix: introduce S._profileSwitchWorkspace as the dedicated one-shot flag and keep
+S._profileDefaultWorkspace persistent. Newer global Spaces behavior clears the
+profile-switch flag during profile switches so profile defaults do not replace
+the shared WebUI space.
 """
 import pathlib
 import re
@@ -64,33 +66,37 @@ class TestProfileDefaultWorkspacePersistence:
 
 
 class TestProfileSwitchWorkspaceSetter:
-    """panels.js must set _profileSwitchWorkspace on profile switch."""
+    """panels.js must not apply profile default workspace as WebUI Spaces state."""
 
-    def test_panels_sets_profile_switch_workspace(self):
+    def test_panels_clears_profile_switch_workspace(self):
         src = read('static/panels.js')
-        # Find the profile-switch workspace block
-        assert 'S._profileSwitchWorkspace' in src, (
-            "panels.js must set S._profileSwitchWorkspace during profile switch "
-            "so newSession() can apply it to the first new session"
+        assert 'S._profileSwitchWorkspace = null' in src, (
+            "panels.js must clear S._profileSwitchWorkspace during profile switch "
+            "so the shared WebUI space is not replaced by an agent default"
+        )
+        assert 'S._profileSwitchWorkspace = profileDefaultWorkspace' not in src, (
+            "profile default workspace must not become a one-shot WebUI space override"
         )
 
-    def test_panels_still_sets_profile_default_workspace(self):
+    def test_panels_keeps_profile_default_workspace_separate(self):
         src = read('static/panels.js')
-        assert 'S._profileDefaultWorkspace = profileDefaultWorkspace' in src, (
-            "panels.js must still set S._profileDefaultWorkspace (persistent default) "
-            "alongside S._profileSwitchWorkspace"
+        assert 'S._profileConfigDefaultWorkspace = profileDefaultWorkspace' in src, (
+            "panels.js should remember the profile runtime default separately from "
+            "the global WebUI Spaces fallback"
+        )
+        assert 'S._profileDefaultWorkspace = profileDefaultWorkspace' not in src, (
+            "profile switching must not overwrite the shared blank-state workspace"
         )
 
-    def test_both_set_together_in_same_block(self):
+    def test_global_space_and_profile_default_are_not_set_together(self):
         src = read('static/panels.js')
-        default_pos = src.find('S._profileDefaultWorkspace = profileDefaultWorkspace')
-        switch_pos = src.find('S._profileSwitchWorkspace = profileDefaultWorkspace')
-        assert default_pos != -1, "S._profileDefaultWorkspace setter not found"
-        assert switch_pos != -1, "S._profileSwitchWorkspace setter not found"
-        # Both must be set within 200 chars of each other (same block)
-        assert abs(default_pos - switch_pos) < 300, (
-            "_profileDefaultWorkspace and _profileSwitchWorkspace must be set "
-            "together in the same profile-switch workspace block"
+        config_pos = src.find('S._profileConfigDefaultWorkspace = profileDefaultWorkspace')
+        switch_pos = src.find('S._profileSwitchWorkspace = null')
+        assert config_pos != -1, "S._profileConfigDefaultWorkspace setter not found"
+        assert switch_pos != -1, "S._profileSwitchWorkspace clear not found"
+        assert abs(config_pos - switch_pos) < 300, (
+            "profile default capture and switch-workspace clearing should live in "
+            "the same profile-switch workspace block"
         )
 
 

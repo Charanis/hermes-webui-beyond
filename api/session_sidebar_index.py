@@ -86,11 +86,13 @@ def build_session_sidebar_index(
     session_archive_after_days: Any = None,
     current_session_id: str | None = None,
     workspace_names: dict[str, str] | None = None,
+    general_workspace_paths: set[str] | None = None,
 ) -> dict[str, Any]:
     """Build grouped current-session sidebar metadata without mutating rows."""
     archive_after_days = normalize_archive_after_days(session_archive_after_days)
     groups: dict[str, dict[str, Any]] = {}
     names = workspace_names or {}
+    general_workspaces = general_workspace_paths or set()
     manual_archived_count = 0
 
     for row in rows:
@@ -99,6 +101,7 @@ def build_session_sidebar_index(
             server_time=server_time,
             archive_after_days=archive_after_days,
             current_session_id=current_session_id,
+            general_workspace_paths=general_workspaces,
         )
         group = groups.setdefault(
             compact["group_id"],
@@ -150,9 +153,11 @@ def build_session_archive_page(
     limit: Any = DEFAULT_ARCHIVE_LIMIT,
     cursor: str | None = None,
     current_session_id: str | None = None,
+    general_workspace_paths: set[str] | None = None,
 ) -> dict[str, Any]:
     """Return one cursor-paginated page of age-archived rows for a group."""
     archive_after_days = normalize_archive_after_days(session_archive_after_days)
+    general_workspaces = general_workspace_paths or set()
     archive_rows = []
     for row in rows:
         compact = _compact_sidebar_row(
@@ -160,6 +165,7 @@ def build_session_archive_page(
             server_time=server_time,
             archive_after_days=archive_after_days,
             current_session_id=current_session_id,
+            general_workspace_paths=general_workspaces,
         )
         if compact["group_id"] == group_id and (compact["age_archived"] or compact.get("archived")):
             archive_rows.append(compact)
@@ -200,10 +206,15 @@ def _normalize_workspace_path(value: Any) -> str | None:
         return text
 
 
-def _group_id_for(row: dict[str, Any]) -> tuple[str, str | None]:
+def _group_id_for(
+    row: dict[str, Any],
+    *,
+    general_workspace_paths: set[str] | None = None,
+) -> tuple[str, str | None]:
     workspace = _normalize_workspace_path(row.get("workspace"))
     group = normalize_workspace_group(row.get("workspace_group"), workspace=workspace)
-    if group == WORKSPACE_GROUP_WORKSPACE and workspace:
+    general_workspaces = general_workspace_paths or set()
+    if group == WORKSPACE_GROUP_WORKSPACE and workspace and workspace not in general_workspaces:
         return f"workspace:{workspace}", workspace
     return WORKSPACE_GROUP_CHATS, None
 
@@ -214,8 +225,9 @@ def _compact_sidebar_row(
     server_time: float,
     archive_after_days: int,
     current_session_id: str | None,
+    general_workspace_paths: set[str] | None = None,
 ) -> dict[str, Any]:
-    group_id, workspace = _group_id_for(row)
+    group_id, workspace = _group_id_for(row, general_workspace_paths=general_workspace_paths)
     activity_ts = session_activity_ts(row)
     compact = {
         key: row[key]

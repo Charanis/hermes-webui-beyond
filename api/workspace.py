@@ -1,11 +1,10 @@
 """
 Hermes Web UI -- Workspace and file system helpers.
 
-Workspace lists and last-used workspace are stored per-profile so each
-profile has its own workspace configuration.  State files live at
-``{profile_home}/webui_state/workspaces.json`` and
-``{profile_home}/webui_state/last_workspace.txt``.  The global STATE_DIR
-paths are used as fallback when no profile module is available.
+Workspace lists and the last selected WebUI space are global UI state.  Agent
+profiles may still have their own default workspace in ``config.yaml``, but the
+Spaces panel itself is shared so every profile can use every registered
+workspace.
 """
 import hashlib
 import json
@@ -26,14 +25,13 @@ from api.config import (
 )
 
 
-# ── Profile-aware path resolution ───────────────────────────────────────────
+# ── Workspace state path resolution ─────────────────────────────────────────
 
 def _profile_state_dir() -> Path:
-    """Return the webui_state directory for the active profile.
+    """Return the legacy profile-local workspace state directory.
 
-    For the default profile, returns the global STATE_DIR (respects
-    HERMES_WEBUI_STATE_DIR env var for test isolation).
-    For named profiles, returns {profile_home}/webui_state/.
+    Older builds stored Spaces under each named profile.  Keep this helper for
+    migration only; active reads and writes now use the global WebUI state dir.
     """
     try:
         from api.profiles import get_active_profile_name, get_active_hermes_home
@@ -48,13 +46,23 @@ def _profile_state_dir() -> Path:
 
 
 def _workspaces_file() -> Path:
-    """Return the workspaces.json path for the active profile."""
-    return _profile_state_dir() / 'workspaces.json'
+    """Return the global workspaces.json path."""
+    return _GLOBAL_WS_FILE
 
 
 def _last_workspace_file() -> Path:
-    """Return the last_workspace.txt path for the active profile."""
-    return _profile_state_dir() / 'last_workspace.txt'
+    """Return the global last_workspace.txt path."""
+    return _GLOBAL_LW_FILE
+
+
+def _global_default_workspace() -> str:
+    """Return the current global WebUI default workspace."""
+    try:
+        from api.config import DEFAULT_WORKSPACE as _LIVE_DEFAULT_WORKSPACE
+
+        return str(Path(_LIVE_DEFAULT_WORKSPACE).expanduser().resolve())
+    except Exception:
+        return str(Path(_BOOT_DEFAULT_WORKSPACE).expanduser().resolve())
 
 
 def _profile_default_workspace() -> str:
@@ -92,49 +100,70 @@ def _profile_default_workspace() -> str:
 
         return str(Path(_LIVE_DEFAULT_WORKSPACE).expanduser().resolve())
     except Exception:
-        return str(Path(_BOOT_DEFAULT_WORKSPACE).expanduser().resolve())
+        return _global_default_workspace()
 
 
 # ── Public API ──────────────────────────────────────────────────────────────
+
+def _profile_roots_for_workspace_cleanup() -> tuple[Path, ...]:
+    roots = []
+    try:
+        from api.profiles import _DEFAULT_HERMES_HOME
+
+        roots.append((Path(_DEFAULT_HERMES_HOME) / 'profiles').resolve())
+    except Exception:
+        pass
+    try:
+        roots.append((Path.home() / '.hermes' / 'profiles').resolve())
+    except Exception:
+        pass
+    deduped = []
+    seen = set()
+    for root in roots:
+        key = str(root)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(root)
+    return tuple(deduped)
+
 
 def _clean_workspace_list(workspaces: list) -> list:
     """Sanitize a workspace list:
     - Preserve saved paths even when they are currently missing or inaccessible;
       picker state must not be destroyed by a transient stat/permission failure.
-    - Remove entries whose paths live inside another profile's directory
-      (e.g. ~/.hermes/profiles/X/... should not appear on a different profile).
+    - Remove entries whose paths live inside Hermes profile directories
+      (e.g. ~/.hermes/profiles/X/...) so profile-local secrets and WebUI state
+      never become shared spaces during migration.
     - Rename any entry whose name is literally 'default' to 'Home' (avoids
       confusion with the 'default' profile name).
     Returns the cleaned list (may be empty).
     """
-    hermes_profiles = (Path.home() / '.hermes' / 'profiles').resolve()
+    hermes_profile_roots = _profile_roots_for_workspace_cleanup()
     result = []
     for w in workspaces:
+        if not isinstance(w, dict):
+            continue
         path = w.get('path', '')
         name = w.get('name', '')
         if not path:
             continue
         p = _safe_resolve(Path(path).expanduser())
-        # Skip paths inside a DIFFERENT profile's directory (cross-profile leak).
-        # Allow paths inside the CURRENT profile's own directory (e.g. test workspaces
-        # created under ~/.hermes/profiles/webui/webui-mvp-test/).
-        try:
-            p.relative_to(hermes_profiles)
-            # p is under ~/.hermes/profiles/ — only skip if it's under a DIFFERENT profile
-            try:
-                from api.profiles import get_active_hermes_home
-                own_profile_dir = get_active_hermes_home().resolve()
-                p.relative_to(own_profile_dir)
-                # p is under our own profile dir — keep it
-            except (ValueError, Exception):
-                continue  # under profiles/ but not our own — cross-profile leak, skip
-        except ValueError:
-            pass  # not under profiles/ at all — keep it
+        if any(_path_is_relative_to(p, root) for root in hermes_profile_roots):
+            continue
         # Rename confusing 'default' label to 'Home'
         if name.lower() == 'default':
             name = 'Home'
         result.append({'path': str(p), 'name': name})
     return result
+
+
+def _path_is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
 
 
 def _workspace_access_error(candidate: Path, *, missing_label: str = "Path does not exist") -> str | None:
@@ -185,8 +214,122 @@ def _migrate_global_workspaces() -> list:
         return []
 
 
+def _legacy_profile_state_dirs() -> list[Path]:
+    """Return legacy profile-local webui_state dirs to merge into global Spaces."""
+    dirs: list[Path] = []
+
+    def add(path: Path) -> None:
+        try:
+            resolved = path.expanduser().resolve()
+        except Exception:
+            resolved = path
+        if resolved == _GLOBAL_WS_FILE.parent:
+            return
+        if resolved not in dirs:
+            dirs.append(resolved)
+
+    try:
+        add(_profile_state_dir())
+    except Exception:
+        pass
+
+    try:
+        from api.profiles import _DEFAULT_HERMES_HOME
+
+        profiles_dir = Path(_DEFAULT_HERMES_HOME) / 'profiles'
+        if profiles_dir.is_dir():
+            for child in profiles_dir.iterdir():
+                if child.is_dir():
+                    add(child / 'webui_state')
+    except Exception:
+        pass
+
+    return dirs
+
+
+def _merge_workspace_lists(*workspace_lists: list) -> list:
+    merged = []
+    seen = set()
+    for workspaces in workspace_lists:
+        for workspace in _clean_workspace_list(workspaces if isinstance(workspaces, list) else []):
+            path = workspace.get('path')
+            if not path or path in seen:
+                continue
+            seen.add(path)
+            merged.append(workspace)
+    return merged
+
+
+def _read_workspace_file(path: Path) -> list:
+    if not path.exists():
+        return []
+    try:
+        raw = json.loads(path.read_text(encoding='utf-8'))
+        return raw if isinstance(raw, list) else []
+    except Exception:
+        logger.debug("Failed to load workspaces from %s", path)
+        return []
+
+
+def _profile_workspace_migration_marker() -> Path:
+    return _GLOBAL_WS_FILE.parent / '.profile-workspaces-migrated'
+
+
+def _migrate_profile_workspaces_into_global(global_workspaces: list) -> list:
+    cleaned_global = _clean_workspace_list(global_workspaces)
+    marker = _profile_workspace_migration_marker()
+    if marker.exists():
+        return cleaned_global
+
+    legacy_lists = []
+    for state_dir in _legacy_profile_state_dirs():
+        ws_path = state_dir / 'workspaces.json'
+        if ws_path == _GLOBAL_WS_FILE:
+            continue
+        legacy_lists.append(_read_workspace_file(ws_path))
+    merged = _merge_workspace_lists(cleaned_global, *legacy_lists)
+    if merged != cleaned_global:
+        try:
+            _GLOBAL_WS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            _GLOBAL_WS_FILE.write_text(
+                json.dumps(merged, ensure_ascii=False, indent=2), encoding='utf-8'
+            )
+        except Exception:
+            logger.debug("Failed to persist migrated global workspace list")
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text('1', encoding='utf-8')
+    except Exception:
+        logger.debug("Failed to persist profile workspace migration marker")
+    return merged
+
+
 def load_workspaces() -> list:
     ws_file = _workspaces_file()
+    raw = _read_workspace_file(ws_file)
+    if raw:
+        cleaned = _clean_workspace_list(raw)
+        migrated = _migrate_profile_workspaces_into_global(cleaned)
+        if migrated != raw:
+            try:
+                ws_file.parent.mkdir(parents=True, exist_ok=True)
+                ws_file.write_text(
+                    json.dumps(migrated, ensure_ascii=False, indent=2), encoding='utf-8'
+                )
+            except Exception:
+                logger.debug("Failed to persist cleaned workspace list")
+        return migrated or [{'path': _global_default_workspace(), 'name': 'Home'}]
+
+    migrated = _migrate_profile_workspaces_into_global(_migrate_global_workspaces())
+    if migrated:
+        return migrated
+
+    return [{'path': _global_default_workspace(), 'name': 'Home'}]
+
+
+def _load_workspaces_legacy() -> list:
+    """Legacy profile-local loader kept for tests and migration reference."""
+    ws_file = _profile_state_dir() / 'workspaces.json'
     if ws_file.exists():
         try:
             raw = json.loads(ws_file.read_text(encoding='utf-8'))
@@ -199,7 +342,7 @@ def load_workspaces() -> list:
                     )
                 except Exception:
                     logger.debug("Failed to persist cleaned workspace list")
-            return cleaned or [{'path': _profile_default_workspace(), 'name': 'Home'}]
+            return cleaned or [{'path': _global_default_workspace(), 'name': 'Home'}]
         except Exception:
             logger.debug("Failed to load workspaces from %s", ws_file)
     # No profile-local file yet.
@@ -214,8 +357,8 @@ def load_workspaces() -> list:
         migrated = _migrate_global_workspaces()
         if migrated:
             return migrated
-    # Fresh start: single entry from the profile's configured workspace, labeled "Home"
-    return [{'path': _profile_default_workspace(), 'name': 'Home'}]
+    # Fresh start: single entry from the global configured workspace, labeled "Home"
+    return [{'path': _global_default_workspace(), 'name': 'Home'}]
 
 
 def save_workspaces(workspaces: list) -> None:
@@ -233,15 +376,18 @@ def get_last_workspace() -> str:
                 return p
         except Exception:
             logger.debug("Failed to read last workspace from %s", lw_file)
-    # Fallback: try global file
-    if _GLOBAL_LW_FILE.exists():
+    for state_dir in _legacy_profile_state_dirs():
+        legacy_lw = state_dir / 'last_workspace.txt'
+        if legacy_lw == lw_file or not legacy_lw.exists():
+            continue
         try:
-            p = _GLOBAL_LW_FILE.read_text(encoding='utf-8').strip()
+            p = legacy_lw.read_text(encoding='utf-8').strip()
             if p and Path(p).is_dir():
+                set_last_workspace(p)
                 return p
         except Exception:
-            logger.debug("Failed to read global last workspace")
-    return _profile_default_workspace()
+            logger.debug("Failed to read legacy last workspace from %s", legacy_lw)
+    return _global_default_workspace()
 
 
 def set_last_workspace(path: str) -> None:

@@ -143,6 +143,29 @@ def test_build_index_groups_workspaces_across_profiles_and_names_workspace(tmp_p
     assert index["session_archive_after_days"] == 7
 
 
+def test_home_workspace_rows_stay_in_chats_not_projects(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    normalized = str(workspace.resolve())
+    rows = [
+        _row("home-chat", workspace=str(workspace), workspace_group="workspace"),
+    ]
+
+    index = build_session_sidebar_index(
+        rows,
+        server_time=1_700_000_000.0,
+        workspace_names={normalized: "Home"},
+        general_workspace_paths={normalized},
+        session_archive_after_days=7,
+    )
+
+    assert [group["group_id"] for group in index["groups"]] == ["chats"]
+    chats_group = _group(index, "chats")
+    assert chats_group["kind"] == "chats"
+    assert chats_group["workspace"] is None
+    assert [row["session_id"] for row in chats_group["sessions"]] == ["home-chat"]
+
+
 def test_old_rows_increment_archive_count_without_current_group_sessions(tmp_path):
     workspace = tmp_path / "runtime"
     workspace.mkdir()
@@ -277,6 +300,28 @@ def test_archive_page_includes_manually_archived_rows_for_restore_path():
     assert page["archive"]["count"] == 2
     assert page["sessions"][0]["archived"] is True
     assert page["sessions"][0]["age_archived"] is False
+
+
+def test_home_workspace_archive_rows_are_returned_from_chats_archive(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    normalized = str(workspace.resolve())
+    rows = [
+        _row("home-old", workspace=str(workspace), workspace_group="workspace", age_days=10),
+    ]
+
+    page = build_session_archive_page(
+        rows,
+        group_id="chats",
+        server_time=1_700_000_000.0,
+        session_archive_after_days=7,
+        general_workspace_paths={normalized},
+        limit=10,
+    )
+
+    assert [row["session_id"] for row in page["sessions"]] == ["home-old"]
+    assert page["archive"]["count"] == 1
+    assert page["sessions"][0]["group_id"] == "chats"
 
 
 def test_build_archive_page_is_group_scoped_sorted_and_cursor_paginated(tmp_path):
