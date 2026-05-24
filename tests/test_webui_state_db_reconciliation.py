@@ -186,6 +186,137 @@ def test_metadata_poll_prefers_sidecar_count_when_index_is_stale(monkeypatch, tm
     assert session["last_message_at"] == 1001.0
 
 
+def test_state_db_session_summary_reads_named_profile_db(tmp_path, monkeypatch):
+    import api.models as models
+    import sqlite3
+
+    profile_home = tmp_path / "home" / "profiles" / "research"
+    profile_home.mkdir(parents=True)
+    monkeypatch.setattr(
+        models,
+        "_get_profile_home",
+        lambda profile: profile_home if profile == "research" else tmp_path / "home",
+    )
+    db_path = profile_home / "state.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, timestamp REAL)"
+        )
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+            ("sid_profile", "user", "hi", 10.5),
+        )
+
+    summary = models.get_state_db_session_summary("sid_profile", profile="research")
+
+    assert summary == {"message_count": 1, "last_message_at": 10.5}
+
+
+def test_metadata_only_session_uses_summary_without_full_state_read_when_not_newer(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    sid = "webui_metadata_summary_no_change"
+    sidecar_messages = [
+        {"role": "user", "content": "old user", "timestamp": 1000.0},
+        {"role": "assistant", "content": "old assistant", "timestamp": 1001.0},
+    ]
+    _install_test_session(monkeypatch, tmp_path, sid, sidecar_messages)
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("metadata no-change fast path must not read full state DB messages")
+
+    monkeypatch.setattr(routes, "get_state_db_session_messages", fail_if_called)
+    monkeypatch.setattr(
+        routes,
+        "get_state_db_session_summary",
+        lambda sid_arg, profile=None: {"message_count": 2, "last_message_at": 1001.0},
+    )
+
+    handler = _GetHandler(f"/api/session?session_id={sid}&messages=0&resolve_model=0")
+    routes.handle_get(handler, urlparse(handler.path))
+
+    assert handler.status == 200
+    session = handler.response_json["session"]
+    assert session["messages"] == []
+    assert session["message_count"] == 2
+    assert session["last_message_at"] == 1001.0
+
+
+def test_metadata_only_session_falls_back_when_summary_missing_last_message_at(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    sid = "webui_metadata_summary_missing_timestamp"
+    sidecar_messages = [
+        {"role": "user", "content": "old user", "timestamp": 1000.0},
+        {"role": "assistant", "content": "old assistant", "timestamp": 1001.0},
+    ]
+    _install_test_session(monkeypatch, tmp_path, sid, sidecar_messages)
+
+    calls = {"state_messages": 0}
+
+    def fake_state_messages(sid_arg, profile=None):
+        calls["state_messages"] += 1
+        assert sid_arg == sid
+        return list(sidecar_messages)
+
+    monkeypatch.setattr(routes, "get_state_db_session_messages", fake_state_messages)
+    monkeypatch.setattr(
+        routes,
+        "get_state_db_session_summary",
+        lambda sid_arg, profile=None: {"message_count": 2},
+    )
+
+    handler = _GetHandler(f"/api/session?session_id={sid}&messages=0&resolve_model=0")
+    routes.handle_get(handler, urlparse(handler.path))
+
+    assert handler.status == 200
+    assert calls["state_messages"] == 1
+    session = handler.response_json["session"]
+    assert session["messages"] == []
+    assert session["message_count"] == 2
+    assert session["last_message_at"] == 1001.0
+
+
+def test_metadata_only_session_falls_back_to_exact_merge_when_summary_is_newer(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    sid = "webui_metadata_summary_newer"
+    sidecar_messages = [
+        {"role": "user", "content": "old user", "timestamp": 1000.0},
+        {"role": "assistant", "content": "old assistant", "timestamp": 1001.0},
+    ]
+    _install_test_session(monkeypatch, tmp_path, sid, sidecar_messages)
+
+    calls = {"state_messages": 0}
+
+    def fake_state_messages(sid_arg, profile=None):
+        calls["state_messages"] += 1
+        assert sid_arg == sid
+        return [
+            {"role": "user", "content": "old user", "timestamp": 1000.0},
+            {"role": "assistant", "content": "old assistant", "timestamp": 1001.0},
+            {"role": "user", "content": "external user", "timestamp": 1002.0},
+            {"role": "assistant", "content": "external assistant", "timestamp": 1003.0},
+        ]
+
+    monkeypatch.setattr(routes, "get_state_db_session_messages", fake_state_messages)
+    monkeypatch.setattr(
+        routes,
+        "get_state_db_session_summary",
+        lambda sid_arg, profile=None: {"message_count": 4, "last_message_at": 1003.0},
+    )
+
+    handler = _GetHandler(f"/api/session?session_id={sid}&messages=0&resolve_model=0")
+    routes.handle_get(handler, urlparse(handler.path))
+
+    assert handler.status == 200
+    session = handler.response_json["session"]
+    assert calls["state_messages"] == 1
+    assert session["messages"] == []
+    assert session["message_count"] == 4
+    assert session["last_message_at"] == 1003.0
+
+
 def test_state_db_reconciliation_preserves_sidecar_only_messages(monkeypatch, tmp_path):
     import api.routes as routes
 
