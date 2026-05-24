@@ -395,8 +395,6 @@ def pytest_collection_modifyitems(config, items):
         'test_new_session_inherits_workspace',
         'test_workspace_add_valid',
         'test_workspace_rename',
-        'test_last_workspace_updates_on_session_update',
-        'test_new_session_inherits_last_workspace',
     }
 
     skip_marker = pytest.mark.skip(reason="requires hermes-agent (not installed)")

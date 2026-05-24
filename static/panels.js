@@ -4357,7 +4357,7 @@ async function loadWorkspacesPanel(){
 function renderWorkspacesPanel(workspaces){
   const panel=$('workspacesPanel');
   panel.innerHTML='';
-  const activePath = S.session ? S.session.workspace : '';
+  const activePath = (typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
   for(let i=0;i<workspaces.length;i++){
     const w=workspaces[i];
     const row=document.createElement('div');
@@ -4449,7 +4449,7 @@ function _renderWorkspaceDetail(ws){
   const empty = $('workspaceDetailEmpty');
   if (!title || !body) return;
   title.textContent = ws.name || ws.path;
-  const activePath = S.session ? S.session.workspace : '';
+  const activePath = (typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
   const isActive = ws.path === activePath;
   const isDefault = !!ws.is_default;
   const statusBadge = isActive
@@ -4487,7 +4487,7 @@ function _setWorkspaceHeaderButtons(mode, ws){
   const show = b => b && (b.style.display = '');
   const hide = b => b && (b.style.display = 'none');
   if (mode === 'read') {
-    const activePath = S.session ? S.session.workspace : '';
+    const activePath = (typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
     const isActive = ws && ws.path === activePath;
     const isDefault = !!(ws && ws.is_default);
     if (isActive) hide(actBtn); else show(actBtn);
@@ -4526,9 +4526,25 @@ function _clearWorkspaceDetail(){
 
 async function activateCurrentWorkspace(){
   if (!_currentWorkspaceDetail) return;
-  await switchToWorkspace(_currentWorkspaceDetail.path, _currentWorkspaceDetail.name);
+  await activateWorkspace(_currentWorkspaceDetail.path, _currentWorkspaceDetail.name);
   // Re-render detail after activation so the active badge updates
   _renderWorkspaceDetail(_currentWorkspaceDetail);
+}
+
+async function activateWorkspace(path,name){
+  path=String(path||'').trim();
+  if(!path)return;
+  try{
+    const data=await api('/api/workspaces/activate',{method:'POST',body:JSON.stringify({path})});
+    if(data&&Array.isArray(data.workspaces)) _workspaceList=data.workspaces;
+    path=(data&&data.last)||path;
+    S._profileDefaultWorkspace=path;
+    syncWorkspaceDisplays();
+    if(_currentPanel==='workspaces') renderWorkspacesPanel(_workspaceList||[]);
+    showToast(t('workspace_switched_to',name||getWorkspaceFriendlyName(path)));
+  }catch(e){
+    setStatus(t('switch_failed')+e.message);
+  }
 }
 
 async function deleteCurrentWorkspace(){
@@ -4745,7 +4761,9 @@ async function promptWorkspacePath(){
   }
 }
 
-async function switchToWorkspace(path,name){
+async function switchToWorkspace(path,name,opts={}){
+  opts=opts||{};
+  const activateWorkspaceRequested=opts.activateWorkspace===true;
   // Opus review Q6: if called from blank page, auto-create a session bound to
   // the requested workspace so the switch doesn't silently no-op.
   if(!S.session){
@@ -4775,12 +4793,14 @@ async function switchToWorkspace(path,name){
   try{
     closeWsDropdown();
     await api('/api/session/update',{method:'POST',body:JSON.stringify({
-      session_id:S.session.session_id, workspace:path, model:S.session.model, model_provider:S.session.model_provider||null
+      session_id:S.session.session_id, workspace:path, model:S.session.model, model_provider:S.session.model_provider||null,
+      activate_workspace:activateWorkspaceRequested
     })});
     S.session.workspace=path;
-    S._profileDefaultWorkspace=path;
-    // Explicit workspace switch = user overriding any pending profile-switch default.
-    // Clear the one-shot flag so a subsequent newSession() inherits this choice instead.
+    // Chat-scoped Space switches only affect the open conversation.  Explicit
+    // default-Space changes go through activateWorkspace() from the Spaces panel.
+    // Clear the one-shot flag so a subsequent newSession() does not inherit a
+    // stale profile-switch default over the user's current chat Space.
     S._profileSwitchWorkspace=null;
     syncTopbar();
     await loadDir('.');
@@ -8461,10 +8481,11 @@ async function _profileChatDefaults(profileName){
   };
 }
 
-async function startChatWithProfile(profileName){
+async function startChatWithProfile(profileName, opts={}){
   if (!profileName) return;
   try {
     const defaults = await _profileChatDefaults(profileName);
+    if (opts && opts.preserveWorkspace) delete defaults.workspace;
     await newSession(true, defaults);
     if (typeof switchPanel === 'function') switchPanel('chat');
     if (typeof closeMobileSidebar === 'function') closeMobileSidebar();
@@ -9007,7 +9028,7 @@ function renderProfileDropdown(data) {
     opt.onclick = async () => {
       closeProfileDropdown();
       if (p.name === active) return;
-      await switchToProfile(p.name);
+      await startChatWithProfile(p.name, { preserveWorkspace: true });
     };
     dd.appendChild(opt);
   }

@@ -5,6 +5,7 @@ Extracted from server.py (Sprint 11) so server.py is a thin shell.
 
 import html as _html
 import copy
+import hashlib
 import io
 import gzip
 import json
@@ -38,6 +39,38 @@ from api.session_events import (
 )
 
 logger = logging.getLogger(__name__)
+
+_SHELL_ASSET_VERSION_FILES = (
+    "style.css",
+    "boot.js",
+    "ui.js",
+    "messages.js",
+    "sessions.js",
+    "panels.js",
+    "commands.js",
+    "icons.js",
+    "i18n.js",
+    "workspace.js",
+    "terminal.js",
+    "onboarding.js",
+    "sw.js",
+)
+
+
+def _static_asset_version_token(base_version: str) -> str:
+    """Return a cache-bust token that changes when local shell assets change."""
+    static_root = (Path(__file__).parent.parent / "static").resolve()
+    parts = []
+    for rel in _SHELL_ASSET_VERSION_FILES:
+        try:
+            st = (static_root / rel).stat()
+        except OSError:
+            continue
+        parts.append(f"{rel}:{st.st_size}:{st.st_mtime_ns}")
+    if not parts:
+        return base_version
+    digest = hashlib.blake2s("|".join(parts).encode("utf-8"), digest_size=6).hexdigest()
+    return f"{base_version}-{digest}"
 
 # Treat stalled/closed HTTP clients as normal disconnects.  Long-lived SSE
 # connections often end this way when a browser tab sleeps, a phone switches
@@ -3769,6 +3802,7 @@ def handle_get(handler, parsed) -> bool:
             from urllib.parse import quote
             from api.updates import WEBUI_VERSION
             version_token = quote(WEBUI_VERSION, safe="")
+            asset_version_token = quote(_static_asset_version_token(WEBUI_VERSION), safe="")
             from api.extensions import inject_extension_tags
 
             csrf_token = ""
@@ -3785,6 +3819,7 @@ def handle_get(handler, parsed) -> bool:
             html = (
                 _INDEX_HTML_PATH.read_text(encoding="utf-8")
                 .replace("__WEBUI_VERSION__", version_token)
+                .replace("__HERMES_ASSET_VERSION__", asset_version_token)
                 .replace("__MAX_UPLOAD_BYTES__", str(MAX_UPLOAD_BYTES))
                 .replace("__CSRF_TOKEN_JSON__", json.dumps(csrf_token))
             )
@@ -3845,8 +3880,11 @@ def handle_get(handler, parsed) -> bool:
             from urllib.parse import quote
             from api.updates import WEBUI_VERSION
             version_token = quote(WEBUI_VERSION, safe="")
+            asset_version_token = quote(_static_asset_version_token(WEBUI_VERSION), safe="")
             text = sw_path.read_text(encoding="utf-8").replace(
                 "__WEBUI_VERSION__", version_token
+            ).replace(
+                "__HERMES_ASSET_VERSION__", asset_version_token
             )
             data = text.encode("utf-8")
             handler.send_response(200)
@@ -5624,6 +5662,7 @@ def handle_post(handler, parsed) -> bool:
         old_ws = getattr(s, "workspace", "")
         old_model = getattr(s, "model", None)
         old_provider = getattr(s, "model_provider", None)
+        activate_workspace = body.get("activate_workspace") is True
         try:
             new_ws = str(resolve_trusted_workspace(body.get("workspace", s.workspace)))
         except ValueError as e:
@@ -5656,7 +5695,8 @@ def handle_post(handler, parsed) -> bool:
                 close_terminal(body["session_id"])
             except Exception:
                 logger.debug("Failed to close workspace terminal after workspace update")
-        set_last_workspace(new_ws)
+        if activate_workspace:
+            set_last_workspace(str(new_ws))
         return j(handler, {"session": s.compact() | {"messages": s.messages}})
     if parsed.path == "/api/session/worktree/remove":
         sid = body.get("session_id", "")
@@ -6074,6 +6114,9 @@ def handle_post(handler, parsed) -> bool:
         return _handle_file_open_vscode(handler, body)
 
     # ── Workspace management (POST) ──
+    if parsed.path == "/api/workspaces/activate":
+        return _handle_workspace_activate(handler, body)
+
     if parsed.path == "/api/workspaces/add":
         return _handle_workspace_add(handler, body)
 
@@ -9184,6 +9227,7 @@ def _start_chat_stream_for_session(
     normalized_model: bool = False,
     diag=None,
     goal_related: bool = False,
+    activate_workspace: bool = False,
 ):
     """Persist pending state, register an SSE channel, and start an agent turn."""
     attachments = attachments or []
@@ -9251,8 +9295,9 @@ def _start_chat_stream_for_session(
         )
     except Exception:
         logger.warning("Failed to append submitted turn journal event", exc_info=True)
-    diag.stage("set_last_workspace") if diag else None
-    set_last_workspace(workspace)
+    if activate_workspace:
+        diag.stage("set_last_workspace") if diag else None
+        set_last_workspace(workspace)
     diag.stage("stream_registration") if diag else None
     stream = create_stream_channel()
     with STREAMS_LOCK:
@@ -9512,6 +9557,7 @@ def _handle_chat_start(handler, body, diag=None):
             workspace = _resolve_chat_workspace_with_recovery(s, body.get("workspace"))
         except ValueError as e:
             return bad(handler, str(e))
+        activate_workspace = body.get("activate_workspace") is True
         requested_model = body.get("model") or s.model
         requested_provider = (
             body.get("model_provider")
@@ -9542,6 +9588,7 @@ def _handle_chat_start(handler, body, diag=None):
                     model_provider=request.provider or model_provider,
                     normalized_model=normalized_model,
                     diag=diag,
+                    activate_workspace=activate_workspace,
                 )
 
             def _legacy_adapter_factory():
@@ -9580,6 +9627,7 @@ def _handle_chat_start(handler, body, diag=None):
                 model_provider=model_provider,
                 normalized_model=normalized_model,
                 diag=diag,
+                activate_workspace=activate_workspace,
             )
         status = int(response.pop("_status", 200) or 200)
         diag.stage("response_write") if diag else None
@@ -10719,6 +10767,21 @@ def _handle_workspace_add(handler, body):
     wss.append({"path": str(p), "name": name or p.name})
     save_workspaces(wss)
     return j(handler, {"ok": True, "workspaces": wss})
+
+
+def _handle_workspace_activate(handler, body):
+    path_str = _strip_surrounding_quotes(str(body.get("path", "")).strip())
+    if not path_str:
+        return bad(handler, "path is required")
+    try:
+        p = str(resolve_trusted_workspace(path_str))
+    except (TypeError, ValueError) as e:
+        return bad(handler, str(e))
+    wss = load_workspaces()
+    if not any(str(w.get("path") or "") == p for w in wss):
+        return bad(handler, "Workspace not found", 404)
+    set_last_workspace(p)
+    return j(handler, {"ok": True, "last": get_last_workspace(), "workspaces": wss})
 
 
 def _handle_workspace_remove(handler, body):

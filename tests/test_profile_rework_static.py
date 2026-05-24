@@ -993,6 +993,23 @@ def test_profile_chat_icon_starts_chat_without_switching_active_profile():
     assert "include_avatar=0" in defaults
 
 
+def test_composer_profile_picker_starts_chat_without_switching_active_profile():
+    fn = _extract_function(PANELS_JS, "renderProfileDropdown")
+    assert "switchToProfile" not in fn, \
+        "composer profile picker must not change the active/default profile"
+    compact = re.sub(r"\s+", "", fn)
+    assert "startChatWithProfile(p.name,{preserveWorkspace:true})" in compact, \
+        "composer profile picker should create a profile-scoped chat in the current workspace"
+
+
+def test_composer_profile_picker_preserves_current_workspace():
+    fn = _extract_function(PANELS_JS, "startChatWithProfile")
+    assert "preserveWorkspace" in fn, \
+        "startChatWithProfile must support chat-picker calls that keep the current WebUI space"
+    assert "delete defaults.workspace" in fn, \
+        "chat-picker profile changes must not consume the target profile's default workspace"
+
+
 def test_profile_scoped_new_session_uses_requested_profile_without_consuming_active_defaults():
     fn = _extract_function(SESSIONS_JS, "newSession")
     assert "hasOption('profile')" in fn
