@@ -5472,6 +5472,8 @@ async function loadProfilesPanel() {
         openProfileDetail(p.name, card);
         if (typeof closeMobileSidebar === 'function') closeMobileSidebar();
       };
+      card.onmouseenter = () => _prefetchProfileRuntimeSettings(p.name);
+      card.onfocus = () => _prefetchProfileRuntimeSettings(p.name);
       const chatBtn = card.querySelector('.profile-card-chat-btn');
       if (chatBtn) chatBtn.onclick = (ev) => {
         ev.preventDefault();
@@ -6513,6 +6515,9 @@ function _profileSkillsTile(p, isActive){
 // when no override is set (matches the composer's empty-state label).
 
 let _profileRuntimeSettings = null;
+const _profileRuntimeSettingsCache = new Map();
+const _profileRuntimeSettingsInflight = new Map();
+const _profileRuntimeSettingsCacheRevisions = new Map();
 let _profileRuntimeHydrationSeq = 0;
 let _profileRuntimeDirty = null;
 const _PROFILE_COMPRESSION_DEFAULTS = {
@@ -6551,6 +6556,53 @@ function _isCurrentProfileRuntimeHydration(profileName, seq){
     && _currentProfileDetail.name === profileName;
 }
 
+function _profileRuntimeSettingsCacheRevision(profileName){
+  return Number(_profileRuntimeSettingsCacheRevisions.get(profileName) || 0);
+}
+
+function _cacheProfileRuntimeSettings(profileName, settings){
+  if (!profileName || !settings || typeof settings !== 'object') return settings || {};
+  const cached = Object.assign({}, settings);
+  _profileRuntimeSettingsCache.set(profileName, cached);
+  _profileRuntimeSettingsCacheRevisions.set(
+    profileName,
+    _profileRuntimeSettingsCacheRevision(profileName) + 1
+  );
+  return cached;
+}
+
+function _cacheProfileRuntimeSettingsFromFetch(profileName, settings, startedRevision){
+  if (_profileRuntimeSettingsCacheRevision(profileName) !== startedRevision) {
+    return _profileRuntimeSettingsCache.get(profileName) || settings || {};
+  }
+  return _cacheProfileRuntimeSettings(profileName, settings);
+}
+
+async function _fetchProfileRuntimeSettings(profileName, opts){
+  if (!profileName) return {};
+  const force = !!(opts && opts.force);
+  if (!force && _profileRuntimeSettingsCache.has(profileName)) {
+    return _profileRuntimeSettingsCache.get(profileName);
+  }
+  if (_profileRuntimeSettingsInflight.has(profileName)) {
+    return _profileRuntimeSettingsInflight.get(profileName);
+  }
+  const startedRevision = _profileRuntimeSettingsCacheRevision(profileName);
+  const promise = api('/api/profile/settings?name=' + encodeURIComponent(profileName) + '&include_avatar=0')
+    .then(settings => _cacheProfileRuntimeSettingsFromFetch(profileName, settings || {}, startedRevision))
+    .catch(() => ({}))
+    .finally(() => {
+      _profileRuntimeSettingsInflight.delete(profileName);
+    });
+  _profileRuntimeSettingsInflight.set(profileName, promise);
+  return promise;
+}
+
+function _prefetchProfileRuntimeSettings(profileName){
+  if (!profileName || _profileRuntimeSettingsCache.has(profileName) || _profileRuntimeSettingsInflight.has(profileName)) return;
+  _fetchProfileRuntimeSettings(profileName).catch(() => {});
+}
+
 function _primeProfileRuntimeControls(profile){
   const seq = ++_profileRuntimeHydrationSeq;
   _profileRuntimeDirty = _freshProfileRuntimeDirty();
@@ -6581,28 +6633,9 @@ function _primeProfileRuntimeControls(profile){
   return seq;
 }
 
-async function _hydrateProfileRuntimeSettings(profile, seq){
-  if (!profile || !profile.name) return;
-  const token = Number.isFinite(seq) ? seq : _profileRuntimeHydrationSeq;
-  if (!_isCurrentProfileRuntimeHydration(profile.name, token)) return;
-  // Wait for the composer's model catalog before mirroring it into the
-  // profile's hidden select. Without this, the picker can paint empty
-  // immediately after a profile switch.
-  const ready = window._modelDropdownReady;
-  if (ready && typeof ready.then === 'function') {
-    try { await ready; } catch (_) {}
-  }
-  if (!_isCurrentProfileRuntimeHydration(profile.name, token)) return;
-  if (!_profileModelGroupsFromComposer().length && typeof populateModelDropdown === 'function') {
-    try { await populateModelDropdown(); } catch (_) {}
-  }
-  if (!_isCurrentProfileRuntimeHydration(profile.name, token)) return;
-
-  let settings = {};
-  try {
-    settings = await api('/api/profile/settings?name=' + encodeURIComponent(profile.name) + '&include_avatar=0');
-  } catch (_) { settings = {}; }
-  if (!_isCurrentProfileRuntimeHydration(profile.name, token)) return;
+function _applyProfileRuntimeSettings(profile, settings, token){
+  if (!profile || !profile.name) return false;
+  if (!_isCurrentProfileRuntimeHydration(profile.name, token)) return false;
 
   const dirty = _profileRuntimeDirty || _freshProfileRuntimeDirty();
   const prior = _profileRuntimeSettings || {};
@@ -6647,6 +6680,31 @@ async function _hydrateProfileRuntimeSettings(profile, seq){
   if (!dirty.toolsets) _applyProfileToolsets(_profileRuntimeSettings.toolsets || [], !!_profileRuntimeSettings.toolsets_configured);
   _wireProfileDefaultModelHandlers(profile.name);
   _wireProfileRuntimeSettingHandlers(profile.name);
+  return true;
+}
+
+async function _hydrateProfileRuntimeSettings(profile, seq){
+  if (!profile || !profile.name) return;
+  const token = Number.isFinite(seq) ? seq : _profileRuntimeHydrationSeq;
+  if (!_isCurrentProfileRuntimeHydration(profile.name, token)) return;
+  // Wait for the composer's model catalog before mirroring it into the
+  // profile's hidden select. Without this, the picker can paint empty
+  // immediately after a profile switch.
+  const ready = window._modelDropdownReady;
+  if (ready && typeof ready.then === 'function') {
+    try { await ready; } catch (_) {}
+  }
+  if (!_isCurrentProfileRuntimeHydration(profile.name, token)) return;
+  if (!_profileModelGroupsFromComposer().length && typeof populateModelDropdown === 'function') {
+    try { await populateModelDropdown(); } catch (_) {}
+  }
+  if (!_isCurrentProfileRuntimeHydration(profile.name, token)) return;
+
+  const cached = _profileRuntimeSettingsCache.get(profile.name);
+  if (cached) _applyProfileRuntimeSettings(profile, cached, token);
+  const settings = await _fetchProfileRuntimeSettings(profile.name, { force: !!cached });
+  if (!_isCurrentProfileRuntimeHydration(profile.name, token)) return;
+  _applyProfileRuntimeSettings(profile, settings || {}, token);
 }
 
 async function _hydrateProfileDefaultModel(profile){ return _hydrateProfileRuntimeSettings(profile); }
@@ -7048,7 +7106,11 @@ async function _persistProfileDefaultModel(profileName, priors){
       ? _profilesCache.profiles.find(x => x.name === profileName) : null;
     if (p) Object.assign(p, updated);
     if (_isCurrentProfileRuntimeHydration(profileName, token)) {
+      _profileRuntimeSettings = Object.assign({}, _profileRuntimeSettings || {}, updated || {});
       Object.assign(_currentProfileDetail, updated);
+      _cacheProfileRuntimeSettings(profileName, _profileRuntimeSettings);
+    } else {
+      _cacheProfileRuntimeSettings(profileName, updated || {});
     }
     // If we're editing the active profile and no chat session has been
     // started yet, mirror onto the chat composer's #modelSelect so the
@@ -7124,6 +7186,9 @@ async function _persistProfileFallbackModel(profileName, priors){
     if (_isCurrentProfileRuntimeHydration(profileName, token)) {
       _profileRuntimeSettings = Object.assign({}, _profileRuntimeSettings || {}, updated || {});
       Object.assign(_currentProfileDetail, updated);
+      _cacheProfileRuntimeSettings(profileName, _profileRuntimeSettings);
+    } else {
+      _cacheProfileRuntimeSettings(profileName, updated || {});
     }
   } catch (e) {
     if (_isCurrentProfileRuntimeHydration(profileName, token)) {
@@ -7148,6 +7213,9 @@ async function _persistProfileSetting(profileName, patch, onFailure){
     if (_isCurrentProfileRuntimeHydration(profileName, token)) {
       _profileRuntimeSettings = Object.assign({}, _profileRuntimeSettings || {}, updated || {});
       Object.assign(_currentProfileDetail, updated);
+      _cacheProfileRuntimeSettings(profileName, _profileRuntimeSettings);
+    } else {
+      _cacheProfileRuntimeSettings(profileName, updated || {});
     }
     return updated;
   } catch (e) {

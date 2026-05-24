@@ -1118,12 +1118,74 @@ def test_profile_runtime_controls_wire_before_async_hydration():
     assert "_wireProfileRuntimeSettingHandlers(profile.name)" in prime
 
 
+def test_profile_runtime_settings_cache_helpers_exist_and_dedupe_fetches():
+    assert "_profileRuntimeSettingsCache = new Map()" in PANELS_JS
+    assert "_profileRuntimeSettingsInflight = new Map()" in PANELS_JS
+    assert "function _cacheProfileRuntimeSettings" in PANELS_JS
+    fetch = _extract_function(PANELS_JS, "_fetchProfileRuntimeSettings")
+    assert "_profileRuntimeSettingsCache.has(profileName)" in fetch
+    assert "_profileRuntimeSettingsInflight.has(profileName)" in fetch
+    assert "_profileRuntimeSettingsInflight.get(profileName)" in fetch
+    assert "!force && _profileRuntimeSettingsInflight.has(profileName)" not in fetch, \
+        "forced cache refreshes should still dedupe against an in-flight runtime settings request"
+    assert "_profileRuntimeSettingsInflight.delete(profileName)" in fetch
+    assert "include_avatar=0" in fetch
+    assert ".catch(() => ({}))" in fetch or "catch (_) { return {}; }" in fetch
+
+
+def test_profile_runtime_fetch_cannot_overwrite_newer_saved_cache_entry():
+    fetch = _extract_function(PANELS_JS, "_fetchProfileRuntimeSettings")
+    fetch_cache = _extract_function(PANELS_JS, "_cacheProfileRuntimeSettingsFromFetch")
+
+    assert "_profileRuntimeSettingsCacheRevisions = new Map()" in PANELS_JS
+    assert "const startedRevision = _profileRuntimeSettingsCacheRevision(profileName)" in fetch
+    assert "_cacheProfileRuntimeSettingsFromFetch(profileName, settings || {}, startedRevision)" in fetch
+    assert "_profileRuntimeSettingsCacheRevision(profileName) !== startedRevision" in fetch_cache
+    assert "_profileRuntimeSettingsCache.get(profileName)" in fetch_cache
+
+
+def test_profile_cards_prefetch_runtime_settings_on_hover_and_focus():
+    load = _extract_function(PANELS_JS, "loadProfilesPanel")
+
+    assert "card.onmouseenter" in load
+    assert "card.onfocus" in load
+    assert "_prefetchProfileRuntimeSettings(p.name)" in load
+
+
+def test_profile_runtime_hydration_uses_cache_before_network_and_keeps_avatar_omitted():
+    hydrate = _extract_function(PANELS_JS, "_hydrateProfileRuntimeSettings")
+    fetch = _extract_function(PANELS_JS, "_fetchProfileRuntimeSettings")
+
+    assert "_profileRuntimeSettingsCache.get(profile.name)" in hydrate
+    assert "_applyProfileRuntimeSettings(profile, cached" in hydrate
+    assert "_fetchProfileRuntimeSettings(profile.name" in hydrate
+    assert "{ force: !!cached }" in hydrate
+    assert "include_avatar=0" not in hydrate, \
+        "hydration should delegate avatar-free runtime fetches to the cache helper"
+    assert "include_avatar=0" in fetch, \
+        "runtime settings fetch helper must never request full avatar payloads"
+
+
+def test_profile_runtime_apply_helper_preserves_dirty_and_stale_guards():
+    hydrate = _extract_function(PANELS_JS, "_hydrateProfileRuntimeSettings")
+    apply = _extract_function(PANELS_JS, "_applyProfileRuntimeSettings")
+    wiring = _extract_function(PANELS_JS, "_wireProfileRuntimeSettingHandlers")
+
+    assert "_isCurrentProfileRuntimeHydration(profile.name, token)" in hydrate
+    assert "_isCurrentProfileRuntimeHydration(profile.name, token)" in apply
+    assert "dirty.compression" in apply
+    assert "dirty.default_workspace" in apply
+    assert "dirty.auxiliary_models" in apply
+    assert "_markProfileRuntimeDirty('compression')" in wiring
+
+
 def test_profile_runtime_hydration_preserves_dirty_controls():
     hydrate = _extract_function(PANELS_JS, "_hydrateProfileRuntimeSettings")
+    apply = _extract_function(PANELS_JS, "_applyProfileRuntimeSettings")
     wiring = _extract_function(PANELS_JS, "_wireProfileRuntimeSettingHandlers")
     assert "_isCurrentProfileRuntimeHydration" in hydrate, \
         "stale profile hydration must not repaint after the user switches profiles"
-    assert "dirty.compression" in hydrate, \
+    assert "dirty.compression" in apply, \
         "late settings fetch must not overwrite a compression edit already made in the UI"
     assert "_markProfileRuntimeDirty('compression')" in wiring, \
         "compression slider input must mark the field dirty before save/hydration races"
@@ -1131,8 +1193,9 @@ def test_profile_runtime_hydration_preserves_dirty_controls():
 
 def test_profile_runtime_hydration_omits_full_avatar_payload():
     hydrate = _extract_function(PANELS_JS, "_hydrateProfileRuntimeSettings")
+    fetch = _extract_function(PANELS_JS, "_fetchProfileRuntimeSettings")
 
-    assert "include_avatar=0" in hydrate, \
+    assert "include_avatar=0" in hydrate or "include_avatar=0" in fetch, \
         "runtime settings hydration must not fetch full uploaded avatar data URLs"
 
 
