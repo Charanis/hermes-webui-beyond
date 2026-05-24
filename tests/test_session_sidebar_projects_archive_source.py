@@ -5,6 +5,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SESSIONS_JS = REPO_ROOT / "static" / "sessions.js"
+STYLE_CSS = REPO_ROOT / "static" / "style.css"
 
 
 def _js() -> str:
@@ -86,6 +87,7 @@ def test_sidebar_index_state_and_local_storage_keys_exist():
         "let _sessionIndexArchiveCounts = {};",
         "hermes-sidebar-projects-collapsed",
         "hermes-sidebar-archive-collapsed",
+        "hermes-sidebar-chats-collapsed",
     ):
         assert snippet in js
 
@@ -190,6 +192,16 @@ def test_collapsed_projects_do_not_add_archive_rows_to_virtual_flat_list():
     assert collapsed_guard < archive_guard < archive_push
 
 
+def test_collapsed_chats_do_not_add_rows_to_virtual_flat_list():
+    js = _js()
+    body = _function_body(js, "renderSessionListFromCache")
+
+    assert "const chatsCollapsed=_sessionIndexChatsCollapsed();" in body
+    assert "if(group.kind==='chats'&&chatsCollapsed) return;" in body
+    assert "if(!chatsCollapsed) visibleSearchArchiveGroups.push(chatsDisplay);" in body
+    assert "if(!chatsCollapsed){" in body
+
+
 def test_fresh_current_rows_prune_cached_archive_rows_on_index_apply():
     js = _js()
     body = _function_body(js, "_applySessionIndexPayload")
@@ -225,6 +237,8 @@ def test_project_and_archive_headers_are_keyboard_accessible():
     assert "hdr.tabIndex=0" in body
     assert "hdr.setAttribute('aria-expanded',collapsed?'false':'true')" in body
     assert "hdr.onkeydown=_handleSidebarDisclosureKeydown" in body
+    assert "hdr.className='session-section-label session-index-chats-disclosure'" in body
+    assert "hdr.setAttribute('aria-expanded',chatsCollapsed?'false':'true')" in body
     assert "projectToggle.setAttribute('role','button')" in body
     assert "projectToggle.tabIndex=0" in body
     assert "projectToggle.setAttribute('aria-expanded',collapsed?'false':'true')" in body
@@ -247,3 +261,18 @@ def test_project_new_button_has_accessible_name():
     body = _function_body(js, "renderSessionListFromCache")
 
     assert "add.setAttribute('aria-label','New chat in this project')" in body
+
+
+def test_archive_subsection_is_indented_under_project():
+    css = STYLE_CSS.read_text(encoding="utf-8")
+
+    assert ".session-index-archive-group{margin:4px 0 2px 18px;}" in css
+    assert ".session-index-archive-body{margin-left:8px;" in css
+
+
+def test_chats_disclosure_has_clickable_header_styles():
+    css = STYLE_CSS.read_text(encoding="utf-8")
+
+    assert ".session-index-chats-disclosure{display:flex;" in css
+    assert ".session-index-chats-disclosure:hover,.session-index-chats-disclosure:focus-visible" in css
+    assert ".session-index-chats-disclosure .session-date-caret{margin-right:4px;}" in css

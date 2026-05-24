@@ -108,6 +108,7 @@ def test_source_contracts_for_sidebar_index_routes():
     assert "build_session_sidebar_index" in src
     assert "build_session_archive_page" in src
     assert "profile_aware_dedupe=True" in src
+    assert "_general_workspace_paths_for_sidebar()" in src
 
 
 def test_messaging_dedupe_profile_aware_contract(monkeypatch):

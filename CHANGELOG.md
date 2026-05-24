@@ -11,6 +11,10 @@
 
 ### Fixed
 
+- Spaces are now shared WebUI state instead of profile-local state: registered spaces and the last selected space stay consistent when switching agent profiles, while profile default workspaces remain separate profile runtime settings.
+- The automatically-created Home space now stays in the general Chats grouping instead of appearing as a workspace Project, including its archive rows.
+- Project Archive subsections in the chat sidebar are indented under their parent group so the hierarchy reads more clearly.
+- The general Chats section in the chat sidebar can now be collapsed and expanded like workspace Projects, with the collapsed state remembered locally.
 - Composer-adjacent avatar mode now aligns the combined desktop avatar+composer row to the chat message column, shortens the composer by the avatar width, keeps desktop workspace/model values visible inside the narrower composer, keeps the avatar bottom-aligned as long drafts grow the composer, lets the mobile settings submenu expand across the avatar row instead of staying composer-width, keeps the Context section visible in that submenu before token usage data arrives, replaces the mobile inline profile chip with the Space files shortcut while making the avatar open profile switching, and keeps the mobile model/reasoning/settings control fixed beside Send instead of letting it slide into the scrollable tool strip.
 - Reactive avatar same-state events now clear stale queued state changes, so a reaffirmed current animation is not followed by an older queued transition.
 

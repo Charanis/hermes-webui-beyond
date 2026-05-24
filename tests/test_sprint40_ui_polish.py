@@ -205,13 +205,12 @@ class TestCustomEndpointModelStripping:
 
 # ── #455 workspace chip ─────────────────────────────────────────────
 class TestWorkspaceChipAfterProfileSwitch(unittest.TestCase):
-    """Verify that switchToProfile() applies the profile default workspace
-    to the new session when a conversation is in progress (fixes #424)."""
+    """Verify that switchToProfile() keeps WebUI Spaces global."""
 
     def test_topbar_synced_after_profile_switch(self):
         """After await newSession(false) in the sessionInProgress branch,
-        the code must call syncTopbar() so the profile/workspace chips reflect
-        the new profile's default workspace."""
+        the code must call syncTopbar() so the profile chip updates while the
+        workspace chip stays tied to the active global space."""
         # Find the sessionInProgress block
         idx = PANELS_JS.find('if (sessionInProgress)')
         self.assertGreater(idx, -1, "sessionInProgress branch must exist in panels.js")
@@ -231,8 +230,8 @@ class TestWorkspaceChipAfterProfileSwitch(unittest.TestCase):
         self.assertGreater(pos_sync_topbar, pos_new_session,
                            "syncTopbar() must be called AFTER newSession(false, {...})")
 
-    def test_profile_default_workspace_applied_to_new_session(self):
-        """newSession(false) should apply the pending profile workspace itself."""
+    def test_profile_switch_does_not_apply_profile_default_workspace_to_spaces(self):
+        """Profile switching must not replace the active WebUI Space."""
         idx = PANELS_JS.find('if (sessionInProgress)')
         self.assertGreater(idx, -1)
         block = PANELS_JS[idx:idx + 1000]
@@ -240,8 +239,10 @@ class TestWorkspaceChipAfterProfileSwitch(unittest.TestCase):
         self.assertIn('await newSession(false', block)
         self.assertIn('profile:targetProfile', block,
                       "newSession() must receive the target profile explicitly")
-        self.assertIn('S._profileSwitchWorkspace = profileDefaultWorkspace', PANELS_JS,
-                      "the profile switch workspace should be prepared before newSession()")
+        self.assertIn('S._profileSwitchWorkspace = null', PANELS_JS,
+                      "profile switching should not queue a profile-scoped workspace override")
+        self.assertNotIn('S._profileSwitchWorkspace = profileDefaultWorkspace', PANELS_JS,
+                         "profile defaults must not drive the shared WebUI Spaces selection")
         self.assertNotIn('/api/session/update', block,
                          "sessionInProgress should not post a duplicate workspace update "
                          "after newSession(false)")
@@ -254,8 +255,7 @@ class TestWorkspaceChipAfterProfileSwitch(unittest.TestCase):
 
         self.assertIn('await newSession(false', block)
         self.assertNotIn('/api/session/update', block,
-                         "newSession(false) receives S._profileSwitchWorkspace, so "
-                         "a second /api/session/update is unnecessary")
+                         "profile switching should not patch the old session workspace")
 
     def test_sync_topbar_before_render_session_list(self):
         """syncTopbar() should be called before renderSessionList()

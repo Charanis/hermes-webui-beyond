@@ -55,7 +55,7 @@ def test_render_uses_projects_and_chats_sections_instead():
     body = _function_body(_js(), "renderSessionListFromCache")
 
     assert "appendSectionLabel('Projects')" in body
-    assert "appendSectionLabel('Chats')" in body
+    assert "appendChatsGroup(chatsDisplay)" in body
     assert "workspace_group:'workspace'" in body
     assert "newSession(true,{workspace:group.workspace,workspace_group:'workspace'})" in body
 

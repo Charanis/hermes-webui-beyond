@@ -2455,6 +2455,30 @@ def _workspace_name_map_for_sidebar(rows: list[dict]) -> dict[str, str]:
     return names
 
 
+def _general_workspace_paths_for_sidebar() -> set[str]:
+    """Return workspace paths that should stay in the general Chats group."""
+    try:
+        workspaces = load_workspaces()
+    except Exception:
+        logger.debug("Failed to load sidebar general workspace paths", exc_info=True)
+        return set()
+
+    paths: set[str] = set()
+    for workspace in workspaces:
+        if not isinstance(workspace, dict):
+            continue
+        if _safe_first(workspace.get("name")).strip().lower() != "home":
+            continue
+        raw_path = workspace.get("path")
+        if not raw_path:
+            continue
+        try:
+            paths.add(str(Path(str(raw_path)).expanduser().resolve()))
+        except (OSError, RuntimeError, ValueError):
+            paths.add(str(raw_path))
+    return paths
+
+
 from api.models import (
     Session,
     get_session,
@@ -4345,6 +4369,7 @@ def handle_get(handler, parsed) -> bool:
                 session_archive_after_days=settings.get("session_archive_after_days"),
                 current_session_id=current_session_id,
                 workspace_names=_workspace_name_map_for_sidebar(rows),
+                general_workspace_paths=_general_workspace_paths_for_sidebar(),
             )
             try:
                 payload["projects"] = load_projects()
@@ -4390,6 +4415,7 @@ def handle_get(handler, parsed) -> bool:
                 limit=limit_raw,
                 cursor=cursor,
                 current_session_id=current_session_id,
+                general_workspace_paths=_general_workspace_paths_for_sidebar(),
             )
             payload.update({
                 "server_time": now,

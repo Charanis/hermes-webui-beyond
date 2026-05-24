@@ -1551,6 +1551,7 @@ let _sessionVirtualScrollList = null;
 let _sessionVirtualScrollRaf = 0;
 const SESSION_INDEX_PROJECTS_COLLAPSED_KEY = 'hermes-sidebar-projects-collapsed';
 const SESSION_INDEX_ARCHIVE_COLLAPSED_KEY = 'hermes-sidebar-archive-collapsed';
+const SESSION_INDEX_CHATS_COLLAPSED_KEY = 'hermes-sidebar-chats-collapsed';
 const SESSION_INDEX_ARCHIVE_LIMIT = 30;
 
 function _sessionSnapshotById(sid){
@@ -1603,6 +1604,15 @@ function _sessionIndexArchiveCollapsed(){
 }
 function _saveSessionIndexArchiveCollapsed(state){
   _writeSidebarJsonState(SESSION_INDEX_ARCHIVE_COLLAPSED_KEY,state);
+}
+function _sessionIndexChatsCollapsed(){
+  try{return localStorage.getItem(SESSION_INDEX_CHATS_COLLAPSED_KEY)==='1';}catch(_){return false;}
+}
+function _saveSessionIndexChatsCollapsed(collapsed){
+  try{
+    if(collapsed) localStorage.setItem(SESSION_INDEX_CHATS_COLLAPSED_KEY,'1');
+    else localStorage.removeItem(SESSION_INDEX_CHATS_COLLAPSED_KEY);
+  }catch(_){}
 }
 function _sessionIndexArchiveCountForGroup(group){
   const archiveMeta=(group&&group.archive)||{};
@@ -3437,11 +3447,13 @@ function renderSessionListFromCache(){
   else{batchBar.style.display='none';}
   const projectCollapsed=_sessionIndexProjectsCollapsed();
   const archiveCollapsed=_sessionIndexArchiveCollapsed();
+  const chatsCollapsed=_sessionIndexChatsCollapsed();
   const flatSessionRows=[];
   const addFlatRows=(display, archive=false)=>{
     const group=display.group;
     const groupId=display.groupId;
     if(group.kind==='project'&&projectCollapsed[groupId]) return;
+    if(group.kind==='chats'&&chatsCollapsed) return;
     if(archive&&archiveCollapsed[groupId]!==false) return;
     const rows=archive?display.archiveRows:display.currentRows;
     for(const s of rows){
@@ -3619,16 +3631,45 @@ function renderSessionListFromCache(){
     wrapper.appendChild(body);
     list.appendChild(wrapper);
   };
+  const appendChatsGroup=(display)=>{
+    const group=display.group;
+    const currentCount=Number(group&&group.current_count)||display.currentRows.length||0;
+    const archiveCount=_sessionIndexArchiveCountForGroup(group);
+    const totalCount=currentCount+archiveCount;
+    const hdr=document.createElement('div');
+    hdr.className='session-section-label session-index-chats-disclosure';
+    const caret=document.createElement('span');
+    caret.className='session-date-caret';
+    caret.textContent='\u25BE';
+    if(chatsCollapsed) caret.classList.add('collapsed');
+    const label=document.createElement('span');
+    label.textContent='Chats';
+    const count=document.createElement('span');
+    count.className='session-group-count';
+    count.textContent=String(totalCount||display.currentRows.length||0);
+    hdr.appendChild(caret);hdr.appendChild(label);hdr.appendChild(count);
+    hdr.setAttribute('role','button');
+    hdr.tabIndex=0;
+    hdr.setAttribute('aria-expanded',chatsCollapsed?'false':'true');
+    hdr.onkeydown=_handleSidebarDisclosureKeydown;
+    hdr.onclick=()=>{
+      _saveSessionIndexChatsCollapsed(!chatsCollapsed);
+      renderSessionListFromCache();
+    };
+    list.appendChild(hdr);
+    const body=document.createElement('div');
+    body.className='session-index-chats-body';
+    if(!chatsCollapsed){
+      renderRows(body,display.currentRows,display.group,false);
+      appendArchiveSection(body,display);
+    }
+    list.appendChild(body);
+  };
   appendSectionLabel('Projects');
   for(const display of displayGroups) appendProjectGroup(display);
-  appendSectionLabel('Chats');
-  const chatsBody=document.createElement('div');
-  chatsBody.className='session-index-chats-body';
-  renderRows(chatsBody,chatsDisplay.currentRows,chatsDisplay.group,false);
-  appendArchiveSection(chatsBody,chatsDisplay);
-  list.appendChild(chatsBody);
+  appendChatsGroup(chatsDisplay);
   const visibleSearchArchiveGroups=displayGroups.filter(display=>!(display.group&&display.group.kind==='project'&&projectCollapsed[display.groupId]));
-  visibleSearchArchiveGroups.push(chatsDisplay);
+  if(!chatsCollapsed) visibleSearchArchiveGroups.push(chatsDisplay);
   const searchArchiveAppended=_appendSearchArchiveAffordance(visibleSearchArchiveGroups,q);
   if(!flatSessionRows.length&&q&&!searchArchiveAppended){
     const empty=document.createElement('div');
