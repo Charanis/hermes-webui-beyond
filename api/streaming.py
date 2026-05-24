@@ -198,12 +198,76 @@ WebUI progress contract:
 - For direct answers or very short tasks, skip progress updates and answer normally.
 """.strip()
 
+_PROFILE_RESPONSE_STYLE_PROMPTS = {
+    "concise": (
+        "Use a concise, direct response style. Prefer short paragraphs, omit "
+        "unnecessary preamble, and keep the answer complete without padding."
+    ),
+    "technical": (
+        "Use a precise technical response style. Include concrete implementation "
+        "details, relevant constraints, and tradeoffs when they help the user."
+    ),
+    "teacher": (
+        "Use a teacherly response style. Explain the key idea before the details, "
+        "move step by step, and include examples when they clarify the answer."
+    ),
+    "kawaii": (
+        "Use a playful, cute, upbeat response style with light kawaii phrasing. "
+        "Keep the answer useful, and reduce the styling for serious or sensitive topics."
+    ),
+    "hype": (
+        "Use a high-energy, encouraging response style. Keep momentum and confidence "
+        "high while staying accurate and grounded."
+    ),
+}
+_PROFILE_RESPONSE_STYLE_MODES = frozenset(_PROFILE_RESPONSE_STYLE_PROMPTS)
+_PROFILE_RESPONSE_STYLE_MISSING = object()
 
-def _webui_ephemeral_system_prompt(personality_prompt: Optional[str]) -> str:
+
+def _profile_response_style_prompt(config_data: Optional[dict]) -> Optional[str]:
+    """Return the profile response-style overlay prompt, if one is configured.
+
+    The profile UI persists this as ``agent.personality`` for compatibility with
+    earlier profile settings code, but WebUI treats it as a lightweight response
+    style override.  An empty/missing value is "Soul-driven": no extra style is
+    injected, so SOUL.md remains the only personality source.
+    """
+    agent_cfg = config_data.get("agent") if isinstance(config_data, dict) else None
+    if not isinstance(agent_cfg, dict):
+        return None
+    raw_mode = agent_cfg.get("personality")
+    mode = str(raw_mode).strip().lower() if isinstance(raw_mode, str) else ""
+    return _PROFILE_RESPONSE_STYLE_PROMPTS.get(mode)
+
+
+def _profile_config_for_home(profile_home) -> dict | object:
+    """Read config.yaml from a resolved profile home, bypassing global caches."""
+    if not profile_home:
+        return _PROFILE_RESPONSE_STYLE_MISSING
+    try:
+        config_path = Path(profile_home) / "config.yaml"
+        if not config_path.exists():
+            return _PROFILE_RESPONSE_STYLE_MISSING
+        import yaml as _yaml
+
+        loaded = _yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    except Exception:
+        return _PROFILE_RESPONSE_STYLE_MISSING
+    if not isinstance(loaded, dict):
+        return _PROFILE_RESPONSE_STYLE_MISSING
+    return loaded
+
+
+def _webui_ephemeral_system_prompt(
+    personality_prompt: Optional[str],
+    response_style_prompt: Optional[str] = None,
+) -> str:
     """Build WebUI-only runtime instructions that are not persisted to history."""
     parts = []
     if personality_prompt:
-        parts.append(str(personality_prompt).strip())
+        parts.append("Session personality overlay:\n" + str(personality_prompt).strip())
+    if response_style_prompt:
+        parts.append("Profile response style override:\n" + str(response_style_prompt).strip())
     parts.append(_WEBUI_VISIBLE_PROGRESS_PROMPT)
     return "\n\n".join(part for part in parts if part)
 
@@ -3154,6 +3218,9 @@ def _run_agent_streaming(
     old_session_platform = None
     old_hermes_home = None
     old_profile_env = {}
+    _profile_context_set = False
+    _profile_home_path = None
+    set_request_profile = None
 
     # MCP discovery moved to AFTER the per-profile HERMES_HOME mutation below
     # (was here at v0.51.30) — the previous placement always read the default
@@ -3391,6 +3458,7 @@ def _run_agent_streaming(
                 patch_skill_home_modules,
                 get_hermes_home_for_profile,
                 get_profile_runtime_env,
+                set_request_profile,
             )
             _profile_home_path = get_hermes_home_for_profile(getattr(s, 'profile', None))
             _profile_home = str(_profile_home_path)
@@ -3416,6 +3484,12 @@ def _run_agent_streaming(
                 _resolved_profile_name = get_active_profile_name()
             except Exception:
                 _resolved_profile_name = None
+        if _resolved_profile_name and set_request_profile is not None:
+            try:
+                set_request_profile(_resolved_profile_name)
+                _profile_context_set = True
+            except Exception:
+                logger.debug("Failed to pin streaming profile context for %s", session_id, exc_info=True)
         
         _thread_env = _build_agent_thread_env(
             _profile_runtime_env,
@@ -3896,6 +3970,9 @@ def _run_agent_streaming(
             # Read per-profile config at call time (not module-level snapshot)
             from api.config import get_config as _get_config
             _cfg = _get_config()
+            _profile_cfg = _profile_config_for_home(_profile_home_path)
+            if _profile_cfg is _PROFILE_RESPONSE_STYLE_MISSING:
+                _profile_cfg = _cfg
 
             # Per-profile toolsets — use _resolve_cli_toolsets() so MCP
             # server toolsets are included, matching native CLI behaviour.
@@ -4240,8 +4317,14 @@ def _run_agent_streaming(
             # (matches hermes-agent CLI behavior — passes via ephemeral_system_prompt)
             _personality_prompt = None
             _pname = getattr(s, 'personality', None)
+            if isinstance(_pname, str) and _pname.strip().lower() in _PROFILE_RESPONSE_STYLE_MODES:
+                # Built-in response styles are profile-level settings.  Older
+                # WebUI builds could persist them into Session.personality from
+                # legacy display.personality, which made stale sessions keep
+                # forcing e.g. kawaii even after the profile was Soul-driven.
+                _pname = None
             if _pname:
-                _agent_cfg = _cfg.get('agent', {})
+                _agent_cfg = _profile_cfg.get('agent', {}) if isinstance(_profile_cfg, dict) else {}
                 _personalities = _agent_cfg.get('personalities', {})
                 if isinstance(_personalities, dict) and _pname in _personalities:
                     _pval = _personalities[_pname]
@@ -4254,11 +4337,16 @@ def _run_agent_streaming(
                         _personality_prompt = '\n'.join(p for p in _parts if p)
                     else:
                         _personality_prompt = str(_pval)
+            _response_style_prompt = _profile_response_style_prompt(_profile_cfg)
             # Pass WebUI-only runtime guidance via ephemeral_system_prompt
-            # (agent's own mechanism). This preserves any selected personality
-            # while making long tool runs emit real user-visible interim text
-            # through interim_assistant_callback instead of frontend guesses.
-            agent.ephemeral_system_prompt = _webui_ephemeral_system_prompt(_personality_prompt)
+            # (agent's own mechanism). This preserves SOUL.md and any selected
+            # session personality, layers the profile response-style override
+            # only when configured, and keeps long tool runs emitting real
+            # user-visible interim text through interim_assistant_callback.
+            agent.ephemeral_system_prompt = _webui_ephemeral_system_prompt(
+                _personality_prompt,
+                _response_style_prompt,
+            )
             _pending_started_at = getattr(s, 'pending_started_at', None)
             # Normal chat-start sets pending_started_at before spawning this thread;
             # fallback to now only for recovered/legacy flows where that marker is absent
@@ -5518,6 +5606,12 @@ def _run_agent_streaming(
                 and getattr(s, 'pending_user_message', None)):
             update_active_run(stream_id, phase="finalizing")
             _last_resort_sync_from_core(s, stream_id, _agent_lock)
+        if _profile_context_set:
+            try:
+                from api.profiles import clear_request_profile
+                clear_request_profile()
+            except Exception:
+                logger.debug("Failed to clear streaming profile context for %s", session_id, exc_info=True)
         _clear_thread_env()  # TD1: always clear thread-local context
         with STREAMS_LOCK:
             STREAMS.pop(stream_id, None)

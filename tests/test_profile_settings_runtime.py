@@ -540,6 +540,50 @@ def test_runtime_settings_round_trip_to_profile_config():
         assert cfg["model"]["default"] == "gpt-5.5"
 
 
+@pytest.mark.parametrize("mode", ["concise", "technical", "teacher", "kawaii", "hype"])
+def test_response_mode_updates_only_selected_profile_and_preserves_soul(mode):
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        coder_dir = _seed_profile(base, "coder", {"agent": {"max_turns": 25}})
+        other_dir = _seed_profile(base, "reviewer", {"agent": {"personality": "teacher"}})
+        (coder_dir / "SOUL.md").write_text("CODER_SOUL_STAYS_PUT", encoding="utf-8")
+        (other_dir / "SOUL.md").write_text("REVIEWER_SOUL_STAYS_PUT", encoding="utf-8")
+        other_before = (other_dir / "config.yaml").read_text(encoding="utf-8")
+        profiles = _reload_profiles_module(base)
+
+        result = profiles.update_profile_settings_api("coder", response_mode=mode)
+
+        assert result["response_mode"] == mode
+        cfg = yaml.safe_load((coder_dir / "config.yaml").read_text(encoding="utf-8"))
+        assert cfg["agent"]["personality"] == mode
+        assert cfg["agent"]["max_turns"] == 25
+        assert (coder_dir / "SOUL.md").read_text(encoding="utf-8") == "CODER_SOUL_STAYS_PUT"
+        assert (other_dir / "config.yaml").read_text(encoding="utf-8") == other_before
+        assert (other_dir / "SOUL.md").read_text(encoding="utf-8") == "REVIEWER_SOUL_STAYS_PUT"
+
+
+def test_soul_driven_response_mode_clears_style_without_touching_soul():
+    with tempfile.TemporaryDirectory() as td:
+        base = Path(td) / ".hermes"
+        (base / "profiles").mkdir(parents=True)
+        profile_dir = _seed_profile(
+            base,
+            "coder",
+            {"agent": {"personality": "kawaii", "max_turns": 25}},
+        )
+        (profile_dir / "SOUL.md").write_text("CODER_SOUL_STAYS_PUT", encoding="utf-8")
+        profiles = _reload_profiles_module(base)
+
+        result = profiles.update_profile_settings_api("coder", response_mode="")
+
+        assert result["response_mode"] == ""
+        cfg = yaml.safe_load((profile_dir / "config.yaml").read_text(encoding="utf-8"))
+        assert "personality" not in cfg["agent"]
+        assert cfg["agent"]["max_turns"] == 25
+        assert (profile_dir / "SOUL.md").read_text(encoding="utf-8") == "CODER_SOUL_STAYS_PUT"
+
+
 def test_compression_update_cannot_disable_profile_compression():
     with tempfile.TemporaryDirectory() as td:
         base = Path(td) / ".hermes"

@@ -11,6 +11,10 @@
 
 ### Fixed
 
+- Profile response style now applies as a profile-scoped WebUI runtime overlay
+  for new and continued chats. Soul-driven profiles inject no extra style, and
+  built-in styles no longer depend on stale session/global personality state or
+  rewrite `SOUL.md`.
 - New WebUI sessions no longer inherit the legacy/global `display.personality`
   config key. Profile response mode remains the source of truth, so a
   Soul-Driven profile is not silently overridden by a stale built-in style such
