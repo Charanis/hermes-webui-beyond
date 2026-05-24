@@ -11,6 +11,7 @@
 
 ### Fixed
 
+- Profile Gateway cards now show where their running/stopped state came from, profile runtime settings hydrate from a per-profile cache to avoid visible cross-profile lag, and idle active-session metadata polling skips full transcript reads when the profile-aware `state.db` summary proves there is no external update.
 - Profile response style now applies as a profile-scoped WebUI runtime overlay
   for new and continued chats. Soul-driven profiles inject no extra style, and
   built-in styles no longer depend on stale session/global personality state or
