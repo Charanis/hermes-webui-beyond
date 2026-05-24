@@ -118,4 +118,3 @@ Verification must include:
 - Gateway wording could imply WebUI controls a Gateway that was only detected. Mitigation: use "Detected by..." copy.
 - Profile settings cache could apply stale settings after a rapid card switch. Mitigation: keep the existing sequence guard and selected-profile check around cached and fetched applies.
 - Session fast path could miss external updates. Mitigation: only fast-return when summary is not newer than known metadata; otherwise fall back to exact merge.
-
